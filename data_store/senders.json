@@ -1,0 +1,46 @@
+[
+  {
+    "id": "sender-primary",
+    "name": "Primary Workspace Account",
+    "email": "user@example.com",
+    "avatarUrl": "",
+    "status": "connected",
+    "isPrimary": true,
+    "dailySendLimit": 150,
+    "sendsToday": 0,
+    "lastUsedAt": "2026-09-18T00:00:00.000Z"
+  },
+  {
+    "id": "sender-sales",
+    "name": "Sales Outreach Team",
+    "email": "sales.outreach@gini-growth.com",
+    "avatarUrl": "",
+    "status": "connected",
+    "isPrimary": false,
+    "dailySendLimit": 200,
+    "sendsToday": 0,
+    "lastUsedAt": "2026-09-18T00:00:00.000Z"
+  },
+  {
+    "id": "sender-partnerships",
+    "name": "Elena Rostova (Partnerships)",
+    "email": "partnerships@gini-growth.com",
+    "avatarUrl": "",
+    "status": "connected",
+    "isPrimary": false,
+    "dailySendLimit": 150,
+    "sendsToday": 0,
+    "lastUsedAt": "2026-09-18T00:00:00.000Z"
+  },
+  {
+    "id": "sender-growth",
+    "name": "Growth & Inbound Inquiries",
+    "email": "growth.inbox@outreach-flow.io",
+    "avatarUrl": "",
+    "status": "connected",
+    "isPrimary": false,
+    "dailySendLimit": 100,
+    "sendsToday": 0,
+    "lastUsedAt": "2026-09-18T00:00:00.000Z"
+  }
+]

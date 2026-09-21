@@ -1,0 +1,40 @@
+@import "tailwindcss";
+@import "@xyflow/react/dist/style.css";
+
+@theme {
+  --color-gini-red-50: #fef2f2;
+  --color-gini-red-100: #fee2e2;
+  --color-gini-red-200: #fecaca;
+  --color-gini-red-300: #fca5a5;
+  --color-gini-red-400: #f87171;
+  --color-gini-red-500: #ef4444;
+  --color-gini-red-600: #dc2626;
+  --color-gini-red-700: #b91c1c;
+  --color-gini-red-800: #991b1b;
+  --color-gini-red-900: #7f1d1d;
+  --color-gini-red-950: #450a0a;
+}
+
+/* Custom scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #fca5a5;
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #ef4444;
+}
+
+::selection {
+  background: #dc2626;
+  color: #ffffff;
+}

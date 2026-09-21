@@ -1,0 +1,530 @@
+[
+  {
+    "id": "workflow-1789623839879",
+    "name": "Custom Campaign Flow #3",
+    "is_active": false,
+    "workflow_graph": {
+      "nodes": [],
+      "edges": []
+    },
+    "created_date": "2026-03-01T00:00:00.000Z",
+    "updated_date": "2026-09-17T06:39:41.771Z"
+  },
+  {
+    "id": "campaign-1789629028542-bzl1q",
+    "name": "Custom Campaign Flow #2",
+    "is_active": false,
+    "workflow_graph": {
+      "nodes": [],
+      "edges": []
+    },
+    "created_date": "2026-09-17T07:10:28.542Z",
+    "updated_date": "2026-09-17T07:10:29.480Z"
+  },
+  {
+    "id": "campaign-test-linear",
+    "name": "Linear Outreach Test",
+    "description": "Linear Start -> Email -> Wait flow",
+    "version": 1,
+    "is_active": true,
+    "workflow_graph": {
+      "nodes": [
+        {
+          "id": "node-start",
+          "type": "startNode",
+          "position": {
+            "x": 340,
+            "y": 50
+          },
+          "data": {
+            "label": "Outreach Trigger",
+            "nodeType": "start",
+            "description": "Enrolls qualified leads",
+            "senderId": "sender-primary",
+            "schedule": {
+              "allowedDays": [
+                1,
+                2,
+                3,
+                4,
+                5
+              ],
+              "startHour": 9,
+              "endHour": 18,
+              "timezone": "local"
+            }
+          }
+        },
+        {
+          "id": "node-email",
+          "type": "emailNode",
+          "position": {
+            "x": 340,
+            "y": 200
+          },
+          "data": {
+            "label": "Intro Email Stage 1",
+            "nodeType": "email",
+            "templateStage": 1,
+            "senderId": "sender-primary",
+            "senderEmail": "user@example.com",
+            "useCustomTemplate": true,
+            "customSubject": "Exploring synergy with {{company}}",
+            "customBody": "Hi {{first_name}},\n\nWanted to connect...",
+            "description": "First touchpoint"
+          }
+        },
+        {
+          "id": "node-wait",
+          "type": "waitNode",
+          "position": {
+            "x": 340,
+            "y": 350
+          },
+          "data": {
+            "label": "Wait 3 Business Days",
+            "nodeType": "wait",
+            "waitDuration": 3,
+            "waitUnit": "days",
+            "description": "Give lead time to review"
+          }
+        }
+      ],
+      "edges": [
+        {
+          "id": "e-node-start-def-node-email",
+          "source": "node-start",
+          "target": "node-email",
+          "type": "smoothstep",
+          "markerEnd": {
+            "type": "arrowclosed",
+            "color": "#94a3b8"
+          }
+        },
+        {
+          "id": "e-node-email-def-node-wait",
+          "source": "node-email",
+          "target": "node-wait",
+          "type": "smoothstep",
+          "markerEnd": {
+            "type": "arrowclosed",
+            "color": "#94a3b8"
+          }
+        }
+      ]
+    },
+    "created_date": "2026-09-17T09:14:28.730Z",
+    "updated_date": "2026-09-17T09:14:28.849Z"
+  },
+  {
+    "id": "campaign-test-branch-merge",
+    "name": "Condition Branch & Merge Test",
+    "description": "Condition with Yes/No branches merging back via Merge node",
+    "version": 1,
+    "is_active": true,
+    "workflow_graph": {
+      "nodes": [
+        {
+          "id": "node-start",
+          "type": "startNode",
+          "position": {
+            "x": 340,
+            "y": 50
+          },
+          "data": {
+            "label": "Start Trigger",
+            "nodeType": "start",
+            "senderId": "sender-primary"
+          }
+        },
+        {
+          "id": "node-condition",
+          "type": "conditionNode",
+          "position": {
+            "x": 340,
+            "y": 200
+          },
+          "data": {
+            "label": "Condition: Email Opened?",
+            "nodeType": "condition",
+            "conditionType": "email_opened",
+            "description": "Evaluate if prospect opened previous email"
+          }
+        },
+        {
+          "id": "node-yes-email",
+          "type": "emailNode",
+          "position": {
+            "x": 180,
+            "y": 380
+          },
+          "data": {
+            "label": "YES Path: High Intent Email",
+            "nodeType": "email",
+            "templateStage": 2,
+            "customSubject": "Glad you saw my note",
+            "useCustomTemplate": true
+          }
+        },
+        {
+          "id": "node-no-wait",
+          "type": "waitNode",
+          "position": {
+            "x": 500,
+            "y": 380
+          },
+          "data": {
+            "label": "NO Path: Wait 4 Days",
+            "nodeType": "wait",
+            "waitDuration": 4,
+            "waitUnit": "days"
+          }
+        },
+        {
+          "id": "node-merge",
+          "type": "mergeNode",
+          "position": {
+            "x": 340,
+            "y": 540
+          },
+          "data": {
+            "label": "Merge Branches",
+            "nodeType": "merge",
+            "description": "Rejoins branches into downstream flow"
+          }
+        }
+      ],
+      "edges": [
+        {
+          "id": "e-start-to-condition",
+          "source": "node-start",
+          "target": "node-condition",
+          "sourceHandle": null,
+          "targetHandle": null,
+          "type": "smoothstep"
+        },
+        {
+          "id": "e-condition-yes-to-email",
+          "source": "node-condition",
+          "target": "node-yes-email",
+          "sourceHandle": "yes",
+          "targetHandle": null,
+          "label": "YES",
+          "type": "smoothstep"
+        },
+        {
+          "id": "e-condition-no-to-wait",
+          "source": "node-condition",
+          "target": "node-no-wait",
+          "sourceHandle": "no",
+          "targetHandle": null,
+          "label": "NO",
+          "type": "smoothstep"
+        },
+        {
+          "id": "e-email-to-merge",
+          "source": "node-yes-email",
+          "target": "node-merge",
+          "sourceHandle": null,
+          "targetHandle": null,
+          "type": "smoothstep"
+        },
+        {
+          "id": "e-wait-to-merge",
+          "source": "node-no-wait",
+          "target": "node-merge",
+          "sourceHandle": null,
+          "targetHandle": null,
+          "type": "smoothstep"
+        }
+      ]
+    },
+    "created_date": "2026-09-17T09:14:37.049Z",
+    "updated_date": "2026-09-17T09:14:37.172Z"
+  },
+  {
+    "id": "campaign-linear-flow",
+    "name": "Linear Outreach Sequence",
+    "description": "Cold outreach sequence with 3-day delay",
+    "version": 1,
+    "is_active": true,
+    "workflow_graph": {
+      "nodes": [
+        {
+          "id": "node-start-001",
+          "type": "startNode",
+          "position": {
+            "x": 340,
+            "y": 50
+          },
+          "data": {
+            "label": "Campaign Trigger",
+            "nodeType": "start",
+            "description": "Starts sequence for new leads",
+            "senderId": "sender-primary",
+            "schedule": {
+              "allowedDays": [
+                1,
+                2,
+                3,
+                4,
+                5
+              ],
+              "startHour": 9,
+              "endHour": 17,
+              "timezone": "America/New_York"
+            }
+          }
+        },
+        {
+          "id": "node-email-002",
+          "type": "emailNode",
+          "position": {
+            "x": 340,
+            "y": 220
+          },
+          "data": {
+            "label": "Stage 1 Introduction",
+            "nodeType": "email",
+            "templateStage": 1,
+            "senderId": "sender-primary",
+            "senderEmail": "alex@company.com",
+            "useCustomTemplate": true,
+            "customSubject": "Quick question regarding {{company}}",
+            "customBody": "Hi {{first_name}},\n\nSaw your team at {{company}}..."
+          }
+        },
+        {
+          "id": "node-wait-003",
+          "type": "waitNode",
+          "position": {
+            "x": 340,
+            "y": 390
+          },
+          "data": {
+            "label": "Wait 3 Days",
+            "nodeType": "wait",
+            "waitDuration": 3,
+            "waitUnit": "days"
+          }
+        }
+      ],
+      "edges": [
+        {
+          "id": "e-start-to-email",
+          "source": "node-start-001",
+          "target": "node-email-002",
+          "sourceHandle": null,
+          "targetHandle": null,
+          "type": "smoothstep"
+        },
+        {
+          "id": "e-email-to-wait",
+          "source": "node-email-002",
+          "target": "node-wait-003",
+          "sourceHandle": null,
+          "targetHandle": null,
+          "type": "smoothstep"
+        }
+      ]
+    },
+    "created_date": "2026-09-17T09:19:37.029Z",
+    "updated_date": "2026-09-17T09:19:37.155Z"
+  },
+  {
+    "id": "campaign-branch-merge-flow",
+    "name": "Condition & Merge Sequence",
+    "description": "Condition node branching Yes/No and merging back via Merge node",
+    "version": 1,
+    "is_active": true,
+    "workflow_graph": {
+      "nodes": [
+        {
+          "id": "node-start-b",
+          "type": "startNode",
+          "position": {
+            "x": 340,
+            "y": 50
+          },
+          "data": {
+            "label": "Start Trigger",
+            "nodeType": "start"
+          }
+        },
+        {
+          "id": "node-cond-b",
+          "type": "conditionNode",
+          "position": {
+            "x": 340,
+            "y": 190
+          },
+          "data": {
+            "label": "Has Opened Email?",
+            "nodeType": "condition",
+            "conditionType": "email_opened"
+          }
+        },
+        {
+          "id": "node-yes-email-b",
+          "type": "emailNode",
+          "position": {
+            "x": 160,
+            "y": 350
+          },
+          "data": {
+            "label": "YES Branch: Stage 2 Follow-Up",
+            "nodeType": "email",
+            "templateStage": 2,
+            "useCustomTemplate": true,
+            "customSubject": "Regarding our previous conversation"
+          }
+        },
+        {
+          "id": "node-no-wait-b",
+          "type": "waitNode",
+          "position": {
+            "x": 520,
+            "y": 350
+          },
+          "data": {
+            "label": "NO Branch: Wait 5 Days",
+            "nodeType": "wait",
+            "waitDuration": 5,
+            "waitUnit": "days"
+          }
+        },
+        {
+          "id": "node-merge-b",
+          "type": "mergeNode",
+          "position": {
+            "x": 340,
+            "y": 510
+          },
+          "data": {
+            "label": "Rejoin Flow",
+            "nodeType": "merge",
+            "description": "Branches merge back here"
+          }
+        },
+        {
+          "id": "node-task-b",
+          "type": "manualTaskNode",
+          "position": {
+            "x": 340,
+            "y": 650
+          },
+          "data": {
+            "label": "Post-Merge Call Task",
+            "nodeType": "manual_task",
+            "taskTitle": "Review prospect account",
+            "taskPriority": "high"
+          }
+        }
+      ],
+      "edges": [
+        {
+          "id": "e-start-to-cond",
+          "source": "node-start-b",
+          "target": "node-cond-b",
+          "sourceHandle": null,
+          "targetHandle": null,
+          "type": "smoothstep"
+        },
+        {
+          "id": "e-cond-yes-to-email",
+          "source": "node-cond-b",
+          "target": "node-yes-email-b",
+          "sourceHandle": "yes",
+          "targetHandle": null,
+          "label": "YES",
+          "type": "smoothstep"
+        },
+        {
+          "id": "e-cond-no-to-wait",
+          "source": "node-cond-b",
+          "target": "node-no-wait-b",
+          "sourceHandle": "no",
+          "targetHandle": null,
+          "label": "NO",
+          "type": "smoothstep"
+        },
+        {
+          "id": "e-yes-email-to-merge",
+          "source": "node-yes-email-b",
+          "target": "node-merge-b",
+          "sourceHandle": null,
+          "targetHandle": null,
+          "type": "smoothstep"
+        },
+        {
+          "id": "e-no-wait-to-merge",
+          "source": "node-no-wait-b",
+          "target": "node-merge-b",
+          "sourceHandle": null,
+          "targetHandle": null,
+          "type": "smoothstep"
+        },
+        {
+          "id": "e-merge-to-task",
+          "source": "node-merge-b",
+          "target": "node-task-b",
+          "sourceHandle": null,
+          "targetHandle": null,
+          "type": "smoothstep"
+        }
+      ]
+    },
+    "created_date": "2026-09-17T09:19:37.174Z",
+    "updated_date": "2026-09-17T09:19:37.177Z"
+  },
+  {
+    "id": "test-wf-1789719339147",
+    "name": "Sender Test Workflow",
+    "description": "Testing sender selection persistence",
+    "isActive": true,
+    "nodes": [
+      {
+        "id": "start-1",
+        "type": "startNode",
+        "position": {
+          "x": 100,
+          "y": 100
+        },
+        "data": {
+          "label": "Campaign Trigger",
+          "nodeType": "start",
+          "senderId": "sender-sales",
+          "senderEmail": "sales.outreach@gini-growth.com"
+        }
+      },
+      {
+        "id": "email-1",
+        "type": "emailNode",
+        "position": {
+          "x": 100,
+          "y": 250
+        },
+        "data": {
+          "label": "Email Stage 1",
+          "nodeType": "email",
+          "templateStage": 1,
+          "senderId": "sender-partnerships",
+          "senderEmail": "partnerships@gini-growth.com"
+        }
+      }
+    ],
+    "edges": [
+      {
+        "id": "e1",
+        "source": "start-1",
+        "target": "email-1"
+      }
+    ],
+    "version": 1,
+    "workflow_graph": {
+      "description": "Testing sender selection persistence",
+      "version": 1
+    },
+    "updated_date": "2026-09-18T08:15:39.162Z"
+  }
+]

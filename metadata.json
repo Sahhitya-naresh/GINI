@@ -1,0 +1,6 @@
+{
+  "name": "Outreach Flow",
+  "description": "Cold outreach campaign automation with a drag-and-drop node-based workflow builder, multi-channel branch logic, Gmail Workspace sender management, and Google Sheets lead synchronization.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
