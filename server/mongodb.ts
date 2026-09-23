@@ -2,6 +2,10 @@ import { MongoClient, Db } from 'mongodb';
 import fs from 'fs';
 import path from 'path';
 
+// DIAGNOSTIC CHECK: Confirm 'mongodb' package import succeeded
+const isMongoPackageLoaded = typeof MongoClient === 'function';
+console.log(`[MongoDB Diagnostics] Step 1: Package "mongodb" module import check: ${isMongoPackageLoaded ? 'SUCCESS (MongoClient constructor is loaded)' : 'FAILED'}`);
+
 export const COLLECTIONS = {
   LEADS: 'leads',
   CAMPAIGNS: 'campaigns',
@@ -25,6 +29,16 @@ export interface MongoStatusInfo {
     trackingEvents: number;
   };
   error?: string;
+  diagnostics?: {
+    mongoPackageLoaded: boolean;
+    hasMongoUri: boolean;
+    uriLength?: number;
+    nodeEnv?: string;
+    isVercel?: boolean;
+    errorName?: string;
+    errorCode?: string | number;
+    errorMessage?: string;
+  };
 }
 
 interface MongoGlobalState {
@@ -34,6 +48,13 @@ interface MongoGlobalState {
   memoryServer?: any;
   uriSource: 'env_uri' | 'memory_server' | 'none';
   isSeeded: boolean;
+  lastError?: {
+    name: string;
+    message: string;
+    code?: string | number;
+    codeName?: string;
+    timestamp: string;
+  };
 }
 
 declare global {
@@ -66,17 +87,37 @@ export async function getMongoClient(): Promise<MongoClient> {
   }
 
   state.promise = (async () => {
-    let uri = (process.env.MONGODB_URI || '').trim();
-    let source: 'env_uri' | 'memory_server' | 'none' = 'none';
+    const rawUri = process.env.MONGODB_URI || '';
+    const trimmedUri = rawUri.trim();
+    const hasMongoUri = Boolean(trimmedUri && trimmedUri.length > 0);
+    const uriLength = trimmedUri.length;
 
     const isProduction = process.env.NODE_ENV === 'production' || process.env.VERCEL === '1';
     const isDevelopment = !isProduction && (process.env.NODE_ENV === 'development' || !process.env.NODE_ENV || process.env.NODE_ENV === 'test');
 
+    console.log('[MongoDB Diagnostics] ==========================================');
+    console.log('[MongoDB Diagnostics] Connection attempt started.');
+    console.log('[MongoDB Diagnostics] Step 1: Package "mongodb" module loaded:', isMongoPackageLoaded);
+    console.log('[MongoDB Diagnostics] Step 2: Runtime environment inspection:', {
+      hasMongoUri,
+      uriLength,
+      NODE_ENV: process.env.NODE_ENV || '(unset)',
+      VERCEL: process.env.VERCEL || '(unset)',
+      VERCEL_ENV: process.env.VERCEL_ENV || '(unset)',
+      isProduction,
+      isDevelopment
+    });
+
+    let uri = trimmedUri;
+    let source: 'env_uri' | 'memory_server' | 'none' = 'none';
+
     if (uri) {
       source = 'env_uri';
+      console.log(`[MongoDB Diagnostics] MONGODB_URI detected in environment (Length: ${uriLength} chars). Connecting via env URI.`);
     } else if (isDevelopment) {
       // Local development fallback: dynamically imported ONLY when MONGODB_URI is absent
       // and NODE_ENV is development. Never imported, required, or bundled in production.
+      console.log('[MongoDB Diagnostics] MONGODB_URI not detected. Local development detected: attempting MongoMemoryServer fallback...');
       try {
         const memPackage = 'mongodb-memory-server';
         const { MongoMemoryServer } = await import(memPackage);
@@ -87,36 +128,75 @@ export async function getMongoClient(): Promise<MongoClient> {
         }
         uri = state.memoryServer.getUri();
         source = 'memory_server';
-        console.log(`[MongoDB] Initialized local dev memory server at: ${uri}`);
+        console.log(`[MongoDB Diagnostics] Initialized local dev memory server at: ${uri}`);
       } catch (err: any) {
-        console.warn('[MongoDB] MongoMemoryServer not available in development:', err.message);
+        console.warn('[MongoDB Diagnostics] MongoMemoryServer not available in development:', err.message);
       }
+    } else {
+      console.error('[MongoDB Diagnostics] CRITICAL: Running in production/Vercel but MONGODB_URI is missing or empty!');
     }
 
     if (!uri) {
       state.uriSource = 'none';
-      throw new Error('MONGODB_URI environment variable is required to connect to MongoDB.');
+      const missingUriErr = new Error('MONGODB_URI environment variable is required to connect to MongoDB in production.');
+      (missingUriErr as any).code = 'ERR_MISSING_MONGODB_URI';
+      state.lastError = {
+        name: missingUriErr.name,
+        message: missingUriErr.message,
+        code: 'ERR_MISSING_MONGODB_URI',
+        timestamp: new Date().toISOString()
+      };
+      throw missingUriErr;
     }
 
     state.uriSource = source;
     const dbName = process.env.MONGODB_DB_NAME || 'outreach_flow';
 
+    console.log(`[MongoDB Diagnostics] Step 3: Instantiating MongoClient for database: "${dbName}"...`);
     const client = new MongoClient(uri, {
       maxPoolSize: 10,
       serverSelectionTimeoutMS: 5000,
       connectTimeoutMS: 10000,
     });
 
-    await client.connect();
-    state.client = client;
-    state.db = client.db(dbName);
-    console.log(`[MongoDB] Connected successfully to database: "${dbName}" (${source})`);
+    try {
+      console.log('[MongoDB Diagnostics] Step 4: Calling client.connect()...');
+      await client.connect();
+      state.client = client;
+      state.db = client.db(dbName);
+      state.lastError = undefined;
+      console.log(`[MongoDB Diagnostics] SUCCESS: Connected successfully to MongoDB database: "${dbName}" (source: ${source})`);
 
-    // Ensure indexes and seed data if collections are empty
-    await ensureIndexesAndSeed(state.db);
+      // Ensure indexes and seed data if collections are empty
+      await ensureIndexesAndSeed(state.db);
 
-    return client;
-  })();
+      return client;
+    } catch (err: any) {
+      console.error('[MongoDB Diagnostics] FAILED: client.connect() encountered an error!');
+      console.error('[MongoDB Diagnostics] Error Name:', err?.name);
+      console.error('[MongoDB Diagnostics] Error Message:', err?.message);
+      console.error('[MongoDB Diagnostics] Error Code:', err?.code);
+      console.error('[MongoDB Diagnostics] Error CodeName:', err?.codeName);
+      if (err?.stack) {
+        console.error('[MongoDB Diagnostics] Stack Trace:', err.stack);
+      }
+      state.lastError = {
+        name: err?.name || 'Error',
+        message: err?.message || 'Unknown connection error',
+        code: err?.code,
+        codeName: err?.codeName,
+        timestamp: new Date().toISOString()
+      };
+      // Reset state.promise so subsequent calls can re-attempt rather than being locked
+      state.promise = null;
+      throw err;
+    } finally {
+      console.log('[MongoDB Diagnostics] ==========================================');
+    }
+  })().catch(err => {
+    state.promise = null;
+    throw err;
+  });
 
   return state.promise;
 }
@@ -398,15 +478,33 @@ export async function getMongoStatus(): Promise<MongoStatusInfo> {
         senders,
         settings,
         trackingEvents
+      },
+      diagnostics: {
+        mongoPackageLoaded: isMongoPackageLoaded,
+        hasMongoUri: Boolean(process.env.MONGODB_URI && process.env.MONGODB_URI.trim().length > 0),
+        uriLength: process.env.MONGODB_URI ? process.env.MONGODB_URI.trim().length : 0,
+        nodeEnv: process.env.NODE_ENV,
+        isVercel: Boolean(process.env.VERCEL === '1')
       }
     };
   } catch (err: any) {
+    const hasMongoUri = Boolean(process.env.MONGODB_URI && process.env.MONGODB_URI.trim().length > 0);
     return {
       connected: false,
       status: 'error',
       database: '',
       source: state.uriSource,
-      error: err.message || 'Unable to connect to MongoDB'
+      error: err.message || 'Unable to connect to MongoDB',
+      diagnostics: {
+        mongoPackageLoaded: isMongoPackageLoaded,
+        hasMongoUri,
+        uriLength: process.env.MONGODB_URI ? process.env.MONGODB_URI.trim().length : 0,
+        nodeEnv: process.env.NODE_ENV,
+        isVercel: Boolean(process.env.VERCEL === '1'),
+        errorName: err?.name || state.lastError?.name,
+        errorCode: err?.code || state.lastError?.code,
+        errorMessage: err?.message || state.lastError?.message
+      }
     };
   }
 }
