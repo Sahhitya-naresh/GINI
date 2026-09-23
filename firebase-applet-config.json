@@ -1,11 +1,9 @@
 {
-  "projectId": "gen-lang-client-0136379789",
-  "appId": "1:333028059622:web:be1e2bedc7f8414e650e27",
-  "apiKey": "AIzaSyAMDnn5yWYl9sHSXK0LjoXNjz7jVzBjLhQ",
-  "authDomain": "gen-lang-client-0136379789.firebaseapp.com",
-  "storageBucket": "gen-lang-client-0136379789.firebasestorage.app",
-  "messagingSenderId": "333028059622",
-  "measurementId": "",
-  "oAuthClientId": "333028059622-q8iqq9iga0i4156mi6cpe2ooooejjjem.apps.googleusercontent.com",
-  "recaptchaSiteKey": ""
+  "apiKey": "AIzaSyAaCn_zCa5jDV-zqmktOY78ZqCkxyWz8Pg",
+  "authDomain": "gini-outflow.firebaseapp.com",
+  "projectId": "gini-outflow",
+  "storageBucket": "gini-outflow.firebasestorage.app",
+  "messagingSenderId": "1058914674097",
+  "appId": "1:1058914674097:web:689f2e6e2ab3317ea04990",
+  "measurementId": "G-RC2HP6QMGZ"
 }
