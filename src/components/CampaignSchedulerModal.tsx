@@ -2,7 +2,7 @@ import React, { useState, useMemo } from 'react';
 import { Lead, StageTemplate, AppSettings, SendLogEntry, CampaignWorkflow, ConnectedSender, LeadManualTask } from '../types';
 import { isLeadDueForNextSend, addBusinessDays, getTodayDateString, formatDisplayDate } from '../utils/dateUtils';
 import { checkThreadForLeadReply, sendStageEmail } from '../services/gmailService';
-import { updateLeadRow } from '../services/sheetsService';
+import { updateLead } from '../services/leadBackendService';
 import { isWithinSchedule, evaluateCondition, findNextNode, getLeadCurrentNodeId } from '../services/workflowService';
 import { 
   X, 
@@ -157,8 +157,8 @@ export const CampaignSchedulerModal: React.FC<CampaignSchedulerModalProps> = ({
                 : `Reply detected on ${today}`
             };
 
-            // Update in Google Sheet
-            await updateLeadRow(token, spreadsheetId, updatedLead);
+            // Update in MongoDB database
+            await updateLead(updatedLead, token || undefined, spreadsheetId);
 
             // Update local copy
             const idx = updatedLeadsList.findIndex(l => l.leadId === targetLead.leadId);
@@ -267,7 +267,7 @@ export const CampaignSchedulerModal: React.FC<CampaignSchedulerModalProps> = ({
             status: 'Broke Up',
             notes: targetLead.notes ? `${targetLead.notes} | [Completed sequence - Broke Up]` : 'Completed sequence - Broke Up'
           };
-          await updateLeadRow(token, spreadsheetId, updatedLead);
+          await updateLead(updatedLead, token || undefined, spreadsheetId);
           const idx = updatedLeadsList.findIndex(l => l.leadId === targetLead.leadId);
           if (idx !== -1) updatedLeadsList[idx] = updatedLead;
 
@@ -339,7 +339,9 @@ export const CampaignSchedulerModal: React.FC<CampaignSchedulerModalProps> = ({
           targetLead,
           stageTemplate,
           userEmail,
-          effectiveSenderName
+          effectiveSenderName,
+          undefined,
+          senderObj?.provider || 'gmail'
         );
 
         // Increment sender sends count
@@ -388,8 +390,8 @@ export const CampaignSchedulerModal: React.FC<CampaignSchedulerModalProps> = ({
           }
         }
 
-        // Update in Google Sheet
-        await updateLeadRow(token, spreadsheetId, updatedLead);
+        // Update in MongoDB database
+        await updateLead(updatedLead, token || undefined, spreadsheetId);
 
         // Update local copy
         const idx = updatedLeadsList.findIndex(l => l.leadId === targetLead.leadId);
@@ -576,8 +578,8 @@ export const CampaignSchedulerModal: React.FC<CampaignSchedulerModalProps> = ({
                 </div>
               ) : (
                 <div className="max-h-48 overflow-y-auto border border-slate-200 rounded-lg divide-y divide-slate-100">
-                  {dueLeads.map((lead) => (
-                    <div key={lead.leadId} className="p-2.5 flex items-center justify-between text-xs hover:bg-slate-50">
+                  {dueLeads.map((lead, idx) => (
+                    <div key={lead.leadId || `due-lead-${lead.email || ''}-${idx}`} className="p-2.5 flex items-center justify-between text-xs hover:bg-slate-50">
                       <div>
                         <strong className="text-slate-900">{lead.name}</strong>
                         <span className="text-slate-500 ml-1">({lead.company})</span>

@@ -571,12 +571,37 @@ export default function App() {
     return () => unsubscribe();
   }, []);
 
+// Helper to ensure leads array is strictly de-duplicated by leadId and email
+function deduplicateLeads(leadList: Lead[]): Lead[] {
+  const seenIds = new Set<string>();
+  const seenEmails = new Set<string>();
+  const result: Lead[] = [];
+
+  for (const item of leadList) {
+    if (!item) continue;
+    const cleanId = (item.leadId || '').trim();
+    const cleanEmail = (item.email || '').trim().toLowerCase();
+
+    if (!cleanId && !cleanEmail) continue;
+    if (cleanId && seenIds.has(cleanId)) continue;
+    if (cleanEmail && seenEmails.has(cleanEmail)) continue;
+
+    if (cleanId) seenIds.add(cleanId);
+    if (cleanEmail) seenEmails.add(cleanEmail);
+
+    result.push(item);
+  }
+
+  return result;
+}
+
   // 2. Fetch Leads when token or spreadsheetId changes
   const syncWithSheet = useCallback(async () => {
     if (!token || !spreadsheetId) return;
     setIsSyncing(true);
     try {
-      const fetched = await listLeads(token, spreadsheetId);
+      const rawFetched = await listLeads(token, spreadsheetId);
+      const fetched = deduplicateLeads(rawFetched);
       if (fetched.length > 0) {
         // Merge with current tracking metrics so server-logged open/clicks are not wiped out
         try {
@@ -584,7 +609,7 @@ export default function App() {
           if (stats) {
             if (stats.events) setTrackingEvents(stats.events);
             if (stats.statsByLead) {
-              const merged = mergeTrackingWithLeads(fetched, stats.statsByLead);
+              const merged = deduplicateLeads(mergeTrackingWithLeads(fetched, stats.statsByLead));
               setLeads(merged);
               setSelectedLead(prev => {
                 if (!prev) return null;
@@ -621,14 +646,15 @@ export default function App() {
   // Load persistent leads from backend database on initial load if not yet connected to a Sheet
   useEffect(() => {
     if (!token || !spreadsheetId) {
-      fetchLeadsFromBackend().then(async backendLeads => {
+      fetchLeadsFromBackend().then(async rawBackendLeads => {
+        const backendLeads = deduplicateLeads(rawBackendLeads || []);
         if (backendLeads && backendLeads.length > 0) {
           try {
             const stats = await fetchTrackingStats();
             if (stats) {
               if (stats.events) setTrackingEvents(stats.events);
               if (stats.statsByLead) {
-                setLeads(mergeTrackingWithLeads(backendLeads, stats.statsByLead));
+                setLeads(deduplicateLeads(mergeTrackingWithLeads(backendLeads, stats.statsByLead)));
                 return;
               }
             }
@@ -757,7 +783,17 @@ export default function App() {
   const handleAddLead = async (newLead: Lead) => {
     try {
       const saved = await createLead(newLead, token || undefined, spreadsheetId || undefined);
-      setLeads(prev => [...prev, saved]);
+      setLeads(prev => {
+        const existingIdx = prev.findIndex(
+          l => l.leadId === saved.leadId || (l.email && l.email.toLowerCase() === saved.email?.toLowerCase())
+        );
+        if (existingIdx !== -1) {
+          const copy = [...prev];
+          copy[existingIdx] = { ...copy[existingIdx], ...saved };
+          return copy;
+        }
+        return [...prev, saved];
+      });
       showToast(`Lead ${saved.name} added successfully!`, 'success');
     } catch (e: any) {
       console.error('Failed to add lead:', e);
@@ -787,7 +823,20 @@ export default function App() {
   const handleCommitImport = async (importedLeads: Partial<Lead>[]) => {
     try {
       const savedLeads = await batchCreateLeads(importedLeads, token || undefined, spreadsheetId || undefined);
-      setLeads(prev => [...prev, ...savedLeads]);
+      setLeads(prev => {
+        const copy = [...prev];
+        for (const saved of savedLeads) {
+          const idx = copy.findIndex(
+            l => l.leadId === saved.leadId || (l.email && l.email.toLowerCase() === saved.email?.toLowerCase())
+          );
+          if (idx !== -1) {
+            copy[idx] = { ...copy[idx], ...saved };
+          } else {
+            copy.push(saved);
+          }
+        }
+        return copy;
+      });
       showToast(`Successfully imported and committed ${savedLeads.length} leads!`, 'success');
     } catch (err: any) {
       console.error('Failed to batch append to sheet:', err);
@@ -1235,7 +1284,9 @@ export default function App() {
         isOpen={isAddLeadOpen}
         onClose={() => setIsAddLeadOpen(false)}
         onAddLead={handleAddLead}
+        existingLeads={leads}
         existingLeadsCount={leads.length}
+        existingCount={leads.length}
       />
 
       {/* CSV / Excel Lead Import Modal */}

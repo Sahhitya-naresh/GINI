@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { X, UserPlus, AlertCircle } from 'lucide-react';
 import { Lead } from '../types';
 
@@ -6,15 +6,36 @@ interface AddLeadModalProps {
   isOpen: boolean;
   onClose: () => void;
   onAddLead: (lead: Lead) => Promise<void>;
-  existingCount: number;
+  existingLeads?: Lead[];
+  existingLeadsCount?: number;
+  existingCount?: number;
 }
 
 export const AddLeadModal: React.FC<AddLeadModalProps> = ({
   isOpen,
   onClose,
   onAddLead,
+  existingLeads,
+  existingLeadsCount,
   existingCount
 }) => {
+  const computeNextLeadId = (): string => {
+    let maxId = 100;
+    if (Array.isArray(existingLeads) && existingLeads.length > 0) {
+      existingLeads.forEach(l => {
+        const m = String(l?.leadId || '').match(/LEAD-(\d+)/i);
+        if (m) {
+          const n = parseInt(m[1], 10);
+          if (!isNaN(n) && n > maxId) maxId = n;
+        }
+      });
+      return `LEAD-${maxId + 1}`;
+    }
+    const countVal = Number(existingLeadsCount ?? existingCount ?? 0);
+    const safeCount = !isNaN(countVal) && countVal >= 0 ? countVal : 0;
+    return `LEAD-${100 + safeCount + 1}`;
+  };
+
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [company, setCompany] = useState('');
@@ -25,9 +46,23 @@ export const AddLeadModal: React.FC<AddLeadModalProps> = ({
     const today = new Date();
     return today.toISOString().split('T')[0];
   });
-  const [leadId, setLeadId] = useState(`LEAD-${String(existingCount + 1).padStart(3, '0')}`);
+  const [leadId, setLeadId] = useState(computeNextLeadId);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (isOpen) {
+      setName('');
+      setEmail('');
+      setCompany('');
+      setPainPoint('');
+      setNotes('');
+      setCurrentStage(0);
+      setNextSendDate(new Date().toISOString().split('T')[0]);
+      setLeadId(computeNextLeadId());
+      setError(null);
+    }
+  }, [isOpen]);
 
   if (!isOpen) return null;
 

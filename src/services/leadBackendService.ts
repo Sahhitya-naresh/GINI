@@ -183,50 +183,9 @@ async function getLeadsSheetId(token: string, spreadsheetId: string): Promise<nu
 // ---------------------------------------------------------------------------
 
 /**
- * List all leads: Reads directly from the connected Google Sheet via Sheets API
- * if credentials are provided, or falls back to server-side backend persistence.
+ * List all leads: Reads directly from MongoDB backend persistence.
  */
 export async function listLeads(token?: string, spreadsheetId?: string): Promise<Lead[]> {
-  if (token && spreadsheetId) {
-    try {
-      // Direct call to Google Sheets API
-      let res = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Leads!A1:W1000`, {
-        headers: { Authorization: `Bearer ${token}` }
-      });
-
-      if (!res.ok) {
-        // Fallback to first sheet range if sheet tab name differs
-        res = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/A1:W1000`, {
-          headers: { Authorization: `Bearer ${token}` }
-        });
-      }
-
-      if (res.ok) {
-        const data = await res.json();
-        const leads = parseSheetRowsToLeads(data.values || []);
-
-        // Sync leads to backend server for resilience & background job execution
-        fetch('/api/leads/batch', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${token}`,
-            'x-spreadsheet-id': spreadsheetId
-          },
-          body: JSON.stringify({ leads, spreadsheetId })
-        }).catch(() => {});
-
-        return leads;
-      } else {
-        const err = await res.json().catch(() => ({}));
-        console.warn('Direct Google Sheet read failed:', err.error?.message || res.statusText);
-      }
-    } catch (err) {
-      console.warn('Error reading directly from Google Sheet API:', err);
-    }
-  }
-
-  // Fallback to backend API / local database
   try {
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     if (token) headers['Authorization'] = `Bearer ${token}`;
@@ -245,9 +204,33 @@ export async function listLeads(token?: string, spreadsheetId?: string): Promise
       }
     }
   } catch (err) {
-    console.warn('Backend fetch leads fallback notice:', err);
+    console.warn('Backend listLeads fetch error:', err);
   }
+  return [];
+}
 
+/**
+ * Kept for reference / migration: reads directly from Google Sheet via Sheets API
+ */
+export async function listLeadsFromSheet(token: string, spreadsheetId: string): Promise<Lead[]> {
+  try {
+    let res = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Leads!A1:W1000`, {
+      headers: { Authorization: `Bearer ${token}` }
+    });
+
+    if (!res.ok) {
+      res = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/A1:W1000`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+    }
+
+    if (res.ok) {
+      const data = await res.json();
+      return parseSheetRowsToLeads(data.values || []);
+    }
+  } catch (err) {
+    console.warn('Direct Google Sheet read error:', err);
+  }
   return [];
 }
 
@@ -282,8 +265,7 @@ export function formatNetworkError(err: any): string {
 }
 
 /**
- * Create a new lead: Directly persists to the Google Sheet using Google Sheets API v4 append
- * and confirms reflection by re-fetching from the Sheets API before returning.
+ * Create a new lead: Directly persists to MongoDB backend as the single source of truth.
  */
 export async function createLead(
   leadData: Partial<Lead>,
@@ -322,106 +304,140 @@ export async function createLead(
     rowIndex: leadData.rowIndex
   };
 
-  // 1. If Google Sheet is connected, write DIRECTLY to Google Sheets API
-  if (token && spreadsheetId) {
-    const rowValues = leadToRowArray(completeLead);
-    const appendUrl = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Leads!A:AA:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`;
-    
-    let res: Response;
-    try {
-      res = await fetch(appendUrl, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          values: [rowValues]
-        })
-      });
-    } catch (netErr: any) {
-      throw new Error(formatNetworkError(netErr));
-    }
-
-    if (!res.ok) {
-      const errJson = await res.json().catch(() => ({}));
-      throw new Error(formatSheetsApiError(res.status, errJson, 'Failed to append lead to Google Sheet'));
-    }
-
-    // MANDATORY CONFIRMATION: Re-fetch directly from the Sheets API to verify reflection in the actual Sheet
-    try {
-      const confirmRes = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Leads!A1:AA1000`, {
-        headers: { Authorization: `Bearer ${token}` }
-      });
-      if (!confirmRes.ok) {
-        const errJson = await confirmRes.json().catch(() => ({}));
-        throw new Error(formatSheetsApiError(confirmRes.status, errJson, 'Failed to verify lead in Google Sheet'));
-      }
-      const confirmData = await confirmRes.json();
-      const verifiedLeads = parseSheetRowsToLeads(confirmData.values || []);
-      const matchedLead = verifiedLeads.find(l => l.leadId === completeLead.leadId || (l.email && l.email.toLowerCase() === completeLead.email.toLowerCase()));
-      if (!matchedLead) {
-        throw new Error(`Write verification failed: Lead "${completeLead.name}" (${completeLead.leadId}) was not found in the Google Sheet after write.`);
-      }
-      completeLead.rowIndex = matchedLead.rowIndex;
-    } catch (verifyErr: any) {
-      throw new Error(verifyErr.message || 'Verification of lead creation in Google Sheet failed.');
-    }
-  }
-
-  // 2. Mirror write to backend database for redundancy & background execution
-  // Pass alreadySyncedToSheet: true if the client already wrote to Google Sheets to prevent duplicate rows
   try {
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     if (token) headers['Authorization'] = `Bearer ${token}`;
-    if (spreadsheetId) headers['x-spreadsheet-id'] = spreadsheetId;
 
     const backendRes = await fetch('/api/leads/create', {
       method: 'POST',
       headers,
-      body: JSON.stringify({ 
-        lead: completeLead, 
-        spreadsheetId,
-        alreadySyncedToSheet: Boolean(token && spreadsheetId)
-      })
+      body: JSON.stringify({ lead: completeLead })
     });
 
     if (backendRes.ok) {
       const bData = await backendRes.json();
-      if (bData.lead && !completeLead.rowIndex) {
-        completeLead.rowIndex = bData.lead.rowIndex;
+      if (bData.lead) {
+        return bData.lead;
       }
+    } else {
+      const errJson = await backendRes.json().catch(() => ({}));
+      throw new Error(errJson.error || 'Failed to persist lead to MongoDB');
     }
-  } catch (err) {
-    console.warn('Backend create mirror warning:', err);
+  } catch (err: any) {
+    console.warn('Backend createLead warning:', err);
+    throw err;
   }
 
   return completeLead;
 }
 
 /**
- * Update an existing lead: Directly persists to Google Sheet via Sheets API PUT
- * and confirms reflection by re-fetching from the Sheets API before completing.
+ * Kept for reference / migration: creates lead directly in Google Sheet
+ */
+export async function createLeadInSheet(
+  leadData: Partial<Lead>,
+  token?: string,
+  spreadsheetId?: string
+): Promise<Lead> {
+  const today = getTodayDateString();
+  const firstName = (leadData.firstName || '').trim();
+  const lastName = (leadData.lastName || '').trim();
+  const name = (leadData.name || (firstName && lastName ? `${firstName} ${lastName}` : firstName || 'Prospect')).trim();
+
+  const completeLead: Lead = {
+    leadId: leadData.leadId || `LEAD-${Date.now().toString().slice(-4)}`,
+    name,
+    firstName: firstName || name.split(' ')[0],
+    lastName: lastName || (name.split(' ').slice(1).join(' ') || ''),
+    email: (leadData.email || '').trim().toLowerCase(),
+    company: (leadData.company || 'Company').trim(),
+    painPoint: (leadData.painPoint || '').trim(),
+    currentStage: leadData.currentStage !== undefined ? leadData.currentStage : 0,
+    status: leadData.status || 'Active',
+    lastEmailSentDate: leadData.lastEmailSentDate || '',
+    nextSendDate: leadData.nextSendDate || today,
+    threadId: leadData.threadId || '',
+    notes: (leadData.notes || '').trim(),
+    jobTitle: (leadData.jobTitle || '').trim(),
+    linkedinUrl: (leadData.linkedinUrl || '').trim(),
+    industry: (leadData.industry || '').trim(),
+    campaign: (leadData.campaign || 'Default').trim(),
+    opensCount: leadData.opensCount || 0,
+    firstOpenedDate: leadData.firstOpenedDate || '',
+    lastOpenedDate: leadData.lastOpenedDate || '',
+    clicksCount: leadData.clicksCount || 0,
+    firstClickedDate: leadData.firstClickedDate || '',
+    lastClickedDate: leadData.lastClickedDate || '',
+    rowIndex: leadData.rowIndex
+  };
+
+  if (token && spreadsheetId) {
+    const rowValues = leadToRowArray(completeLead);
+    const appendUrl = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Leads!A:AA:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`;
+    
+    const res = await fetch(appendUrl, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ values: [rowValues] })
+    });
+
+    if (!res.ok) {
+      const errJson = await res.json().catch(() => ({}));
+      throw new Error(formatSheetsApiError(res.status, errJson, 'Failed to append lead to Google Sheet'));
+    }
+  }
+
+  return completeLead;
+}
+
+/**
+ * Update an existing lead: Directly persists to MongoDB backend as the single source of truth.
  */
 export async function updateLead(
   lead: Lead,
   token?: string,
   spreadsheetId?: string
 ): Promise<Lead> {
-  // 1. If Google Sheet is connected, update row directly in Google Sheets
+  try {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+
+    const res = await fetch('/api/leads/update', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ lead })
+    });
+
+    if (res.ok) {
+      const data = await res.json();
+      if (data.lead) return data.lead;
+    }
+  } catch (err) {
+    console.warn('Backend updateLead error:', err);
+  }
+
+  return lead;
+}
+
+/**
+ * Kept for reference / migration: updates lead in Google Sheet
+ */
+export async function updateLeadInSheet(
+  lead: Lead,
+  token?: string,
+  spreadsheetId?: string
+): Promise<Lead> {
   if (token && spreadsheetId) {
     let targetRow = lead.rowIndex;
 
-    // If rowIndex is unknown, locate row by Lead ID in column A
     if (!targetRow || targetRow < 2) {
-      try {
-        const idColRes = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Leads!A1:A1000`, {
-          headers: { Authorization: `Bearer ${token}` }
-        });
-        if (!idColRes.ok) {
-          const errJson = await idColRes.json().catch(() => ({}));
-          throw new Error(formatSheetsApiError(idColRes.status, errJson, 'Failed to locate lead row in Google Sheet'));
-        }
+      const idColRes = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Leads!A1:A1000`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (idColRes.ok) {
         const idData = await idColRes.json();
         const rows = idData.values || [];
         for (let i = 1; i < rows.length; i++) {
@@ -431,85 +447,30 @@ export async function updateLead(
             break;
           }
         }
-      } catch (err: any) {
-        throw new Error(formatNetworkError(err));
       }
     }
 
-    if (!targetRow || targetRow < 2) {
-      throw new Error(`Cannot update lead in Google Sheet: Lead ID "${lead.leadId}" not found in sheet.`);
-    }
+    if (targetRow && targetRow >= 2) {
+      const rowValues = leadToRowArray(lead);
+      const range = `Leads!A${targetRow}:W${targetRow}`;
+      const updateUrl = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${range}?valueInputOption=USER_ENTERED`;
 
-    const rowValues = leadToRowArray(lead);
-    const range = `Leads!A${targetRow}:W${targetRow}`;
-    const updateUrl = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${range}?valueInputOption=USER_ENTERED`;
-
-    let res: Response;
-    try {
-      res = await fetch(updateUrl, {
+      await fetch(updateUrl, {
         method: 'PUT',
         headers: {
           Authorization: `Bearer ${token}`,
           'Content-Type': 'application/json'
         },
-        body: JSON.stringify({
-          range,
-          values: [rowValues]
-        })
+        body: JSON.stringify({ range, values: [rowValues] })
       });
-    } catch (netErr: any) {
-      throw new Error(formatNetworkError(netErr));
     }
-
-    if (!res.ok) {
-      const errJson = await res.json().catch(() => ({}));
-      throw new Error(formatSheetsApiError(res.status, errJson, `Failed to update row ${targetRow} in Google Sheet`));
-    }
-
-    // MANDATORY CONFIRMATION: Re-fetch directly from the Sheets API to verify reflection in the actual Sheet
-    try {
-      const confirmRes = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${range}`, {
-        headers: { Authorization: `Bearer ${token}` }
-      });
-      if (!confirmRes.ok) {
-        const errJson = await confirmRes.json().catch(() => ({}));
-        throw new Error(formatSheetsApiError(confirmRes.status, errJson, 'Failed to re-fetch from Google Sheet to verify update'));
-      }
-      const confirmData = await confirmRes.json();
-      const confirmedRow = confirmData.values && confirmData.values[0] ? confirmData.values[0] : null;
-      if (!confirmedRow || confirmedRow[0] !== lead.leadId) {
-        throw new Error(`Update verification failed: Google Sheet row ${targetRow} did not match lead ID "${lead.leadId}".`);
-      }
-    } catch (verifyErr: any) {
-      throw new Error(verifyErr.message || 'Verification of lead update in Google Sheet failed.');
-    }
-  }
-
-  // 2. Synchronize with backend database
-  try {
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-    if (token) headers['Authorization'] = `Bearer ${token}`;
-    if (spreadsheetId) headers['x-spreadsheet-id'] = spreadsheetId;
-
-    await fetch('/api/leads/update', {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ 
-        lead, 
-        spreadsheetId,
-        alreadySyncedToSheet: Boolean(token && spreadsheetId)
-      })
-    });
-  } catch (err) {
-    console.warn('Backend update mirror warning:', err);
   }
 
   return lead;
 }
 
 /**
- * Delete a lead: Persists deletion directly to Google Sheet via Sheets API
- * and confirms removal by re-fetching from the Sheets API before completing.
+ * Delete a lead: Persists deletion directly to MongoDB backend.
  */
 export async function deleteLead(
   leadId: string,
@@ -517,133 +478,25 @@ export async function deleteLead(
   spreadsheetId?: string,
   rowIndex?: number
 ): Promise<boolean> {
-  // 1. If Google Sheet is connected, delete or clear row directly in Google Sheets
-  if (token && spreadsheetId) {
-    let targetRow = rowIndex;
-
-    // Locate row if rowIndex is not supplied
-    if (!targetRow || targetRow < 2) {
-      try {
-        const idColRes = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Leads!A1:A1000`, {
-          headers: { Authorization: `Bearer ${token}` }
-        });
-        if (!idColRes.ok) {
-          const errJson = await idColRes.json().catch(() => ({}));
-          throw new Error(formatSheetsApiError(idColRes.status, errJson, 'Failed to query leads for deletion in Google Sheet'));
-        }
-        const idData = await idColRes.json();
-        const rows = idData.values || [];
-        for (let i = 1; i < rows.length; i++) {
-          if (rows[i] && rows[i][0] === leadId) {
-            targetRow = i + 1;
-            break;
-          }
-        }
-      } catch (err: any) {
-        throw new Error(formatNetworkError(err));
-      }
-    }
-
-    if (targetRow && targetRow >= 2) {
-      const sheetNumericId = await getLeadsSheetId(token, spreadsheetId);
-      
-      let delSuccess = false;
-      try {
-        // Execute batchUpdate deleteDimension to cleanly remove the row
-        const delRes = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}:batchUpdate`, {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${token}`,
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({
-            requests: [
-              {
-                deleteDimension: {
-                  range: {
-                    sheetId: sheetNumericId,
-                    dimension: 'ROWS',
-                    startIndex: targetRow - 1,
-                    endIndex: targetRow
-                  }
-                }
-              }
-            ]
-          })
-        });
-        delSuccess = delRes.ok;
-      } catch (e) {
-        // Fallback to clearing row values
-      }
-
-      if (!delSuccess) {
-        const clearRange = `Leads!A${targetRow}:W${targetRow}`;
-        let clearRes: Response;
-        try {
-          clearRes = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${clearRange}:clear`, {
-            method: 'POST',
-            headers: {
-              Authorization: `Bearer ${token}`,
-              'Content-Type': 'application/json'
-            }
-          });
-        } catch (netErr: any) {
-          throw new Error(formatNetworkError(netErr));
-        }
-
-        if (!clearRes.ok) {
-          const errJson = await clearRes.json().catch(() => ({}));
-          throw new Error(formatSheetsApiError(clearRes.status, errJson, `Failed to delete row ${targetRow} from Google Sheet`));
-        }
-      }
-
-      // MANDATORY CONFIRMATION: Re-fetch directly from the Sheets API to verify lead is absent
-      try {
-        const confirmRes = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Leads!A1:A1000`, {
-          headers: { Authorization: `Bearer ${token}` }
-        });
-        if (!confirmRes.ok) {
-          const errJson = await confirmRes.json().catch(() => ({}));
-          throw new Error(formatSheetsApiError(confirmRes.status, errJson, 'Failed to re-fetch from Google Sheet to confirm deletion'));
-        }
-        const confirmData = await confirmRes.json();
-        const rows = confirmData.values || [];
-        const stillPresent = rows.some((r: any[], idx: number) => idx > 0 && r && r[0] === leadId);
-        if (stillPresent) {
-          throw new Error(`Deletion verification failed: Lead ID "${leadId}" is still present in Google Sheet after deletion.`);
-        }
-      } catch (verifyErr: any) {
-        throw new Error(verifyErr.message || 'Verification of lead deletion in Google Sheet failed.');
-      }
-    }
-  }
-
-  // 2. Synchronize deletion with backend database
   try {
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     if (token) headers['Authorization'] = `Bearer ${token}`;
-    if (spreadsheetId) headers['x-spreadsheet-id'] = spreadsheetId;
 
     const res = await fetch('/api/leads/delete', {
       method: 'POST',
       headers,
-      body: JSON.stringify({ 
-        leadId, 
-        spreadsheetId,
-        alreadySyncedToSheet: Boolean(token && spreadsheetId)
-      })
+      body: JSON.stringify({ leadId })
     });
 
     return res.ok;
   } catch (err) {
     console.warn('Backend delete lead error:', err);
-    return true;
+    return false;
   }
 }
 
 /**
- * Batch create leads: Appends multiple leads directly to Google Sheets via Sheets API
- * and confirms reflection in the sheet before syncing to backend.
+ * Batch create leads: Persists multiple leads directly to MongoDB.
  */
 export async function batchCreateLeads(
   newLeads: Partial<Lead>[],
@@ -686,64 +539,14 @@ export async function batchCreateLeads(
     };
   });
 
-  // 1. Direct append to Google Sheet
-  if (token && spreadsheetId) {
-    const rows = preparedLeads.map(leadToRowArray);
-    const appendUrl = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Leads!A:AA:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`;
-
-    let res: Response;
-    try {
-      res = await fetch(appendUrl, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({ values: rows })
-      });
-    } catch (netErr: any) {
-      throw new Error(formatNetworkError(netErr));
-    }
-
-    if (!res.ok) {
-      const errJson = await res.json().catch(() => ({}));
-      throw new Error(formatSheetsApiError(res.status, errJson, 'Failed to batch append leads to Google Sheet'));
-    }
-
-    // Re-fetch from Google Sheets API to confirm reflection
-    try {
-      const confirmRes = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Leads!A1:AA1000`, {
-        headers: { Authorization: `Bearer ${token}` }
-      });
-      if (confirmRes.ok) {
-        const confirmData = await confirmRes.json();
-        const sheetLeads = parseSheetRowsToLeads(confirmData.values || []);
-        for (const prep of preparedLeads) {
-          const match = sheetLeads.find(sl => sl.leadId === prep.leadId || (sl.email && sl.email.toLowerCase() === prep.email.toLowerCase()));
-          if (match && match.rowIndex) {
-            prep.rowIndex = match.rowIndex;
-          }
-        }
-      }
-    } catch (verifyErr: any) {
-      console.warn('Batch confirmation check warning:', verifyErr);
-    }
-  }
-
-  // 2. Synchronize batch with backend database
   try {
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     if (token) headers['Authorization'] = `Bearer ${token}`;
-    if (spreadsheetId) headers['x-spreadsheet-id'] = spreadsheetId;
 
     const bRes = await fetch('/api/leads/batch', {
       method: 'POST',
       headers,
-      body: JSON.stringify({
-        leads: preparedLeads,
-        spreadsheetId,
-        alreadySyncedToSheet: Boolean(token && spreadsheetId)
-      })
+      body: JSON.stringify({ leads: preparedLeads })
     });
 
     if (bRes.ok) {
@@ -753,7 +556,7 @@ export async function batchCreateLeads(
       }
     }
   } catch (err) {
-    console.warn('Backend batch mirror warning:', err);
+    console.warn('Backend batchCreateLeads error:', err);
   }
 
   return preparedLeads;

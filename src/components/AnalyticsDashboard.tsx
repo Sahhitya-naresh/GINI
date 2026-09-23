@@ -1083,8 +1083,8 @@ export const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100 bg-white">
-                      {inspectedCampaignData.leads.map(lead => (
-                        <tr key={lead.leadId} className="hover:bg-slate-50">
+                      {inspectedCampaignData.leads.map((lead, idx) => (
+                        <tr key={lead.leadId || `inspected-lead-${lead.email || ''}-${idx}`} className="hover:bg-slate-50">
                           <td className="py-2 px-3 font-semibold text-slate-900">
                             {lead.name}
                             <span className="text-[10px] text-slate-400 block">{lead.email}</span>

@@ -1,6 +1,7 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import { 
   Send, 
+  Database,
   FileSpreadsheet, 
   RefreshCw, 
   Settings as SettingsIcon, 
@@ -62,6 +63,35 @@ export const Header: React.FC<HeaderProps> = ({
   customLogoUrl,
   onLogoChange
 }) => {
+  const [mongoStatus, setMongoStatus] = useState<{
+    connected: boolean;
+    status: 'connected' | 'connecting' | 'disconnected' | 'error';
+    database?: string;
+    source?: string;
+  }>({ connected: true, status: 'connected', database: 'outreach_flow' });
+
+  useEffect(() => {
+    let mounted = true;
+    const checkMongo = async () => {
+      try {
+        const res = await fetch('/api/mongodb/status');
+        if (res.ok) {
+          const data = await res.json();
+          if (mounted && data) {
+            setMongoStatus(data);
+          }
+        }
+      } catch {
+        // ignore
+      }
+    };
+    checkMongo();
+    const interval = setInterval(checkMongo, 30000);
+    return () => {
+      mounted = false;
+      clearInterval(interval);
+    };
+  }, []);
   return (
     <header className="bg-white border-b border-red-100 sticky top-0 z-30 shadow-xs">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
@@ -200,49 +230,34 @@ export const Header: React.FC<HeaderProps> = ({
               )}
             </button>
 
-            {/* Persistent, always-visible connection status indicator */}
-            {spreadsheetId ? (
+            {/* Persistent, always-visible MongoDB connection status indicator */}
+            {mongoStatus.connected ? (
               <div 
                 id="connection-status-indicator"
                 className="flex items-center gap-1.5 px-2.5 py-1.5 bg-emerald-50/90 border border-emerald-200/90 rounded-lg text-xs font-medium text-emerald-800 shadow-2xs transition-all shrink-0"
+                title={`MongoDB Connected: database "${mongoStatus.database || 'outreach_flow'}" (${mongoStatus.source === 'memory_server' ? 'Dev Memory Server' : 'Cloud / URI'})`}
               >
-                <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
-                <span className="font-semibold text-emerald-950 hidden sm:inline">Connected to Sheet:</span>
-                <span className="sm:hidden font-semibold text-emerald-950">Sheet:</span>
+                <Database className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                <span className="font-semibold text-emerald-950 hidden sm:inline">MongoDB:</span>
+                <span className="sm:hidden font-semibold text-emerald-950">DB:</span>
                 <span 
                   className="max-w-[100px] sm:max-w-[150px] md:max-w-[180px] lg:max-w-[220px] truncate font-semibold text-emerald-900" 
-                  title={`Connected to Sheet: ${spreadsheetName || spreadsheetId}`}
+                  title={`MongoDB database: ${mongoStatus.database || 'outreach_flow'}`}
                 >
-                  {spreadsheetName || 'Connected Sheet'}
+                  {mongoStatus.database || 'outreach_flow'}
                 </span>
-                <a
-                  href={`https://docs.google.com/spreadsheets/d/${spreadsheetId}/edit`}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="p-1 hover:bg-emerald-100 rounded text-emerald-700 hover:text-emerald-950 transition-colors ml-0.5 shrink-0"
-                  title="Open Google Sheet in new tab"
-                  aria-label="Open Google Sheet in new tab"
-                >
-                  <ExternalLink className="w-3 h-3" />
-                </a>
+                <span className="inline-block w-2 h-2 rounded-full bg-emerald-500 animate-pulse ml-0.5" />
               </div>
             ) : (
-              <button
+              <div
                 id="connection-status-indicator"
-                onClick={onOpenConnectSheet}
-                className="flex items-center gap-1.5 px-2.5 py-1.5 bg-amber-50 hover:bg-amber-100/90 border border-amber-300 rounded-lg text-xs font-medium text-amber-900 shadow-2xs transition-colors shrink-0 group"
-                title="Google Sheet not connected. Known limitation: Local data can be lost on server restart without a persistent volume. Click to connect a Sheet."
+                className="flex items-center gap-1.5 px-2.5 py-1.5 bg-amber-50 border border-amber-300 rounded-lg text-xs font-medium text-amber-900 shadow-2xs transition-colors shrink-0"
+                title="MongoDB disconnected or MONGODB_URI not reachable"
               >
                 <AlertTriangle className="w-3.5 h-3.5 text-amber-600 shrink-0" />
-                <span className="hidden sm:inline font-medium">Not connected (local data only)</span>
-                <span className="sm:hidden font-medium">Local data only</span>
-                <span className="hidden xl:inline text-[10px] text-amber-700/90 font-normal">
-                  — resets on restart
-                </span>
-                <span className="hidden xl:inline text-[11px] font-semibold text-amber-800 underline underline-offset-2 ml-0.5">
-                  Connect
-                </span>
-              </button>
+                <span className="hidden sm:inline font-medium">MongoDB: Disconnected</span>
+                <span className="sm:hidden font-medium">DB Disconnected</span>
+              </div>
             )}
 
             {/* Sync Button */}

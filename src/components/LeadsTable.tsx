@@ -78,9 +78,14 @@ export const LeadsTable: React.FC<LeadsTableProps> = ({
     return Array.from(set).sort();
   }, [leads]);
 
-  // Filtered leads
+  // Filtered and deduplicated leads
   const filteredLeads = useMemo(() => {
-    return leads.filter(lead => {
+    const seen = new Set<string>();
+    return leads.filter((lead, idx) => {
+      const uniqueKey = lead.leadId?.trim() || lead.email?.trim().toLowerCase() || `lead-${idx}`;
+      if (seen.has(uniqueKey)) return false;
+      seen.add(uniqueKey);
+
       // Search
       if (searchQuery.trim()) {
         const query = searchQuery.toLowerCase();
@@ -351,14 +356,14 @@ export const LeadsTable: React.FC<LeadsTableProps> = ({
                   </td>
                 </tr>
               ) : (
-                filteredLeads.map((lead) => {
+                filteredLeads.map((lead, idx) => {
                   const isDue = lead.status === 'Active' && isLeadDueForNextSend(lead.nextSendDate);
                   const isReplied = lead.status === 'Replied';
                   const nextStageNum = lead.currentStage + 1;
 
                   return (
                     <tr
-                      key={lead.leadId}
+                      key={lead.leadId || `lead-${lead.email || ''}-${idx}`}
                       className={`hover:bg-red-50/30 transition-colors ${
                         isReplied ? 'bg-red-50/40' : isDue ? 'bg-red-50/20' : ''
                       }`}

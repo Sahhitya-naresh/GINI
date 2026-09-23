@@ -430,7 +430,7 @@ export const TemplateAdmin: React.FC<TemplateAdminProps> = ({
                   className="bg-white border border-slate-300 rounded px-2 py-1 text-xs text-slate-800 font-medium focus:outline-none focus:ring-1 focus:ring-red-500"
                 >
                   {leads.map((l, i) => (
-                    <option key={l.leadId || i} value={i}>
+                    <option key={l.leadId ? `${l.leadId}-${i}` : `lead-opt-${i}`} value={i}>
                       {l.name} ({l.company})
                     </option>
                   ))}

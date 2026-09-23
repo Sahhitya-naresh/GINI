@@ -52,9 +52,9 @@ export const NeedsManualReplyView: React.FC<NeedsManualReplyViewProps> = ({
         </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          {repliedLeads.map((lead) => (
+          {repliedLeads.map((lead, idx) => (
             <div
-              key={lead.leadId}
+              key={lead.leadId || `replied-lead-${lead.email || ''}-${idx}`}
               className="bg-white rounded-xl border border-red-200 shadow-2xs hover:shadow-md transition-all p-5 flex flex-col justify-between"
             >
               <div className="space-y-3">

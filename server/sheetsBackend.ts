@@ -427,10 +427,25 @@ export async function createLead(
   alreadySyncedToSheet?: boolean
 ): Promise<BackendLead> {
   const local = loadLocalLeads();
-  const nextNum = local.length + 1;
+
+  // Find max numeric suffix across all existing leads to prevent collision
+  let maxId = 100;
+  local.forEach(l => {
+    const m = String(l.leadId || '').match(/LEAD-(\d+)/i);
+    if (m) {
+      const n = parseInt(m[1], 10);
+      if (!isNaN(n) && n > maxId) maxId = n;
+    }
+  });
+
+  const rawId = (lead.leadId || '').trim();
+  const validLeadId = (rawId && !rawId.includes('NaN') && !rawId.includes('undefined'))
+    ? rawId
+    : `LEAD-${maxId + 1}`;
+
   const newLead: BackendLead = {
     ...lead,
-    leadId: lead.leadId || `LEAD-${100 + nextNum}`,
+    leadId: validLeadId,
     rowIndex: lead.rowIndex || (local.length + 2)
   };
 
@@ -567,15 +582,31 @@ export async function batchCreateLeads(
   alreadySyncedToSheet?: boolean
 ): Promise<BackendLead[]> {
   const local = loadLocalLeads();
+
+  // Find max numeric suffix across all existing leads to prevent collision
+  let maxId = 100;
+  local.forEach(l => {
+    const m = String(l.leadId || '').match(/LEAD-(\d+)/i);
+    if (m) {
+      const n = parseInt(m[1], 10);
+      if (!isNaN(n) && n > maxId) maxId = n;
+    }
+  });
+
   const created: BackendLead[] = [];
 
   for (let i = 0; i < newLeads.length; i++) {
     const item = newLeads[i];
-    const nextNum = local.length + 1;
+    maxId += 1;
+    const rawId = (item.leadId || '').trim();
+    const validLeadId = (rawId && !rawId.includes('NaN') && !rawId.includes('undefined'))
+      ? rawId
+      : `LEAD-${maxId}`;
+
     const l: BackendLead = {
       ...item,
-      leadId: item.leadId || `LEAD-${100 + nextNum}`,
-      rowIndex: item.rowIndex || (local.length + 2)
+      leadId: validLeadId,
+      rowIndex: item.rowIndex || (local.length + i + 2)
     };
     created.push(l);
   }

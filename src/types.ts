@@ -49,6 +49,7 @@ export interface ConnectedSender {
   dailySendLimit: number;
   sendsToday: number;
   lastUsedAt?: string;
+  provider?: 'gmail' | 'outlook' | string;
 }
 
 // Workflow Graph Node Types

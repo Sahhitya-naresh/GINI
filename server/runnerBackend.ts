@@ -1,4 +1,4 @@
-import type { BackendLead, BackendCampaign } from './sheetsBackend.ts';
+import type { BackendLead, BackendCampaign } from './mongoBackend.ts';
 import { 
   listLeads, 
   listCampaigns, 
@@ -7,7 +7,7 @@ import {
   saveLocalSenders,
   loadLocalTasks,
   saveLocalTasks
-} from './sheetsBackend.ts';
+} from './mongoBackend.ts';
 
 export interface CampaignRunResult {
   success: boolean;
@@ -129,7 +129,7 @@ export async function runDueCampaignsJob(
 ): Promise<CampaignRunResult> {
   const campaigns = await listCampaigns(token, spreadsheetId);
   const leads = await listLeads(token, spreadsheetId);
-  const senders = loadLocalSenders();
+  const senders = await loadLocalSenders();
 
   const logs: string[] = [];
   let processedCount = 0;
@@ -328,7 +328,7 @@ export async function runDueCampaignsJob(
         logs.push(`Generated Manual Task for ${lead.name}: "${currentNode.data?.label || currentNode.data?.taskTitle || 'Manual Review / Call'}"`);
 
         // Create task in system
-        const localTasks = loadLocalTasks();
+        const localTasks = await loadLocalTasks();
         const newTask: RunnerManualTask = {
           id: `task-${Date.now()}-${lead.leadId}`,
           leadId: lead.leadId,
@@ -343,7 +343,7 @@ export async function runDueCampaignsJob(
           isCompleted: false
         };
         localTasks.push(newTask);
-        saveLocalTasks(localTasks);
+        await saveLocalTasks(localTasks);
 
         // Advance downstream if connected
         const outgoingEdge = edges.find((e: any) => e.source === currentNode.id);
@@ -415,7 +415,7 @@ export async function runDueCampaignsJob(
         if (sender) {
           sender.sendsToday = (sender.sendsToday || 0) + 1;
           sender.lastUsedAt = new Date().toISOString();
-          saveLocalSenders(senders);
+          await saveLocalSenders(senders);
         }
 
         emailsSent++;

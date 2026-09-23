@@ -336,7 +336,7 @@ export const ImportLeadsModal: React.FC<ImportLeadsModalProps> = ({
         const match = String(l.leadId).match(/LEAD-(\d+)/i);
         if (match) {
           const num = parseInt(match[1], 10);
-          if (num > maxIdNum) maxIdNum = num;
+          if (!isNaN(num) && num > maxIdNum) maxIdNum = num;
         }
       }
     });
