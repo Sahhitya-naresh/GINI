@@ -69,13 +69,17 @@ export async function getMongoClient(): Promise<MongoClient> {
     let uri = (process.env.MONGODB_URI || '').trim();
     let source: 'env_uri' | 'memory_server' | 'none' = 'none';
 
+    const isProduction = process.env.NODE_ENV === 'production' || process.env.VERCEL === '1';
+    const isDevelopment = !isProduction && (process.env.NODE_ENV === 'development' || !process.env.NODE_ENV || process.env.NODE_ENV === 'test');
+
     if (uri) {
       source = 'env_uri';
-    } else {
-      // In local dev/preview or testing when MONGODB_URI is not provided yet,
-      // spin up a high-performance in-memory MongoDB instance to ensure genuine MongoDB operations.
+    } else if (isDevelopment) {
+      // Local development fallback: dynamically imported ONLY when MONGODB_URI is absent
+      // and NODE_ENV is development. Never imported, required, or bundled in production.
       try {
-        const { MongoMemoryServer } = await import('mongodb-memory-server');
+        const memPackage = 'mongodb-memory-server';
+        const { MongoMemoryServer } = await import(memPackage);
         if (!state.memoryServer) {
           state.memoryServer = await MongoMemoryServer.create({
             instance: { dbName: 'outreach_flow' }
@@ -85,7 +89,7 @@ export async function getMongoClient(): Promise<MongoClient> {
         source = 'memory_server';
         console.log(`[MongoDB] Initialized local dev memory server at: ${uri}`);
       } catch (err: any) {
-        console.warn('[MongoDB] MongoMemoryServer not available:', err.message);
+        console.warn('[MongoDB] MongoMemoryServer not available in development:', err.message);
       }
     }
 

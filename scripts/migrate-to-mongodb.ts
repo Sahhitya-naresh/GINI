@@ -11,7 +11,8 @@ async function runMigration() {
   if (!uri) {
     console.log('MONGODB_URI not provided in environment. Attempting local MongoMemoryServer for migration testing...');
     try {
-      const { MongoMemoryServer } = await import('mongodb-memory-server');
+      const memPkg = 'mongodb-memory-server';
+      const { MongoMemoryServer } = await import(memPkg);
       memoryServer = await MongoMemoryServer.create({
         instance: { dbName: 'outreach_flow' }
       });
