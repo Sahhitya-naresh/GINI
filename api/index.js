@@ -1778,8 +1778,8 @@ app.post("/api/emails/send", async (req, res) => {
   }
 });
 
-// api/index.ts
-var index_default = app;
+// server/api-entry.ts
+var api_entry_default = app;
 export {
-  index_default as default
+  api_entry_default as default
 };
