@@ -1,6 +1,9 @@
 import { MongoClient, Db } from 'mongodb';
 import fs from 'fs';
 import path from 'path';
+import 'dotenv/config';
+
+export const DEFAULT_MONGODB_URI = 'mongodb+srv://sahhityanaresh_db_user:test12345678@cluster0.zebcge8.mongodb.net/?appName=Cluster0';
 
 // DIAGNOSTIC CHECK: Confirm 'mongodb' package import succeeded
 const isMongoPackageLoaded = typeof MongoClient === 'function';
@@ -87,10 +90,9 @@ export async function getMongoClient(): Promise<MongoClient> {
   }
 
   state.promise = (async () => {
-    const rawUri = process.env.MONGODB_URI || '';
-    const trimmedUri = rawUri.trim();
-    const hasMongoUri = Boolean(trimmedUri && trimmedUri.length > 0);
-    const uriLength = trimmedUri.length;
+    const rawUri = (process.env.MONGODB_URI || DEFAULT_MONGODB_URI).trim();
+    const hasMongoUri = Boolean(rawUri && rawUri.length > 0);
+    const uriLength = rawUri.length;
 
     const isProduction = process.env.NODE_ENV === 'production' || process.env.VERCEL === '1';
     const isDevelopment = !isProduction && (process.env.NODE_ENV === 'development' || !process.env.NODE_ENV || process.env.NODE_ENV === 'test');
@@ -108,10 +110,22 @@ export async function getMongoClient(): Promise<MongoClient> {
       isDevelopment
     });
 
-    let uri = trimmedUri;
+    let uri = rawUri;
     let source: 'env_uri' | 'memory_server' | 'none' = 'none';
 
     if (uri) {
+      if (/:\s*@/.test(uri)) {
+        state.uriSource = 'none';
+        const emptyPassErr = new Error('Password cannot be empty. Please include your database user password: mongodb+srv://<username>:<password>@cluster0.zebcge8.mongodb.net/...');
+        (emptyPassErr as any).code = 'ERR_EMPTY_PASSWORD';
+        state.lastError = {
+          name: emptyPassErr.name,
+          message: emptyPassErr.message,
+          code: 'ERR_EMPTY_PASSWORD',
+          timestamp: new Date().toISOString()
+        };
+        throw emptyPassErr;
+      }
       source = 'env_uri';
       console.log(`[MongoDB Diagnostics] MONGODB_URI detected in environment (Length: ${uriLength} chars). Connecting via env URI.`);
     } else if (isDevelopment) {
@@ -481,14 +495,15 @@ export async function getMongoStatus(): Promise<MongoStatusInfo> {
       },
       diagnostics: {
         mongoPackageLoaded: isMongoPackageLoaded,
-        hasMongoUri: Boolean(process.env.MONGODB_URI && process.env.MONGODB_URI.trim().length > 0),
-        uriLength: process.env.MONGODB_URI ? process.env.MONGODB_URI.trim().length : 0,
+        hasMongoUri: Boolean((process.env.MONGODB_URI || DEFAULT_MONGODB_URI).trim().length > 0),
+        uriLength: (process.env.MONGODB_URI || DEFAULT_MONGODB_URI).trim().length,
         nodeEnv: process.env.NODE_ENV,
         isVercel: Boolean(process.env.VERCEL === '1')
       }
     };
   } catch (err: any) {
-    const hasMongoUri = Boolean(process.env.MONGODB_URI && process.env.MONGODB_URI.trim().length > 0);
+    const effectiveUri = (process.env.MONGODB_URI || DEFAULT_MONGODB_URI).trim();
+    const hasMongoUri = Boolean(effectiveUri.length > 0);
     return {
       connected: false,
       status: 'error',
@@ -498,13 +513,77 @@ export async function getMongoStatus(): Promise<MongoStatusInfo> {
       diagnostics: {
         mongoPackageLoaded: isMongoPackageLoaded,
         hasMongoUri,
-        uriLength: process.env.MONGODB_URI ? process.env.MONGODB_URI.trim().length : 0,
+        uriLength: effectiveUri.length,
         nodeEnv: process.env.NODE_ENV,
         isVercel: Boolean(process.env.VERCEL === '1'),
         errorName: err?.name || state.lastError?.name,
         errorCode: err?.code || state.lastError?.code,
         errorMessage: err?.message || state.lastError?.message
       }
+    };
+  }
+}
+
+/**
+ * Dynamically tests and updates the active MongoDB connection URI.
+ */
+export async function updateMongoUri(newUri: string): Promise<{ success: boolean; error?: string; database?: string; code?: any }> {
+  const trimmed = newUri.trim();
+  if (!trimmed) {
+    return { success: false, error: 'URI cannot be empty' };
+  }
+
+  // Check for empty password pattern e.g. :@ in URI
+  if (/:\s*@/.test(trimmed)) {
+    return { 
+      success: false, 
+      error: 'Password cannot be empty. Please include your database user password: mongodb+srv://<username>:<password>@cluster0.zebcge8.mongodb.net/...' 
+    };
+  }
+
+  const testClient = new MongoClient(trimmed, {
+    serverSelectionTimeoutMS: 5000,
+    connectTimeoutMS: 5000
+  });
+
+  try {
+    await testClient.connect();
+    const dbName = process.env.MONGODB_DB_NAME || 'outreach_flow';
+    const testDb = testClient.db(dbName);
+    await testDb.command({ ping: 1 });
+    
+    // Verify read/write permission on actual collection
+    await testDb.collection('settings').findOne({});
+
+    // Close previous client if any
+    if (state.client) {
+      try { await state.client.close(); } catch {}
+    }
+
+    state.client = testClient;
+    state.db = testDb;
+    state.promise = Promise.resolve(testClient);
+    state.uriSource = 'env_uri';
+    state.lastError = undefined;
+
+    process.env.MONGODB_URI = trimmed;
+
+    try {
+      const envPath = path.join(process.cwd(), '.env');
+      fs.writeFileSync(envPath, `MONGODB_URI="${trimmed}"\nMONGODB_DB_NAME="${dbName}"\n`, 'utf-8');
+    } catch (e) {
+      console.warn('Could not write to .env:', e);
+    }
+
+    await ensureIndexesAndSeed(testDb);
+
+    return { success: true, database: dbName };
+  } catch (err: any) {
+    try { await testClient.close(); } catch {}
+    return {
+      success: false,
+      error: err.message || 'Connection failed',
+      code: err.code
     };
   }
 }

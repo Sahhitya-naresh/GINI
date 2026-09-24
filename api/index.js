@@ -1,10 +1,13 @@
 // server/app.ts
 import express from "express";
+import { MongoClient as MongoClient2 } from "mongodb";
 
 // server/mongodb.ts
 import { MongoClient } from "mongodb";
 import fs from "fs";
 import path from "path";
+import "dotenv/config";
+var DEFAULT_MONGODB_URI = "mongodb+srv://sahhityanaresh_db_user:test12345678@cluster0.zebcge8.mongodb.net/?appName=Cluster0";
 var isMongoPackageLoaded = typeof MongoClient === "function";
 console.log(`[MongoDB Diagnostics] Step 1: Package "mongodb" module import check: ${isMongoPackageLoaded ? "SUCCESS (MongoClient constructor is loaded)" : "FAILED"}`);
 var COLLECTIONS = {
@@ -33,10 +36,9 @@ async function getMongoClient() {
     return state.promise;
   }
   state.promise = (async () => {
-    const rawUri = process.env.MONGODB_URI || "";
-    const trimmedUri = rawUri.trim();
-    const hasMongoUri = Boolean(trimmedUri && trimmedUri.length > 0);
-    const uriLength = trimmedUri.length;
+    const rawUri = (process.env.MONGODB_URI || DEFAULT_MONGODB_URI).trim();
+    const hasMongoUri = Boolean(rawUri && rawUri.length > 0);
+    const uriLength = rawUri.length;
     const isProduction = process.env.NODE_ENV === "production" || process.env.VERCEL === "1";
     const isDevelopment = !isProduction && (process.env.NODE_ENV === "development" || !process.env.NODE_ENV || process.env.NODE_ENV === "test");
     console.log("[MongoDB Diagnostics] ==========================================");
@@ -51,9 +53,21 @@ async function getMongoClient() {
       isProduction,
       isDevelopment
     });
-    let uri = trimmedUri;
+    let uri = rawUri;
     let source = "none";
     if (uri) {
+      if (/:\s*@/.test(uri)) {
+        state.uriSource = "none";
+        const emptyPassErr = new Error("Password cannot be empty. Please include your database user password: mongodb+srv://<username>:<password>@cluster0.zebcge8.mongodb.net/...");
+        emptyPassErr.code = "ERR_EMPTY_PASSWORD";
+        state.lastError = {
+          name: emptyPassErr.name,
+          message: emptyPassErr.message,
+          code: "ERR_EMPTY_PASSWORD",
+          timestamp: (/* @__PURE__ */ new Date()).toISOString()
+        };
+        throw emptyPassErr;
+      }
       source = "env_uri";
       console.log(`[MongoDB Diagnostics] MONGODB_URI detected in environment (Length: ${uriLength} chars). Connecting via env URI.`);
     } else if (isDevelopment) {
@@ -384,14 +398,15 @@ async function getMongoStatus() {
       },
       diagnostics: {
         mongoPackageLoaded: isMongoPackageLoaded,
-        hasMongoUri: Boolean(process.env.MONGODB_URI && process.env.MONGODB_URI.trim().length > 0),
-        uriLength: process.env.MONGODB_URI ? process.env.MONGODB_URI.trim().length : 0,
+        hasMongoUri: Boolean((process.env.MONGODB_URI || DEFAULT_MONGODB_URI).trim().length > 0),
+        uriLength: (process.env.MONGODB_URI || DEFAULT_MONGODB_URI).trim().length,
         nodeEnv: process.env.NODE_ENV,
         isVercel: Boolean(process.env.VERCEL === "1")
       }
     };
   } catch (err) {
-    const hasMongoUri = Boolean(process.env.MONGODB_URI && process.env.MONGODB_URI.trim().length > 0);
+    const effectiveUri = (process.env.MONGODB_URI || DEFAULT_MONGODB_URI).trim();
+    const hasMongoUri = Boolean(effectiveUri.length > 0);
     return {
       connected: false,
       status: "error",
@@ -401,13 +416,68 @@ async function getMongoStatus() {
       diagnostics: {
         mongoPackageLoaded: isMongoPackageLoaded,
         hasMongoUri,
-        uriLength: process.env.MONGODB_URI ? process.env.MONGODB_URI.trim().length : 0,
+        uriLength: effectiveUri.length,
         nodeEnv: process.env.NODE_ENV,
         isVercel: Boolean(process.env.VERCEL === "1"),
         errorName: err?.name || state.lastError?.name,
         errorCode: err?.code || state.lastError?.code,
         errorMessage: err?.message || state.lastError?.message
       }
+    };
+  }
+}
+async function updateMongoUri(newUri) {
+  const trimmed = newUri.trim();
+  if (!trimmed) {
+    return { success: false, error: "URI cannot be empty" };
+  }
+  if (/:\s*@/.test(trimmed)) {
+    return {
+      success: false,
+      error: "Password cannot be empty. Please include your database user password: mongodb+srv://<username>:<password>@cluster0.zebcge8.mongodb.net/..."
+    };
+  }
+  const testClient = new MongoClient(trimmed, {
+    serverSelectionTimeoutMS: 5e3,
+    connectTimeoutMS: 5e3
+  });
+  try {
+    await testClient.connect();
+    const dbName = process.env.MONGODB_DB_NAME || "outreach_flow";
+    const testDb = testClient.db(dbName);
+    await testDb.command({ ping: 1 });
+    await testDb.collection("settings").findOne({});
+    if (state.client) {
+      try {
+        await state.client.close();
+      } catch {
+      }
+    }
+    state.client = testClient;
+    state.db = testDb;
+    state.promise = Promise.resolve(testClient);
+    state.uriSource = "env_uri";
+    state.lastError = void 0;
+    process.env.MONGODB_URI = trimmed;
+    try {
+      const envPath = path.join(process.cwd(), ".env");
+      fs.writeFileSync(envPath, `MONGODB_URI="${trimmed}"
+MONGODB_DB_NAME="${dbName}"
+`, "utf-8");
+    } catch (e) {
+      console.warn("Could not write to .env:", e);
+    }
+    await ensureIndexesAndSeed(testDb);
+    return { success: true, database: dbName };
+  } catch (err) {
+    try {
+      await testClient.close();
+    } catch {
+    }
+    return {
+      success: false,
+      error: err.message || "Connection failed",
+      code: err.code
     };
   }
 }
@@ -1439,6 +1509,75 @@ app.get("/api/mongodb/status", async (_req, res) => {
     res.json(status);
   } catch (err) {
     res.status(500).json({ connected: false, error: err.message });
+  }
+});
+app.get("/api/mongodb/test-atlas", async (req, res) => {
+  const customUri = req.query.uri || "";
+  const variations = customUri ? [{ name: "custom", uri: customUri }] : [
+    {
+      name: "Original with appName",
+      uri: "mongodb+srv://sahhityanaresh_db_user:outreachconnect@cluster0.zebcge8.mongodb.net/?appName=Cluster0"
+    },
+    {
+      name: "With dbName in path (outreach_flow)",
+      uri: "mongodb+srv://sahhityanaresh_db_user:outreachconnect@cluster0.zebcge8.mongodb.net/outreach_flow?retryWrites=true&w=majority&appName=Cluster0"
+    },
+    {
+      name: "With authSource=admin",
+      uri: "mongodb+srv://sahhityanaresh_db_user:outreachconnect@cluster0.zebcge8.mongodb.net/?authSource=admin&appName=Cluster0"
+    },
+    {
+      name: "With authMechanism=SCRAM-SHA-1",
+      uri: "mongodb+srv://sahhityanaresh_db_user:outreachconnect@cluster0.zebcge8.mongodb.net/?authSource=admin&authMechanism=SCRAM-SHA-1"
+    },
+    {
+      name: "With authMechanism=SCRAM-SHA-256",
+      uri: "mongodb+srv://sahhityanaresh_db_user:outreachconnect@cluster0.zebcge8.mongodb.net/?authSource=admin&authMechanism=SCRAM-SHA-256"
+    }
+  ];
+  const results = [];
+  for (const item of variations) {
+    const testClient = new MongoClient2(item.uri, {
+      serverSelectionTimeoutMS: 3e3,
+      connectTimeoutMS: 3e3
+    });
+    try {
+      await testClient.connect();
+      const ping = await testClient.db("admin").command({ ping: 1 });
+      results.push({
+        name: item.name,
+        success: true,
+        ping
+      });
+      await testClient.close();
+      break;
+    } catch (e) {
+      results.push({
+        name: item.name,
+        success: false,
+        error: e.message,
+        code: e.code,
+        codeName: e.codeName
+      });
+      try {
+        await testClient.close();
+      } catch {
+      }
+    }
+  }
+  res.json({ results });
+});
+app.post("/api/mongodb/update-uri", async (req, res) => {
+  const { uri } = req.body || {};
+  if (!uri || typeof uri !== "string") {
+    return res.status(400).json({ success: false, error: 'Valid "uri" string is required.' });
+  }
+  const result = await updateMongoUri(uri);
+  const status = await getMongoStatus();
+  if (result.success) {
+    res.json({ success: true, database: result.database, status });
+  } else {
+    res.status(400).json({ success: false, error: result.error, code: result.code, status });
   }
 });
 app.post("/api/mongodb/migrate", async (_req, res) => {

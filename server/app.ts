@@ -1,4 +1,5 @@
 import express from 'express';
+import { MongoClient } from 'mongodb';
 import {
   listLeads,
   createLead,
@@ -22,7 +23,7 @@ import {
   getSystemStatsSummary,
   TrackingEvent
 } from './mongoBackend.ts';
-import { getMongoStatus, getDb, autoSeedFromLocalData } from './mongodb.ts';
+import { getMongoStatus, getDb, autoSeedFromLocalData, updateMongoUri } from './mongodb.ts';
 import { parseFileBuffer } from './importBackend.ts';
 import { runDueCampaignsJob } from './runnerBackend.ts';
 
@@ -117,6 +118,76 @@ app.get('/api/mongodb/status', async (_req, res) => {
     res.json(status);
   } catch (err: any) {
     res.status(500).json({ connected: false, error: err.message });
+  }
+});
+
+app.get('/api/mongodb/test-atlas', async (req, res) => {
+  const customUri = (req.query.uri as string) || '';
+  const variations: { name: string; uri: string }[] = customUri ? [{ name: 'custom', uri: customUri }] : [
+    {
+      name: 'Original with appName',
+      uri: 'mongodb+srv://sahhityanaresh_db_user:outreachconnect@cluster0.zebcge8.mongodb.net/?appName=Cluster0'
+    },
+    {
+      name: 'With dbName in path (outreach_flow)',
+      uri: 'mongodb+srv://sahhityanaresh_db_user:outreachconnect@cluster0.zebcge8.mongodb.net/outreach_flow?retryWrites=true&w=majority&appName=Cluster0'
+    },
+    {
+      name: 'With authSource=admin',
+      uri: 'mongodb+srv://sahhityanaresh_db_user:outreachconnect@cluster0.zebcge8.mongodb.net/?authSource=admin&appName=Cluster0'
+    },
+    {
+      name: 'With authMechanism=SCRAM-SHA-1',
+      uri: 'mongodb+srv://sahhityanaresh_db_user:outreachconnect@cluster0.zebcge8.mongodb.net/?authSource=admin&authMechanism=SCRAM-SHA-1'
+    },
+    {
+      name: 'With authMechanism=SCRAM-SHA-256',
+      uri: 'mongodb+srv://sahhityanaresh_db_user:outreachconnect@cluster0.zebcge8.mongodb.net/?authSource=admin&authMechanism=SCRAM-SHA-256'
+    }
+  ];
+
+  const results: any[] = [];
+  for (const item of variations) {
+    const testClient = new MongoClient(item.uri, {
+      serverSelectionTimeoutMS: 3000,
+      connectTimeoutMS: 3000
+    });
+    try {
+      await testClient.connect();
+      const ping = await testClient.db('admin').command({ ping: 1 });
+      results.push({
+        name: item.name,
+        success: true,
+        ping
+      });
+      await testClient.close();
+      break; // Successfully connected!
+    } catch (e: any) {
+      results.push({
+        name: item.name,
+        success: false,
+        error: e.message,
+        code: e.code,
+        codeName: e.codeName
+      });
+      try { await testClient.close(); } catch {}
+    }
+  }
+
+  res.json({ results });
+});
+
+app.post('/api/mongodb/update-uri', async (req, res) => {
+  const { uri } = req.body || {};
+  if (!uri || typeof uri !== 'string') {
+    return res.status(400).json({ success: false, error: 'Valid "uri" string is required.' });
+  }
+  const result = await updateMongoUri(uri);
+  const status = await getMongoStatus();
+  if (result.success) {
+    res.json({ success: true, database: result.database, status });
+  } else {
+    res.status(400).json({ success: false, error: result.error, code: result.code, status });
   }
 });
 
