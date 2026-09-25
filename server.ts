@@ -1,3 +1,5 @@
+import dotenv from 'dotenv';
+dotenv.config({ override: true });
 import path from 'path';
 import express from 'express';
 import { app } from './server/app.ts';

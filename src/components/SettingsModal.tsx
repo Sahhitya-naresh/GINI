@@ -13,12 +13,14 @@ import {
   Mail,
   Plus,
   Trash2,
-  CheckCircle2
+  CheckCircle2,
+  Key,
+  Send,
+  RefreshCw,
+  AlertCircle
 } from 'lucide-react';
 import { AppSettings, StageTemplate, ConnectedSender } from '../types';
 import { BrandLogo } from './BrandLogo';
-import { getMsalClientId, setMsalClientId, getMsalTenantId, setMsalTenantId, resetMsalInstance } from '../services/msalAuth';
-import { Key } from 'lucide-react';
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -49,9 +51,66 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [newSenderName, setNewSenderName] = useState('');
   const [newSenderEmail, setNewSenderEmail] = useState('');
   const [newSenderLimit, setNewSenderLimit] = useState(50);
-  const [msalClientId, setLocalMsalClientId] = useState(() => getMsalClientId());
-  const [msalTenantId, setLocalMsalTenantId] = useState(() => getMsalTenantId());
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  const [graphStatus, setGraphStatus] = useState<any>(null);
+  const [testEmailTo, setTestEmailTo] = useState('nick.ron890@gmail.com');
+  const [isSendingTest, setIsSendingTest] = useState(false);
+  const [testResult, setTestResult] = useState<{ success: boolean; message: string; details?: any } | null>(null);
+
+  const fetchGraphStatus = async () => {
+    try {
+      const res = await fetch('/api/email/service-account');
+      if (res.ok) {
+        const data = await res.json();
+        setGraphStatus(data);
+      }
+    } catch {
+      // ignore
+    }
+  };
+
+  useEffect(() => {
+    if (isOpen) {
+      fetchGraphStatus();
+    }
+  }, [isOpen]);
+
+  const handleSendTestEmail = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!testEmailTo.trim()) return;
+    setIsSendingTest(true);
+    setTestResult(null);
+    try {
+      const res = await fetch('/api/email/test-send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ to: testEmailTo.trim() })
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        setTestResult({
+          success: true,
+          message: `Test email sent successfully via Microsoft Graph (Status: ${data.statusCode || 202})!`,
+          details: data
+        });
+        fetchGraphStatus();
+      } else {
+        setTestResult({
+          success: false,
+          message: data.error || 'Failed to dispatch test email',
+          details: data
+        });
+      }
+    } catch (err: any) {
+      setTestResult({
+        success: false,
+        message: err.message || 'Network error sending test email'
+      });
+    } finally {
+      setIsSendingTest(false);
+    }
+  };
 
   useEffect(() => {
     setFormData({ ...settings });
@@ -168,9 +227,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    setMsalClientId(msalClientId);
-    setMsalTenantId(msalTenantId);
-    resetMsalInstance().catch(() => {});
     onSaveSettings(formData);
     if (onSaveSenders) {
       const syncedSenders = localSenders.map(s => {
@@ -530,47 +586,149 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             </div>
           </div>
 
-          {/* Microsoft 365 / Azure AD App Credentials */}
-          <div className="space-y-3 p-4 bg-slate-50 rounded-xl border border-slate-200">
+          {/* Microsoft Graph App-Only Service Account Mailbox */}
+          <div className="space-y-3.5 p-4 bg-slate-50 rounded-xl border border-slate-200">
             <div className="flex items-center justify-between">
               <h3 className="text-xs font-bold uppercase tracking-wider text-slate-800 flex items-center gap-1.5">
                 <Key className="w-3.5 h-3.5 text-blue-600" />
-                <span>Microsoft Azure AD (Entra ID) App Configuration</span>
+                <span>Microsoft Graph Service Account Mailbox</span>
               </h3>
-              <span className="text-[10px] text-blue-700 bg-blue-50 font-semibold px-2 py-0.5 rounded border border-blue-200">
-                Outlook Provider
-              </span>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={fetchGraphStatus}
+                  className="text-slate-500 hover:text-slate-800 p-1 rounded hover:bg-slate-200/60 transition-colors"
+                  title="Refresh Graph credentials status"
+                >
+                  <RefreshCw className="w-3.5 h-3.5" />
+                </button>
+                <span className="text-[10px] text-blue-700 bg-blue-50 font-semibold px-2 py-0.5 rounded border border-blue-200">
+                  App-Only Client Credentials
+                </span>
+              </div>
             </div>
-            <p className="text-[11px] text-slate-500">
-              Configure your Azure AD App Registration to enable "Sign in with Microsoft" and Outlook dispatching. You can also specify these in your environment variables (<code className="font-mono text-[10px] bg-slate-200 px-1 py-0.5 rounded">VITE_MSAL_CLIENT_ID</code> and <code className="font-mono text-[10px] bg-slate-200 px-1 py-0.5 rounded">VITE_MSAL_TENANT_ID</code>).
+
+            <p className="text-[11px] text-slate-500 leading-relaxed">
+              Outreach Flow sends and reads emails via a single fixed Microsoft 365 mailbox using OAuth 2.0 client credentials (no interactive user login). Credentials are saved server-side only:
             </p>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+            {/* Diagnostic Badges */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px]">
+              <div className="bg-white p-2.5 rounded-lg border border-slate-200">
+                <span className="text-slate-400 block text-[10px] font-medium">Tenant ID</span>
+                <span className="font-mono font-semibold text-slate-800 truncate block">
+                  {graphStatus?.diagnostics?.tenantId || (graphStatus?.diagnostics?.configured ? 'Configured' : 'Missing')}
+                </span>
+              </div>
+              <div className="bg-white p-2.5 rounded-lg border border-slate-200">
+                <span className="text-slate-400 block text-[10px] font-medium">Client ID</span>
+                <span className="font-mono font-semibold text-slate-800 truncate block">
+                  {graphStatus?.diagnostics?.clientId || (graphStatus?.diagnostics?.configured ? 'Configured' : 'Missing')}
+                </span>
+              </div>
+              <div className="bg-white p-2.5 rounded-lg border border-slate-200">
+                <span className="text-slate-400 block text-[10px] font-medium">Client Secret</span>
+                <span className={`font-semibold flex items-center gap-1 ${graphStatus?.diagnostics?.hasClientSecret ? 'text-emerald-700' : 'text-amber-700'}`}>
+                  <span className={`w-1.5 h-1.5 rounded-full ${graphStatus?.diagnostics?.hasClientSecret ? 'bg-emerald-500' : 'bg-amber-500'}`} />
+                  {graphStatus?.diagnostics?.hasClientSecret ? 'Configured' : 'Not Set in Env'}
+                </span>
+              </div>
+              <div className="bg-white p-2.5 rounded-lg border border-slate-200">
+                <span className="text-slate-400 block text-[10px] font-medium">Token Cache</span>
+                <span className="font-semibold text-slate-700 truncate block">
+                  {graphStatus?.diagnostics?.hasCachedToken 
+                    ? `Cached (${Math.round((graphStatus.diagnostics.tokenExpiresInSec || 0) / 60)}m)` 
+                    : 'Pending request'}
+                </span>
+              </div>
+            </div>
+
+            {/* Mailbox Profile Details */}
+            <div className="bg-white p-3 rounded-lg border border-slate-200 text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-2">
               <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">
-                  Application (Client) ID:
-                </label>
-                <input
-                  type="text"
-                  value={msalClientId}
-                  onChange={(e) => setLocalMsalClientId(e.target.value)}
-                  placeholder="e.g. 00000000-0000-0000-0000-000000000000"
-                  className="w-full text-xs font-mono px-3 py-2 bg-white border border-slate-300 rounded-lg text-slate-800 focus:outline-hidden focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all"
-                />
+                <span className="text-slate-500 block text-[11px]">Active Service Mailbox:</span>
+                <span className="font-semibold text-slate-800 font-mono">
+                  {graphStatus?.profile?.serviceAccount || formData.senderEmail || 'outreach@yourdomain.com'}
+                </span>
+                <span className="text-slate-500 text-[11px] block mt-0.5">
+                  Display Name: <strong className="text-slate-700">{graphStatus?.profile?.displayName || formData.senderName || 'Outreach Flow'}</strong>
+                </span>
+              </div>
+              <div className="shrink-0">
+                {graphStatus?.diagnostics?.configured ? (
+                  <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-700 bg-emerald-50 px-2.5 py-1 rounded-md border border-emerald-200">
+                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
+                    <span>Credentials Active</span>
+                  </span>
+                ) : (
+                  <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-slate-600 bg-slate-100 px-2.5 py-1 rounded-md border border-slate-200">
+                    <Key className="w-3.5 h-3.5 text-slate-500" />
+                    <span>Requires Secret in Env</span>
+                  </span>
+                )}
+              </div>
+            </div>
+
+            {/* Test Email Dispatch Form */}
+            <div className="bg-white p-3.5 rounded-lg border border-slate-200 space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
+                  <Send className="w-3.5 h-3.5 text-red-600" />
+                  <span>Send Real Test Email via Microsoft Graph</span>
+                </span>
+                <span className="text-[10px] text-slate-500">POST /users/{'{mailbox}'}/sendMail</span>
               </div>
 
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">
-                  Directory (Tenant) ID:
-                </label>
+              <div className="flex flex-col sm:flex-row gap-2">
                 <input
-                  type="text"
-                  value={msalTenantId}
-                  onChange={(e) => setLocalMsalTenantId(e.target.value)}
-                  placeholder="e.g. common, organizations, or tenant GUID"
-                  className="w-full text-xs font-mono px-3 py-2 bg-white border border-slate-300 rounded-lg text-slate-800 focus:outline-hidden focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all"
+                  type="email"
+                  value={testEmailTo}
+                  onChange={(e) => setTestEmailTo(e.target.value)}
+                  placeholder="recipient@example.com"
+                  className="flex-1 text-xs px-2.5 py-1.5 border border-slate-300 rounded-lg focus:ring-1 focus:ring-red-500 font-mono"
+                  title="Recipient for test email"
                 />
+                <button
+                  type="button"
+                  onClick={handleSendTestEmail}
+                  disabled={isSendingTest || !testEmailTo.trim()}
+                  className="inline-flex items-center justify-center gap-1.5 px-3.5 py-1.5 bg-slate-900 hover:bg-slate-800 disabled:opacity-50 text-white rounded-lg text-xs font-semibold shadow-xs transition-colors shrink-0"
+                >
+                  {isSendingTest ? (
+                    <>
+                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                      <span>Sending...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Send className="w-3.5 h-3.5" />
+                      <span>Send Test Email</span>
+                    </>
+                  )}
+                </button>
               </div>
+
+              {testResult && (
+                <div className={`p-2.5 rounded-lg text-xs flex items-start gap-2 ${
+                  testResult.success 
+                    ? 'bg-emerald-50 text-emerald-900 border border-emerald-200' 
+                    : 'bg-red-50 text-red-900 border border-red-200'
+                }`}>
+                  {testResult.success ? (
+                    <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+                  ) : (
+                    <AlertCircle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
+                  )}
+                  <div className="flex-1">
+                    <p className="font-semibold">{testResult.message}</p>
+                    {testResult.details && (
+                      <p className="text-[11px] opacity-80 mt-0.5 font-mono break-all">
+                        {JSON.stringify(testResult.details)}
+                      </p>
+                    )}
+                  </div>
+                </div>
+              )}
             </div>
           </div>
 

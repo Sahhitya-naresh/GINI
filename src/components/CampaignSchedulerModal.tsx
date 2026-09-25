@@ -114,15 +114,6 @@ export const CampaignSchedulerModal: React.FC<CampaignSchedulerModalProps> = ({
   }, [allDueLeads, selectedWorkflowId, selectedWorkflow, includeUnassigned]);
 
   const handleStartCampaignRun = async () => {
-    if (!token) {
-      setValidationError('Please sign in with Google first to perform automated sends and reply checks.');
-      return;
-    }
-    if (!spreadsheetId) {
-      setValidationError('Please connect or create a Google Sheet first.');
-      return;
-    }
-
     setValidationError(null);
     setIsRunning(true);
     setExecutionLogs([]);

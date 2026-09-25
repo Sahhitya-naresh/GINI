@@ -17,15 +17,12 @@ import {
   CheckCircle2,
   Key
 } from 'lucide-react';
-import { MsalUser } from '../services/msalAuth';
 import { BrandLogo } from './BrandLogo';
 
 interface HeaderProps {
-  user: MsalUser | null;
-  token?: string | null;
-  userEmail: string;
-  spreadsheetId: string;
-  spreadsheetName: string;
+  userEmail?: string;
+  spreadsheetId?: string;
+  spreadsheetName?: string;
   dueCount: number;
   repliedCount: number;
   tasksCount?: number;
@@ -34,21 +31,19 @@ interface HeaderProps {
   onSync: () => void;
   isSyncing: boolean;
   onOpenScheduler: () => void;
-  onOpenConnectSheet: () => void;
+  onOpenConnectSheet?: () => void;
   onOpenImportLeads?: () => void;
-  onSignIn: () => void;
-  onSignOut: () => void;
-  isSigningIn: boolean;
   customLogoUrl?: string;
   onLogoChange?: (url: string) => void;
+  user?: any;
+  token?: string | null;
+  onSignIn?: () => void;
+  onSignOut?: () => void;
+  isSigningIn?: boolean;
 }
 
 export const Header: React.FC<HeaderProps> = ({
-  user,
-  token,
   userEmail,
-  spreadsheetId,
-  spreadsheetName,
   dueCount,
   repliedCount,
   tasksCount = 0,
@@ -57,11 +52,6 @@ export const Header: React.FC<HeaderProps> = ({
   onSync,
   isSyncing,
   onOpenScheduler,
-  onOpenConnectSheet,
-  onOpenImportLeads,
-  onSignIn,
-  onSignOut,
-  isSigningIn,
   customLogoUrl,
   onLogoChange
 }) => {
@@ -315,41 +305,6 @@ export const Header: React.FC<HeaderProps> = ({
             >
               <RefreshCw className={`w-4 h-4 ${isSyncing ? 'animate-spin text-red-600' : ''}`} />
             </button>
-
-            {/* User Profile / Microsoft Sign-In */}
-            {user ? (
-              <div className="flex items-center gap-2 pl-2 border-l border-slate-200">
-                <div 
-                  className="w-8 h-8 rounded-full bg-slate-900 text-white flex items-center justify-center text-xs font-semibold overflow-hidden ring-1 ring-slate-200"
-                  title={userEmail || user.displayName || 'Microsoft Account'}
-                >
-                  {(user.displayName || userEmail || 'U').charAt(0).toUpperCase()}
-                </div>
-                <button
-                  onClick={onSignOut}
-                  className="p-1.5 text-slate-400 hover:text-red-600 rounded-lg hover:bg-slate-100 transition-colors"
-                  title="Sign Out"
-                >
-                  <LogOut className="w-4 h-4" />
-                </button>
-              </div>
-            ) : (
-              <button
-                onClick={onSignIn}
-                disabled={isSigningIn}
-                className="flex items-center gap-2 px-3 py-1.5 border border-slate-300 rounded-lg text-xs sm:text-sm font-medium text-slate-700 hover:bg-slate-50 shadow-2xs transition-colors"
-                title="Sign in with your Microsoft 365 or Outlook account"
-              >
-                {/* Microsoft 4-square logo */}
-                <svg className="w-4 h-4" viewBox="0 0 21 21">
-                  <rect x="1" y="1" width="9" height="9" fill="#F25022" />
-                  <rect x="11" y="1" width="9" height="9" fill="#7FBA00" />
-                  <rect x="1" y="11" width="9" height="9" fill="#00A4EF" />
-                  <rect x="11" y="11" width="9" height="9" fill="#FFB900" />
-                </svg>
-                <span>{isSigningIn ? 'Connecting...' : 'Sign in with Microsoft'}</span>
-              </button>
-            )}
           </div>
         </div>
       </div>

@@ -26,6 +26,13 @@ import {
 import { getMongoStatus, getDb, autoSeedFromLocalData, updateMongoUri } from './mongodb.ts';
 import { parseFileBuffer } from './importBackend.ts';
 import { runDueCampaignsJob } from './runnerBackend.ts';
+import {
+  sendAppEmail,
+  checkAppThreadForReply,
+  getServiceAccountProfile,
+  sendDirectTestEmail
+} from './msGraphService.ts';
+import { getAuthDiagnostics } from './msGraphAuth.ts';
 
 export const app = express();
 
@@ -589,3 +596,80 @@ app.post('/api/emails/send', async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 });
+
+// --- Microsoft Graph App-Only Service Account Endpoints ---
+
+app.get('/api/email/service-account', async (_req, res) => {
+  try {
+    const profile = getServiceAccountProfile();
+    const diagnostics = await getAuthDiagnostics();
+    res.json({ success: true, profile, diagnostics });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post('/api/email/send-stage', async (req, res) => {
+  try {
+    const { lead, template, stageNum, customSenderName } = req.body;
+    if (!lead || !lead.email) {
+      return res.status(400).json({ success: false, error: 'Lead with email is required' });
+    }
+    if (!template || !template.subject || !template.bodyHtml) {
+      return res.status(400).json({ success: false, error: 'Stage template is required' });
+    }
+
+    const host = req.get('host') || 'localhost:3000';
+    const protocol = req.protocol || 'http';
+    const baseUrl = `${protocol}://${host}`;
+
+    const result = await sendAppEmail({
+      lead,
+      template,
+      stageNum,
+      senderDisplayName: customSenderName,
+      baseUrl
+    });
+
+    res.json(result);
+  } catch (err: any) {
+    console.error('API /api/email/send-stage error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post('/api/email/check-reply', async (req, res) => {
+  try {
+    const { leadEmail, threadId, lastSentDate } = req.body;
+    if (!leadEmail) {
+      return res.status(400).json({ success: false, error: 'leadEmail is required' });
+    }
+
+    const result = await checkAppThreadForReply({
+      leadEmail,
+      threadId,
+      lastSentDate
+    });
+
+    res.json({ success: true, ...result });
+  } catch (err: any) {
+    console.error('API /api/email/check-reply error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post('/api/email/test-send', async (req, res) => {
+  try {
+    const { to, subject, body } = req.body;
+    if (!to) {
+      return res.status(400).json({ success: false, error: 'Recipient "to" email address is required' });
+    }
+
+    const result = await sendDirectTestEmail(to, subject, body);
+    res.json(result);
+  } catch (err: any) {
+    console.error('API /api/email/test-send error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+

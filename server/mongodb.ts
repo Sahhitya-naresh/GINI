@@ -1,7 +1,8 @@
 import { MongoClient, Db } from 'mongodb';
 import fs from 'fs';
 import path from 'path';
-import 'dotenv/config';
+import dotenv from 'dotenv';
+dotenv.config({ override: true });
 
 export const DEFAULT_MONGODB_URI = 'mongodb+srv://sahhityanaresh_db_user:test12345678@cluster0.zebcge8.mongodb.net/?appName=Cluster0';
 

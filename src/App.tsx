@@ -1,13 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { Lead, StageTemplate, AppSettings, SendLogEntry, CampaignWorkflow, ConnectedSender, LeadManualTask, TrackingEvent } from './types';
 import { 
-  MsalUser,
-  initMsalAuth, 
-  msalSignIn, 
-  msalSignOut, 
-  getMsalAccessToken 
-} from './services/msalAuth';
-import { 
   getOutlookProfile, 
   checkThreadForLeadReply, 
   sendStageEmail 
@@ -241,12 +234,8 @@ const INITIAL_FALLBACK_LEADS: Lead[] = [
 ];
 
 export default function App() {
-  // Auth state
-  const [user, setUser] = useState<MsalUser | null>(null);
-  const [token, setToken] = useState<string | null>(null);
+  // Service account mailbox state
   const [userEmail, setUserEmail] = useState<string>('');
-  const [isSigningIn, setIsSigningIn] = useState(false);
-  const [needsAuth, setNeedsAuth] = useState(false);
 
   // App core state
   const [leads, setLeads] = useState<Lead[]>(INITIAL_FALLBACK_LEADS);
@@ -318,7 +307,7 @@ export default function App() {
         updated[idx] = {
           ...updated[idx],
           email: userEmail,
-          name: user?.displayName || updated[idx].name || 'Primary Workspace Account'
+          name: updated[idx].name || 'Primary Workspace Account'
         };
         saveConnectedSenders(updated);
         saveSendersToBackend(updated).catch(() => {});
@@ -326,7 +315,7 @@ export default function App() {
       }
       return prev;
     });
-  }, [userEmail, user?.displayName]);
+  }, [userEmail]);
 
   // Track selected campaign across sessions/reloads
   useEffect(() => {
@@ -342,7 +331,7 @@ export default function App() {
     let isCancelled = false;
     async function loadCampaigns() {
       try {
-        const backendWorkflows = await fetchCampaignsFromBackend(token || undefined, spreadsheetId || undefined);
+        const backendWorkflows = await fetchCampaignsFromBackend(undefined, spreadsheetId || undefined);
         if (!isCancelled && backendWorkflows && backendWorkflows.length > 0) {
           setWorkflows(backendWorkflows);
           const savedActiveId = localStorage.getItem('outreach_flow_active_workflow_id');
@@ -358,7 +347,7 @@ export default function App() {
     }
     loadCampaigns();
     return () => { isCancelled = true; };
-  }, [token, spreadsheetId]);
+  }, [spreadsheetId]);
 
   // Workflow Handlers
   const handleSaveWorkflow = async (updated: CampaignWorkflow) => {
@@ -376,7 +365,7 @@ export default function App() {
     });
 
     try {
-      await saveCampaignToBackend(updated, token || undefined, spreadsheetId || undefined);
+      await saveCampaignToBackend(updated, undefined, spreadsheetId || undefined);
       showToast(`Campaign "${updated.name}" saved!`, 'success');
     } catch (err: any) {
       console.warn('Saved locally, backend sync warning:', err);
@@ -393,7 +382,7 @@ export default function App() {
     setActiveWorkflowId(newW.id);
 
     try {
-      await saveCampaignToBackend(newW, token || undefined, spreadsheetId || undefined);
+      await saveCampaignToBackend(newW, undefined, spreadsheetId || undefined);
       showToast(`Created workflow "${newW.name}"`, 'success');
     } catch (err: any) {
       showToast(`Created workflow "${newW.name}" locally`, 'info');
@@ -411,7 +400,7 @@ export default function App() {
     });
 
     try {
-      await deleteCampaignFromBackend(workflowId, token || undefined, spreadsheetId || undefined);
+      await deleteCampaignFromBackend(workflowId, undefined, spreadsheetId || undefined);
       showToast('Workflow deleted', 'info');
     } catch (err: any) {
       showToast('Workflow removed locally', 'info');
@@ -426,7 +415,7 @@ export default function App() {
     });
 
     try {
-      await toggleCampaignActiveOnBackend(workflowId, isActive, token || undefined, spreadsheetId || undefined);
+      await toggleCampaignActiveOnBackend(workflowId, isActive, undefined, spreadsheetId || undefined);
     } catch (err: any) {
       console.warn('Backend campaign toggle active warning:', err);
     }
@@ -535,28 +524,13 @@ export default function App() {
     return () => clearInterval(interval);
   }, [syncTrackingMetrics]);
 
-  // 1. Initialize MSAL Auth on Mount
+  // 1. Fetch Microsoft Graph Service Account Mailbox on Mount
   useEffect(() => {
-    const unsubscribe = initMsalAuth(
-      async (authedUser, accessToken) => {
-        setUser(authedUser);
-        setToken(accessToken);
-        setNeedsAuth(false);
-        try {
-          const profile = await getOutlookProfile(accessToken);
-          setUserEmail(profile.emailAddress);
-        } catch (e) {
-          console.warn('Could not fetch Outlook profile:', e);
-          setUserEmail(authedUser.email || '');
-        }
-      },
-      () => {
-        setUser(null);
-        setToken(null);
-        setNeedsAuth(true);
+    getOutlookProfile().then(profile => {
+      if (profile && profile.emailAddress) {
+        setUserEmail(profile.emailAddress);
       }
-    );
-    return () => unsubscribe();
+    });
   }, []);
 
 // Helper to ensure leads array is strictly de-duplicated by leadId and email
@@ -629,40 +603,6 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
     syncData();
   }, [syncData]);
 
-  // Auth Handlers
-  const handleSignIn = async () => {
-    setIsSigningIn(true);
-    try {
-      const res = await msalSignIn();
-      if (res) {
-        setUser(res.user);
-        setToken(res.accessToken);
-        setNeedsAuth(false);
-        try {
-          const profile = await getOutlookProfile(res.accessToken);
-          setUserEmail(profile.emailAddress);
-        } catch (e) {
-          setUserEmail(res.user.email || '');
-        }
-        showToast('Signed in successfully with Microsoft!', 'success');
-      }
-    } catch (err: any) {
-      console.error('Login error:', err);
-      showToast(`Sign in error: ${err.message || 'Failed to authenticate'}`, 'error');
-    } finally {
-      setIsSigningIn(false);
-    }
-  };
-
-  const handleSignOut = async () => {
-    await msalSignOut();
-    setUser(null);
-    setToken(null);
-    setUserEmail('');
-    setNeedsAuth(true);
-    showToast('Signed out of Microsoft account.', 'info');
-  };
-
   // Template changes
   const handleSaveTemplates = (updated: StageTemplate[]) => {
     setTemplates(updated);
@@ -707,7 +647,7 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
   // Update notes / pain point ensuring data consistency before UI updates
   const handleUpdateLead = async (updated: Lead) => {
     try {
-      const savedLead = await updateLead(updated, token || undefined, spreadsheetId || undefined);
+      const savedLead = await updateLead(updated, undefined, spreadsheetId || undefined);
       setLeads(prev => prev.map(l => l.leadId === savedLead.leadId ? savedLead : l));
       if (selectedLead && selectedLead.leadId === savedLead.leadId) {
         setSelectedLead(savedLead);
@@ -722,7 +662,7 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
   // Add new lead ensuring data consistency before UI updates
   const handleAddLead = async (newLead: Lead) => {
     try {
-      const saved = await createLead(newLead, token || undefined, spreadsheetId || undefined);
+      const saved = await createLead(newLead, undefined, spreadsheetId || undefined);
       setLeads(prev => {
         const existingIdx = prev.findIndex(
           l => l.leadId === saved.leadId || (l.email && l.email.toLowerCase() === saved.email?.toLowerCase())
@@ -744,7 +684,7 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
   // Delete lead ensuring data consistency before UI updates
   const handleDeleteLead = async (lead: Lead) => {
     try {
-      const success = await deleteLead(lead.leadId, token || undefined, spreadsheetId || undefined, lead.rowIndex);
+      const success = await deleteLead(lead.leadId, undefined, spreadsheetId || undefined, lead.rowIndex);
       if (success) {
         setLeads(prev => prev.filter(l => l.leadId !== lead.leadId));
         if (selectedLead?.leadId === lead.leadId) {
@@ -762,7 +702,7 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
   // Commit batch imported leads from CSV / Excel ensuring data consistency before UI updates
   const handleCommitImport = async (importedLeads: Partial<Lead>[]) => {
     try {
-      const savedLeads = await batchCreateLeads(importedLeads, token || undefined, spreadsheetId || undefined);
+      const savedLeads = await batchCreateLeads(importedLeads, undefined, spreadsheetId || undefined);
       setLeads(prev => {
         const copy = [...prev];
         for (const saved of savedLeads) {
@@ -787,10 +727,6 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
 
   // Check single lead for replies
   const handleCheckSingleReply = async (lead: Lead) => {
-    if (!token) {
-      showToast('Please sign in with Microsoft to check email threads.', 'error');
-      return;
-    }
     if (!lead.threadId) {
       showToast('No email thread initialized yet for this lead.', 'info');
       return;
@@ -798,7 +734,7 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
 
     try {
       const res = await checkThreadForLeadReply(
-        token,
+        undefined,
         lead.threadId,
         lead.email,
         userEmail,
@@ -823,11 +759,6 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
 
   // Bulk check replies on all active leads
   const handleCheckAllReplies = async () => {
-    if (!token) {
-      showToast('Please sign in with Microsoft to check replies.', 'error');
-      return;
-    }
-
     const leadsWithThreads = leads.filter(l => l.threadId && (l.status === 'Active' || l.status === 'Paused'));
     if (leadsWithThreads.length === 0) {
       showToast('No active leads with active email threads to check.', 'info');
@@ -842,7 +773,7 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
       const updatedList = [...leads];
       for (const targetLead of leadsWithThreads) {
         const replyCheck = await checkThreadForLeadReply(
-          token,
+          undefined,
           targetLead.threadId,
           targetLead.email,
           userEmail,
@@ -907,18 +838,13 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
   };
 
   const executeSendStageEmail = async (lead: Lead, template: StageTemplate, stageNum: number) => {
-    if (!token) {
-      showToast('Please sign in with Microsoft first.', 'error');
-      return;
-    }
-
     try {
       showToast(`Sending Stage ${stageNum} to ${lead.name}...`, 'info');
 
       // 1. Reply check safety
       if (lead.threadId) {
         const replyCheck = await checkThreadForLeadReply(
-          token,
+          undefined,
           lead.threadId,
           lead.email,
           userEmail,
@@ -939,7 +865,7 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
 
       // 2. Dispatch email via Outlook
       const result = await sendStageEmail(
-        token,
+        undefined,
         lead,
         template,
         userEmail,
@@ -994,8 +920,6 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
     <div className="min-h-screen bg-slate-100/70 text-slate-900 flex flex-col font-sans antialiased">
       {/* Header */}
       <Header
-        user={user}
-        token={token}
         userEmail={userEmail}
         spreadsheetId={spreadsheetId}
         spreadsheetName={spreadsheetName}
@@ -1015,9 +939,6 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
         onOpenScheduler={() => setIsSchedulerOpen(true)}
         onOpenConnectSheet={() => {}}
         onOpenImportLeads={() => setIsImportLeadsOpen(true)}
-        onSignIn={handleSignIn}
-        onSignOut={handleSignOut}
-        isSigningIn={isSigningIn}
         customLogoUrl={settings.customLogoUrl}
         onLogoChange={handleLogoChange}
       />
@@ -1140,7 +1061,7 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
           setSelectedLead(null);
         }}
         templates={templates}
-        token={token}
+        token={null}
         userEmail={userEmail}
         onTogglePause={handleTogglePause}
         onSendNextStage={handleInitiateSendNextStage}
@@ -1158,7 +1079,7 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
         settings={settings}
         workflows={workflows}
         senders={senders}
-        token={token}
+        token={null}
         userEmail={userEmail}
         spreadsheetId={spreadsheetId}
         onRunCompleted={handleSchedulerCompleted}

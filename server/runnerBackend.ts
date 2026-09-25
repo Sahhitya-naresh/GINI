@@ -8,7 +8,8 @@ import {
   loadLocalTasks,
   saveLocalTasks
 } from './mongoBackend.ts';
-import { getEmailProvider } from '../src/services/email/providerRegistry.ts';
+import { checkAppThreadForReply, sendAppEmail } from './msGraphService.ts';
+import { DEFAULT_STAGE_TEMPLATES } from '../src/data/defaultTemplates.ts';
 
 export interface CampaignRunResult {
   success: boolean;
@@ -37,13 +38,13 @@ export interface RunnerManualTask {
 
 /**
  * Checks whether a lead has replied to previous outreach.
- * Uses the active EmailProvider's checkThreadForReply method based on the lead sender's provider (Outlook, Gmail, etc.)
+ * Uses the server-side app-only Microsoft Graph service account to check the fixed mailbox.
  */
 async function checkLeadForReply(
   lead: BackendLead,
-  token?: string,
-  userEmail?: string,
-  sender?: BackendSender
+  _token?: string,
+  _userEmail?: string,
+  _sender?: BackendSender
 ): Promise<{ hasReplied: boolean; reason?: string }> {
   // 1. Check explicit reply indicators on lead record
   if (lead.status === 'Replied') {
@@ -53,29 +54,23 @@ async function checkLeadForReply(
     return { hasReplied: true, reason: 'Incoming reply flag detected on lead record' };
   }
 
-  // 2. Query thread via the appropriate EmailProvider if token and threadId are available
-  if (token && lead.threadId) {
-    try {
-      const providerType = sender?.provider || 'outlook';
-      const provider = getEmailProvider(providerType);
-      const replyResult = await provider.checkThreadForReply({
-        token,
-        threadId: lead.threadId,
-        leadEmail: lead.email,
-        userEmail: userEmail || sender?.email || '',
-        lastSentDate: lead.lastEmailSentDate
-      });
+  // 2. Query fixed service account mailbox via Microsoft Graph
+  try {
+    const res = await checkAppThreadForReply({
+      leadEmail: lead.email,
+      threadId: lead.threadId,
+      lastSentDate: lead.lastEmailSentDate
+    });
 
-      if (replyResult.hasReplied) {
-        const fromInfo = replyResult.replyMessage?.from ? ` (${replyResult.replyMessage.from})` : '';
-        return {
-          hasReplied: true,
-          reason: `Lead reply detected via ${provider.displayName}${fromInfo}`
-        };
-      }
-    } catch (err) {
-      console.warn(`Error checking thread for reply on lead ${lead.email} via provider:`, err);
+    if (res.hasReplied) {
+      const fromInfo = res.replyMessage?.from ? ` (${res.replyMessage.from})` : '';
+      return {
+        hasReplied: true,
+        reason: `Lead reply detected in Microsoft Graph service account mailbox${fromInfo}`
+      };
     }
+  } catch (err) {
+    console.warn(`Error checking thread for reply on lead ${lead.email} via Graph:`, err);
   }
 
   return { hasReplied: false };
@@ -414,6 +409,20 @@ export async function runDueCampaignsJob(
         // 5.5 ONLY THEN EXECUTE THE SEND:
         const stageNum = currentNode.data?.templateStage || (lead.currentStage + 1);
         const sendFromAccount = sender ? sender.email : (currentNode.data?.senderEmail || userEmail || 'Default Inbox');
+        const template = DEFAULT_STAGE_TEMPLATES.find(t => t.stage === stageNum) || DEFAULT_STAGE_TEMPLATES[0];
+
+        try {
+          const sendResult = await sendAppEmail({
+            lead: lead as any,
+            template,
+            stageNum,
+            senderDisplayName: sender?.name
+          });
+          lead.threadId = sendResult.threadId;
+        } catch (sendErr: any) {
+          logs.push(`Email dispatch to ${lead.name} failed via Graph: ${sendErr.message}. Skipping advance.`);
+          continue;
+        }
 
         // Increment sender's daily sends count and persist
         if (sender) {

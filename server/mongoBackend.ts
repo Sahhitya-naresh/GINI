@@ -412,11 +412,50 @@ export async function toggleCampaignActive(campaignId: string, isActive: boolean
 // ---------------------------------------------------------------------------
 
 export async function loadLocalSenders(): Promise<BackendSender[]> {
+  const serviceAccount = (process.env.MICROSOFT_GRAPH_SERVICE_ACCOUNT || '').trim();
+  const displayName = (process.env.MICROSOFT_GRAPH_DISPLAY_NAME || 'Microsoft Graph Service Mailbox').trim();
+
   const db = await getDb();
-  const senders = await db
+  let senders = await db
     .collection<BackendSender>(COLLECTIONS.SENDERS)
     .find({}, { projection: { _id: 0 } })
     .toArray();
+
+  if (senders.length === 0) {
+    const defaultSender: BackendSender = {
+      id: 'sender-primary',
+      name: displayName,
+      email: serviceAccount || 'service-account@domain.com',
+      avatarUrl: '',
+      status: 'connected',
+      isPrimary: true,
+      dailySendLimit: 500,
+      sendsToday: 0,
+      provider: 'outlook',
+      lastUsedAt: new Date().toISOString()
+    };
+    await db.collection(COLLECTIONS.SENDERS).insertOne(defaultSender);
+    return [defaultSender];
+  }
+
+  // When a service account mailbox is configured, ensure the primary sender reflects it
+  if (serviceAccount) {
+    return senders.map((s, idx) => {
+      if (s.isPrimary || idx === 0) {
+        return {
+          ...s,
+          name: displayName || s.name,
+          email: serviceAccount,
+          provider: 'outlook',
+          status: 'connected'
+        };
+      }
+      return {
+        ...s,
+        provider: s.provider || 'outlook'
+      };
+    });
+  }
 
   // Ensure each sender has a provider defined (default 'outlook')
   return senders.map(s => ({
@@ -431,7 +470,7 @@ export async function saveLocalSenders(senders: BackendSender[]): Promise<Backen
 
   const normalized = senders.map(s => ({
     ...s,
-    provider: s.provider || 'gmail'
+    provider: s.provider || 'outlook'
   }));
 
   if (normalized.length > 0) {
