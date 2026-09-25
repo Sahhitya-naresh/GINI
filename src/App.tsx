@@ -790,6 +790,7 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
 
           const idx = updatedList.findIndex(l => l.leadId === targetLead.leadId);
           if (idx !== -1) updatedList[idx] = updated;
+          await handleUpdateLead(updated);
         }
       }
 

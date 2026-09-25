@@ -150,6 +150,30 @@ export async function sendAppEmail(params: SendAppEmailParams): Promise<SendAppE
     saveToSentItems: true
   };
 
+  // If this lead is part of an existing conversation thread, attach threading headers
+  if (params.lead.threadId && !params.lead.threadId.startsWith('graph-conv-')) {
+    try {
+      const threadCheckUrl = `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(config.serviceAccount)}/messages?$filter=conversationId eq '${encodeURIComponent(params.lead.threadId)}'&$top=1&$orderby=sentDateTime desc&$select=id,internetMessageId,subject`;
+      const threadRes = await fetch(threadCheckUrl, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (threadRes.ok) {
+        const threadData = await threadRes.json();
+        const prevMsg = threadData.value?.[0];
+        if (prevMsg?.internetMessageId) {
+          emailMessage.message.internetMessageHeaders = [
+            { name: 'In-Reply-To', value: prevMsg.internetMessageId },
+            { name: 'References', value: prevMsg.internetMessageId }
+          ];
+        }
+      }
+    } catch (e) {
+      console.warn('[MS Graph] Could not fetch previous message in conversation for threading headers:', e);
+    }
+  }
+
+  const sendStartTime = new Date(Date.now() - 5000); // 5-second buffer for clock skew
+
   const response = await fetch(endpoint, {
     method: 'POST',
     headers: {
@@ -171,8 +195,83 @@ export async function sendAppEmail(params: SendAppEmailParams): Promise<SendAppE
     throw new Error(`Microsoft Graph sendMail failed (${response.status}): ${msg}`);
   }
 
-  const threadId = params.lead.threadId || `graph-conv-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
-  const messageId = `graph-msg-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
+  // Query Sent Items to reliably capture real messageId and conversationId
+  const cleanLeadEmail = params.lead.email.trim().toLowerCase();
+  let realMessageId: string | null = null;
+  let realConversationId: string | null = null;
+
+  async function querySentItems(attempt = 1): Promise<void> {
+    try {
+      const sinceISO = sendStartTime.toISOString();
+      const queryUrl = `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(config.serviceAccount)}/mailFolders/sentitems/messages?$filter=sentDateTime ge ${encodeURIComponent(sinceISO)}&$orderby=sentDateTime desc&$top=5&$select=id,conversationId,subject,sentDateTime,toRecipients`;
+
+      const sentRes = await fetch(queryUrl, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+
+      if (sentRes.ok) {
+        const sentData = await sentRes.json();
+        const sentMessages: any[] = sentData.value || [];
+
+        // 1. Try exact recipient + subject match
+        const exactMatch = sentMessages.find((msg: any) => {
+          const recs: any[] = msg.toRecipients || [];
+          const matchesTo = recs.some((r: any) => (r.emailAddress?.address || '').trim().toLowerCase() === cleanLeadEmail);
+          const cleanSubject = (msg.subject || '').trim().toLowerCase();
+          const cleanTarget = renderedSubject.trim().toLowerCase();
+          return matchesTo && (cleanSubject === cleanTarget || cleanSubject.includes(cleanTarget) || cleanTarget.includes(cleanSubject));
+        });
+
+        if (exactMatch && exactMatch.conversationId) {
+          realMessageId = exactMatch.id;
+          realConversationId = exactMatch.conversationId;
+          return;
+        }
+
+        // 2. Fallback: match by recipient if subject was altered
+        const recipientMatch = sentMessages.find((msg: any) => {
+          const recs: any[] = msg.toRecipients || [];
+          return recs.some((r: any) => (r.emailAddress?.address || '').trim().toLowerCase() === cleanLeadEmail);
+        });
+
+        if (recipientMatch && recipientMatch.conversationId) {
+          realMessageId = recipientMatch.id;
+          realConversationId = recipientMatch.conversationId;
+          return;
+        }
+      }
+    } catch (err) {
+      console.warn(`[MS Graph] Error querying Sent Items (attempt ${attempt}):`, err);
+    }
+
+    // Indexing delay retry
+    if (attempt === 1) {
+      await new Promise(r => setTimeout(r, 1500));
+      await querySentItems(2);
+    }
+  }
+
+  await querySentItems(1);
+
+  // Preserve previously-stored real conversationId for follow-up sequence stages
+  const existingRealThreadId = params.lead.threadId && !params.lead.threadId.startsWith('graph-conv-')
+    ? params.lead.threadId
+    : null;
+
+  let threadId = realConversationId || existingRealThreadId;
+  let messageId = realMessageId;
+
+  if (!threadId) {
+    console.warn(
+      `[MS Graph] Warning: Could not locate real conversationId in Sent Items for lead ${params.lead.email} ("${renderedSubject}"). ` +
+      `Falling back to secondary sender-email reply matching.`
+    );
+    threadId = existingRealThreadId || `graph-conv-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
+  }
+
+  if (!messageId) {
+    messageId = `graph-msg-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
+  }
 
   return {
     success: true,
@@ -206,7 +305,9 @@ export async function checkAppThreadForReply(params: CheckReplyParams): Promise<
   // Strategy 1: Check by conversationId if present
   if (params.threadId && !params.threadId.startsWith('graph-conv-')) {
     try {
-      const url = `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(serviceAccount)}/messages?$filter=conversationId eq '${encodeURIComponent(params.threadId)}'&$top=20&$select=id,conversationId,subject,from,receivedDateTime,bodyPreview&$orderby=receivedDateTime desc`;
+      // Note: Microsoft Graph rejects $orderby when filtering by conversationId (InefficientFilter error).
+      // We retrieve conversation messages and sort by receivedDateTime desc in memory.
+      const url = `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(serviceAccount)}/messages?$filter=conversationId eq '${encodeURIComponent(params.threadId)}'&$top=25&$select=id,conversationId,subject,from,receivedDateTime,bodyPreview`;
       const res = await fetch(url, {
         headers: { Authorization: `Bearer ${token}` }
       });
@@ -214,15 +315,24 @@ export async function checkAppThreadForReply(params: CheckReplyParams): Promise<
       if (res.ok) {
         const data = await res.json();
         const messages: any[] = data.value || [];
+        // Sort descending by receivedDateTime in memory
+        messages.sort((a, b) => new Date(b.receivedDateTime || 0).getTime() - new Date(a.receivedDateTime || 0).getTime());
 
         for (const msg of messages) {
           const senderEmail = (msg.from?.emailAddress?.address || '').toLowerCase().trim();
-          if (senderEmail === cleanLeadEmail) {
+          // Skip messages sent by the service account itself
+          if (senderEmail === serviceAccount.toLowerCase()) {
+            continue;
+          }
+
+          if (senderEmail === cleanLeadEmail || senderEmail.includes(cleanLeadEmail) || cleanLeadEmail.includes(senderEmail)) {
             // Check lastSentDate if provided
             if (params.lastSentDate) {
               const msgDate = new Date(msg.receivedDateTime).getTime();
-              const sentDate = new Date(params.lastSentDate).getTime();
-              if (msgDate < sentDate - 60000) {
+              const sentDate = params.lastSentDate.includes('T')
+                ? new Date(params.lastSentDate).getTime()
+                : new Date(`${params.lastSentDate}T00:00:00Z`).getTime();
+              if (!isNaN(sentDate) && !isNaN(msgDate) && msgDate < sentDate - 60000) {
                 continue;
               }
             }
@@ -352,6 +462,8 @@ export async function sendDirectTestEmail(to: string, customSubject?: string, cu
     saveToSentItems: true
   };
 
+  const sendStartTime = new Date(Date.now() - 5000);
+
   const response = await fetch(endpoint, {
     method: 'POST',
     headers: {
@@ -372,11 +484,34 @@ export async function sendDirectTestEmail(to: string, customSubject?: string, cu
     throw new Error(`Test email failed (${response.status}): ${parsed.error?.message || errorText}`);
   }
 
+  // Attempt to capture real conversationId and messageId from Sent Items
+  let capturedMessageId: string | null = null;
+  let capturedConversationId: string | null = null;
+
+  try {
+    const queryUrl = `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(config.serviceAccount)}/mailFolders/sentitems/messages?$filter=sentDateTime ge ${encodeURIComponent(sendStartTime.toISOString())}&$orderby=sentDateTime desc&$top=3&$select=id,conversationId,subject,sentDateTime,toRecipients`;
+    const sentRes = await fetch(queryUrl, { headers: { Authorization: `Bearer ${token}` } });
+    if (sentRes.ok) {
+      const sentData = await sentRes.json();
+      const match = (sentData.value || []).find((m: any) =>
+        (m.toRecipients || []).some((r: any) => (r.emailAddress?.address || '').toLowerCase() === to.trim().toLowerCase())
+      );
+      if (match) {
+        capturedMessageId = match.id;
+        capturedConversationId = match.conversationId;
+      }
+    }
+  } catch (lookupErr) {
+    console.warn('[MS Graph] Direct test email SentItems lookup skipped:', lookupErr);
+  }
+
   return {
     success: true,
     statusCode: response.status,
     sentTo: to,
     from: config.serviceAccount,
+    messageId: capturedMessageId || undefined,
+    conversationId: capturedConversationId || undefined,
     timestamp: new Date().toISOString()
   };
 }
