@@ -25,6 +25,7 @@ export const DEFAULT_SENDERS: ConnectedSender[] = [
     isPrimary: true,
     dailySendLimit: 150,
     sendsToday: 0,
+    provider: 'outlook',
     lastUsedAt: new Date().toISOString()
   },
   {
@@ -36,6 +37,7 @@ export const DEFAULT_SENDERS: ConnectedSender[] = [
     isPrimary: false,
     dailySendLimit: 200,
     sendsToday: 0,
+    provider: 'outlook',
     lastUsedAt: new Date().toISOString()
   },
   {
@@ -47,6 +49,7 @@ export const DEFAULT_SENDERS: ConnectedSender[] = [
     isPrimary: false,
     dailySendLimit: 150,
     sendsToday: 0,
+    provider: 'outlook',
     lastUsedAt: new Date().toISOString()
   },
   {
@@ -58,6 +61,7 @@ export const DEFAULT_SENDERS: ConnectedSender[] = [
     isPrimary: false,
     dailySendLimit: 100,
     sendsToday: 0,
+    provider: 'outlook',
     lastUsedAt: new Date().toISOString()
   }
 ];

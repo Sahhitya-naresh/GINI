@@ -1,13 +1,16 @@
 import { EmailProvider } from './types';
 import { GmailProvider } from './gmailProvider';
+import { OutlookProvider } from './outlookProvider';
 
 class EmailProviderRegistry {
   private providers: Map<string, EmailProvider> = new Map();
 
   constructor() {
-    // Register standard default Gmail provider
-    const defaultGmail = new GmailProvider();
-    this.register(defaultGmail);
+    // Register both Outlook and Gmail providers
+    const defaultOutlook = new OutlookProvider();
+    const gmail = new GmailProvider();
+    this.register(defaultOutlook);
+    this.register(gmail);
   }
 
   register(provider: EmailProvider): void {
@@ -15,11 +18,11 @@ class EmailProviderRegistry {
   }
 
   getProvider(providerType?: string): EmailProvider {
-    const key = (providerType || 'gmail').trim().toLowerCase();
+    const key = (providerType || 'outlook').trim().toLowerCase();
     const provider = this.providers.get(key);
     if (!provider) {
-      console.warn(`[EmailRegistry] Provider "${providerType}" not registered. Falling back to Gmail.`);
-      return this.providers.get('gmail')!;
+      console.warn(`[EmailRegistry] Provider "${providerType}" not registered. Falling back to Outlook.`);
+      return (this.providers.get('outlook') || this.providers.get('gmail'))!;
     }
     return provider;
   }

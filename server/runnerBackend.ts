@@ -1,4 +1,4 @@
-import type { BackendLead, BackendCampaign } from './mongoBackend.ts';
+import type { BackendLead, BackendCampaign, BackendSender } from './mongoBackend.ts';
 import { 
   listLeads, 
   listCampaigns, 
@@ -8,6 +8,7 @@ import {
   loadLocalTasks,
   saveLocalTasks
 } from './mongoBackend.ts';
+import { getEmailProvider } from '../src/services/email/providerRegistry.ts';
 
 export interface CampaignRunResult {
   success: boolean;
@@ -36,12 +37,13 @@ export interface RunnerManualTask {
 
 /**
  * Checks whether a lead has replied to previous outreach.
- * Inspects lead status/flags and checks the thread in Gmail when credentials are present.
+ * Uses the active EmailProvider's checkThreadForReply method based on the lead sender's provider (Outlook, Gmail, etc.)
  */
 async function checkLeadForReply(
   lead: BackendLead,
   token?: string,
-  userEmail?: string
+  userEmail?: string,
+  sender?: BackendSender
 ): Promise<{ hasReplied: boolean; reason?: string }> {
   // 1. Check explicit reply indicators on lead record
   if (lead.status === 'Replied') {
@@ -51,32 +53,28 @@ async function checkLeadForReply(
     return { hasReplied: true, reason: 'Incoming reply flag detected on lead record' };
   }
 
-  // 2. Query Gmail thread if token and threadId are available
+  // 2. Query thread via the appropriate EmailProvider if token and threadId are available
   if (token && lead.threadId) {
     try {
-      const res = await fetch(
-        `https://gmail.googleapis.com/gmail/v1/users/me/threads/${lead.threadId}?format=metadata`,
-        { headers: { Authorization: `Bearer ${token}` } }
-      );
-      if (res.ok) {
-        const data = await res.json();
-        const messages: any[] = data.messages || [];
-        const cleanLeadEmail = (lead.email || '').trim().toLowerCase();
-        const cleanUserEmail = (userEmail || '').trim().toLowerCase();
+      const providerType = sender?.provider || 'outlook';
+      const provider = getEmailProvider(providerType);
+      const replyResult = await provider.checkThreadForReply({
+        token,
+        threadId: lead.threadId,
+        leadEmail: lead.email,
+        userEmail: userEmail || sender?.email || '',
+        lastSentDate: lead.lastEmailSentDate
+      });
 
-        for (const msg of messages) {
-          const headers: any[] = msg.payload?.headers || [];
-          const fromHeader = (headers.find((h: any) => h.name?.toLowerCase() === 'from')?.value || '').toLowerCase();
-          if (cleanLeadEmail && fromHeader.includes(cleanLeadEmail)) {
-            return { hasReplied: true, reason: `Lead response message detected in thread (${fromHeader})` };
-          }
-          if (cleanUserEmail && !fromHeader.includes(cleanUserEmail) && messages.length > 1) {
-            return { hasReplied: true, reason: `Counterpart reply detected in Gmail thread (${fromHeader})` };
-          }
-        }
+      if (replyResult.hasReplied) {
+        const fromInfo = replyResult.replyMessage?.from ? ` (${replyResult.replyMessage.from})` : '';
+        return {
+          hasReplied: true,
+          reason: `Lead reply detected via ${provider.displayName}${fromInfo}`
+        };
       }
     } catch (err) {
-      console.warn(`Error checking Gmail thread for reply on lead ${lead.email}:`, err);
+      console.warn(`Error checking thread for reply on lead ${lead.email} via provider:`, err);
     }
   }
 
@@ -271,8 +269,14 @@ export async function runDueCampaignsJob(
       // --------------------------------------------------------------------
       // STEP 2: CHECK FOR REPLY FIRST
       // If found, pulls the lead to Needs Reply (status: Replied) instead of sending!
+      // Look up sender record for this lead to use correct provider instance
       // --------------------------------------------------------------------
-      const replyCheck = await checkLeadForReply(lead, token, userEmail);
+      const leadSender = 
+        senders.find((s: any) => s.email === lead.senderUsed || s.id === lead.senderUsed) ||
+        senders.find((s: any) => s.isPrimary) ||
+        senders[0];
+
+      const replyCheck = await checkLeadForReply(lead, token, userEmail, leadSender);
       if (replyCheck.hasReplied) {
         lead.status = 'Replied';
         lead.notes = lead.notes

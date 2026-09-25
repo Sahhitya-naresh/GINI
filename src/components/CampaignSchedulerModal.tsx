@@ -1,7 +1,7 @@
 import React, { useState, useMemo } from 'react';
 import { Lead, StageTemplate, AppSettings, SendLogEntry, CampaignWorkflow, ConnectedSender, LeadManualTask } from '../types';
 import { isLeadDueForNextSend, addBusinessDays, getTodayDateString, formatDisplayDate } from '../utils/dateUtils';
-import { checkThreadForLeadReply, sendStageEmail } from '../services/gmailService';
+import { checkThreadForLeadReply, sendStageEmail } from '../services/outlookService';
 import { updateLead } from '../services/leadBackendService';
 import { isWithinSchedule, evaluateCondition, findNextNode, getLeadCurrentNodeId } from '../services/workflowService';
 import { 
@@ -341,7 +341,7 @@ export const CampaignSchedulerModal: React.FC<CampaignSchedulerModalProps> = ({
           userEmail,
           effectiveSenderName,
           undefined,
-          senderObj?.provider || 'gmail'
+          senderObj?.provider || 'outlook'
         );
 
         // Increment sender sends count

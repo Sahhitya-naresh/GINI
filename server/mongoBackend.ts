@@ -418,10 +418,10 @@ export async function loadLocalSenders(): Promise<BackendSender[]> {
     .find({}, { projection: { _id: 0 } })
     .toArray();
 
-  // Ensure each sender has a provider defined (default 'gmail')
+  // Ensure each sender has a provider defined (default 'outlook')
   return senders.map(s => ({
     ...s,
-    provider: s.provider || 'gmail'
+    provider: s.provider || 'outlook'
   }));
 }
 

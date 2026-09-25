@@ -355,7 +355,7 @@ export async function autoSeedFromLocalData(db: Db): Promise<{ seeded: boolean; 
               update: {
                 $set: {
                   ...s,
-                  provider: s.provider || 'gmail' // Default email provider is Gmail
+                  provider: s.provider || 'outlook' // Default email provider is Outlook
                 }
               },
               upsert: true

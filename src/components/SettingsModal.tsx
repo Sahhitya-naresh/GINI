@@ -17,6 +17,8 @@ import {
 } from 'lucide-react';
 import { AppSettings, StageTemplate, ConnectedSender } from '../types';
 import { BrandLogo } from './BrandLogo';
+import { getMsalClientId, setMsalClientId, getMsalTenantId, setMsalTenantId, resetMsalInstance } from '../services/msalAuth';
+import { Key } from 'lucide-react';
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -47,6 +49,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [newSenderName, setNewSenderName] = useState('');
   const [newSenderEmail, setNewSenderEmail] = useState('');
   const [newSenderLimit, setNewSenderLimit] = useState(50);
+  const [msalClientId, setLocalMsalClientId] = useState(() => getMsalClientId());
+  const [msalTenantId, setLocalMsalTenantId] = useState(() => getMsalTenantId());
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
@@ -152,7 +156,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       status: 'connected',
       dailySendLimit: newSenderLimit || 50,
       sendsToday: 0,
-      isPrimary: localSenders.length === 0
+      isPrimary: localSenders.length === 0,
+      provider: 'outlook'
     };
     setLocalSenders(prev => [...prev, created]);
     setNewSenderName('');
@@ -163,6 +168,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    setMsalClientId(msalClientId);
+    setMsalTenantId(msalTenantId);
+    resetMsalInstance().catch(() => {});
     onSaveSettings(formData);
     if (onSaveSenders) {
       const syncedSenders = localSenders.map(s => {
@@ -522,11 +530,55 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             </div>
           </div>
 
+          {/* Microsoft 365 / Azure AD App Credentials */}
+          <div className="space-y-3 p-4 bg-slate-50 rounded-xl border border-slate-200">
+            <div className="flex items-center justify-between">
+              <h3 className="text-xs font-bold uppercase tracking-wider text-slate-800 flex items-center gap-1.5">
+                <Key className="w-3.5 h-3.5 text-blue-600" />
+                <span>Microsoft Azure AD (Entra ID) App Configuration</span>
+              </h3>
+              <span className="text-[10px] text-blue-700 bg-blue-50 font-semibold px-2 py-0.5 rounded border border-blue-200">
+                Outlook Provider
+              </span>
+            </div>
+            <p className="text-[11px] text-slate-500">
+              Configure your Azure AD App Registration to enable "Sign in with Microsoft" and Outlook dispatching. You can also specify these in your environment variables (<code className="font-mono text-[10px] bg-slate-200 px-1 py-0.5 rounded">VITE_MSAL_CLIENT_ID</code> and <code className="font-mono text-[10px] bg-slate-200 px-1 py-0.5 rounded">VITE_MSAL_TENANT_ID</code>).
+            </p>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  Application (Client) ID:
+                </label>
+                <input
+                  type="text"
+                  value={msalClientId}
+                  onChange={(e) => setLocalMsalClientId(e.target.value)}
+                  placeholder="e.g. 00000000-0000-0000-0000-000000000000"
+                  className="w-full text-xs font-mono px-3 py-2 bg-white border border-slate-300 rounded-lg text-slate-800 focus:outline-hidden focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  Directory (Tenant) ID:
+                </label>
+                <input
+                  type="text"
+                  value={msalTenantId}
+                  onChange={(e) => setLocalMsalTenantId(e.target.value)}
+                  placeholder="e.g. common, organizations, or tenant GUID"
+                  className="w-full text-xs font-mono px-3 py-2 bg-white border border-slate-300 rounded-lg text-slate-800 focus:outline-hidden focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all"
+                />
+              </div>
+            </div>
+          </div>
+
           {/* Logic rules recap */}
           <div className="p-3.5 bg-red-50 border border-red-200 rounded-xl text-xs text-red-950 flex items-start gap-2">
             <ShieldCheck className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
             <div className="leading-relaxed">
-              <strong>Automatic Safety Rule:</strong> If a prospect replies to any stage email in Gmail, GINI Outreach Flow immediately detects it, moves them to the <em>Needs Manual Reply</em> queue, and halts all subsequent automated stages permanently.
+              <strong>Automatic Safety Rule:</strong> If a prospect replies to any stage email in Microsoft Outlook or the active email provider, GINI Outreach Flow immediately detects it, moves them to the <em>Needs Manual Reply</em> queue, and halts all subsequent automated stages permanently.
             </div>
           </div>
 

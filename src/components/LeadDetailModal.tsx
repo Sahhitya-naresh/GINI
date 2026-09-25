@@ -23,7 +23,7 @@ import {
   Sparkles
 } from 'lucide-react';
 import { Lead, StageTemplate, EmailThreadMessage } from '../types';
-import { getGmailThread } from '../services/gmailService';
+import { getOutlookThread } from '../services/outlookService';
 import { formatDisplayDate } from '../utils/dateUtils';
 import { recordTrackingEvent } from '../services/trackingService';
 
@@ -115,11 +115,11 @@ export const LeadDetailModal: React.FC<LeadDetailModalProps> = ({
     setIsLoadingThread(true);
     setThreadError(null);
     try {
-      const data = await getGmailThread(token, lead.threadId, userEmail);
+      const data = await getOutlookThread(token, lead.threadId, userEmail);
       setThreadMessages(data.messages);
     } catch (err: any) {
-      console.error('Failed to load Gmail thread:', err);
-      setThreadError(err.message || 'Could not fetch thread messages from Gmail.');
+      console.error('Failed to load email thread:', err);
+      setThreadError(err.message || 'Could not fetch thread messages from Outlook.');
     } finally {
       setIsLoadingThread(false);
     }

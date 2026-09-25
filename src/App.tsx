@@ -1,28 +1,17 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { User } from 'firebase/auth';
 import { Lead, StageTemplate, AppSettings, SendLogEntry, CampaignWorkflow, ConnectedSender, LeadManualTask, TrackingEvent } from './types';
 import { 
-  initAuth, 
-  googleSignIn, 
-  logout, 
-  getAccessToken 
-} from './services/firebaseAuth';
+  MsalUser,
+  initMsalAuth, 
+  msalSignIn, 
+  msalSignOut, 
+  getMsalAccessToken 
+} from './services/msalAuth';
 import { 
-  fetchLeads, 
-  appendLead, 
-  batchAppendLeads,
-  updateLeadRow, 
-  getStoredSpreadsheetId, 
-  setStoredSpreadsheetId,
-  getStoredSpreadsheetName,
-  createLeadsSpreadsheet,
-  clearStoredSpreadsheet
-} from './services/sheetsService';
-import { 
-  getGmailProfile, 
+  getOutlookProfile, 
   checkThreadForLeadReply, 
   sendStageEmail 
-} from './services/gmailService';
+} from './services/outlookService';
 import { fetchTrackingStats, mergeTrackingWithLeads } from './services/trackingService';
 import { loadSavedTemplates, saveTemplatesToStorage } from './data/defaultTemplates';
 import { loadSettings, saveSettings } from './services/settingsService';
@@ -59,7 +48,6 @@ import { TemplateAdmin } from './components/TemplateAdmin';
 import { AnalyticsDashboard } from './components/AnalyticsDashboard';
 import { LeadDetailModal } from './components/LeadDetailModal';
 import { CampaignSchedulerModal } from './components/CampaignSchedulerModal';
-import { SheetConnectModal } from './components/SheetConnectModal';
 import { AddLeadModal } from './components/AddLeadModal';
 import { ImportLeadsModal } from './components/ImportLeadsModal';
 import { SettingsModal } from './components/SettingsModal';
@@ -254,7 +242,7 @@ const INITIAL_FALLBACK_LEADS: Lead[] = [
 
 export default function App() {
   // Auth state
-  const [user, setUser] = useState<User | null>(null);
+  const [user, setUser] = useState<MsalUser | null>(null);
   const [token, setToken] = useState<string | null>(null);
   const [userEmail, setUserEmail] = useState<string>('');
   const [isSigningIn, setIsSigningIn] = useState(false);
@@ -264,8 +252,8 @@ export default function App() {
   const [leads, setLeads] = useState<Lead[]>(INITIAL_FALLBACK_LEADS);
   const [templates, setTemplates] = useState<StageTemplate[]>(loadSavedTemplates());
   const [settings, setSettings] = useState<AppSettings>(loadSettings());
-  const [spreadsheetId, setSpreadsheetId] = useState<string>(getStoredSpreadsheetId() || '');
-  const [spreadsheetName, setSpreadsheetName] = useState<string>(getStoredSpreadsheetName());
+  const [spreadsheetId, setSpreadsheetId] = useState<string>('');
+  const [spreadsheetName, setSpreadsheetName] = useState<string>('MongoDB Leads Database');
   const [isSyncing, setIsSyncing] = useState(false);
   const [isCheckingReplies, setIsCheckingReplies] = useState(false);
 
@@ -547,18 +535,18 @@ export default function App() {
     return () => clearInterval(interval);
   }, [syncTrackingMetrics]);
 
-  // 1. Initialize Auth on Mount
+  // 1. Initialize MSAL Auth on Mount
   useEffect(() => {
-    const unsubscribe = initAuth(
+    const unsubscribe = initMsalAuth(
       async (authedUser, accessToken) => {
         setUser(authedUser);
         setToken(accessToken);
         setNeedsAuth(false);
         try {
-          const profile = await getGmailProfile(accessToken);
+          const profile = await getOutlookProfile(accessToken);
           setUserEmail(profile.emailAddress);
         } catch (e) {
-          console.warn('Could not fetch Gmail profile:', e);
+          console.warn('Could not fetch Outlook profile:', e);
           setUserEmail(authedUser.email || '');
         }
       },
@@ -595,92 +583,68 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
   return result;
 }
 
-  // 2. Fetch Leads when token or spreadsheetId changes
-  const syncWithSheet = useCallback(async () => {
-    if (!token || !spreadsheetId) return;
+  // 2. Sync Leads & Metrics with MongoDB Backend
+  const syncData = useCallback(async () => {
     setIsSyncing(true);
     try {
-      const rawFetched = await listLeads(token, spreadsheetId);
-      const fetched = deduplicateLeads(rawFetched);
-      if (fetched.length > 0) {
+      const rawBackendLeads = await fetchLeadsFromBackend();
+      const backendLeads = deduplicateLeads(rawBackendLeads || []);
+      if (backendLeads && backendLeads.length > 0) {
         // Merge with current tracking metrics so server-logged open/clicks are not wiped out
         try {
           const stats = await fetchTrackingStats();
           if (stats) {
             if (stats.events) setTrackingEvents(stats.events);
             if (stats.statsByLead) {
-              const merged = deduplicateLeads(mergeTrackingWithLeads(fetched, stats.statsByLead));
+              const merged = deduplicateLeads(mergeTrackingWithLeads(backendLeads, stats.statsByLead));
               setLeads(merged);
               setSelectedLead(prev => {
                 if (!prev) return null;
                 const match = merged.find(l => l.leadId === prev.leadId || (l.email && l.email.toLowerCase() === prev.email.toLowerCase()));
                 return match || prev;
               });
-              showToast(`Synced ${fetched.length} leads from Google Sheets!`, 'success');
+              showToast(`Synced ${backendLeads.length} leads from MongoDB!`, 'success');
               return;
             }
           }
         } catch (trackingErr) {
-          console.warn('Could not fetch tracking during sheet sync:', trackingErr);
+          console.warn('Could not fetch tracking during sync:', trackingErr);
         }
 
-        setLeads(fetched);
-        showToast(`Synced ${fetched.length} leads from Google Sheets!`, 'success');
+        setLeads(backendLeads);
+        showToast(`Synced ${backendLeads.length} leads from MongoDB!`, 'success');
       } else {
-        showToast('Sheet connected, no rows found yet.', 'info');
+        showToast('MongoDB connected. No leads found.', 'info');
       }
     } catch (err: any) {
-      console.error('Failed to sync sheet:', err);
-      showToast(`Sheet sync error: ${err.message || 'Unable to read rows'}`, 'error');
+      console.error('Failed to sync leads:', err);
+      showToast(`Sync error: ${err.message || 'Unable to read leads'}`, 'error');
     } finally {
       setIsSyncing(false);
     }
-  }, [token, spreadsheetId]);
-
-  useEffect(() => {
-    if (token && spreadsheetId) {
-      syncWithSheet();
-    }
-  }, [token, spreadsheetId, syncWithSheet]);
-
-  // Load persistent leads from backend database on initial load if not yet connected to a Sheet
-  useEffect(() => {
-    if (!token || !spreadsheetId) {
-      fetchLeadsFromBackend().then(async rawBackendLeads => {
-        const backendLeads = deduplicateLeads(rawBackendLeads || []);
-        if (backendLeads && backendLeads.length > 0) {
-          try {
-            const stats = await fetchTrackingStats();
-            if (stats) {
-              if (stats.events) setTrackingEvents(stats.events);
-              if (stats.statsByLead) {
-                setLeads(deduplicateLeads(mergeTrackingWithLeads(backendLeads, stats.statsByLead)));
-                return;
-              }
-            }
-          } catch {}
-          setLeads(backendLeads);
-        }
-      });
-    }
   }, []);
+
+  // Initial load from MongoDB backend
+  useEffect(() => {
+    syncData();
+  }, [syncData]);
 
   // Auth Handlers
   const handleSignIn = async () => {
     setIsSigningIn(true);
     try {
-      const res = await googleSignIn();
+      const res = await msalSignIn();
       if (res) {
         setUser(res.user);
         setToken(res.accessToken);
         setNeedsAuth(false);
         try {
-          const profile = await getGmailProfile(res.accessToken);
+          const profile = await getOutlookProfile(res.accessToken);
           setUserEmail(profile.emailAddress);
         } catch (e) {
           setUserEmail(res.user.email || '');
         }
-        showToast('Signed in successfully with Google!', 'success');
+        showToast('Signed in successfully with Microsoft!', 'success');
       }
     } catch (err: any) {
       console.error('Login error:', err);
@@ -691,27 +655,12 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
   };
 
   const handleSignOut = async () => {
-    await logout();
+    await msalSignOut();
     setUser(null);
     setToken(null);
     setUserEmail('');
     setNeedsAuth(true);
-    showToast('Signed out of Google account.', 'info');
-  };
-
-  // Connected Sheet handlers
-  const handleSheetConnected = (id: string, name: string) => {
-    setSpreadsheetId(id);
-    setSpreadsheetName(name);
-    setStoredSpreadsheetId(id, name);
-    showToast(`Google Sheet connected: ${name}`, 'success');
-  };
-
-  const handleSheetDisconnected = () => {
-    clearStoredSpreadsheet();
-    setSpreadsheetId('');
-    setSpreadsheetName('Outreach Flow - Leads Database');
-    showToast('Google Sheet disconnected. Active data is local only.', 'info');
+    showToast('Signed out of Microsoft account.', 'info');
   };
 
   // Template changes
@@ -750,15 +699,6 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
     setLeads(prev => prev.map(l => l.leadId === lead.leadId ? updatedLead : l));
     if (selectedLead && selectedLead.leadId === lead.leadId) {
       setSelectedLead(updatedLead);
-    }
-
-    // Sync to Google Sheet if connected
-    if (token && spreadsheetId && lead.rowIndex) {
-      try {
-        await updateLeadRow(token, spreadsheetId, updatedLead);
-      } catch (e) {
-        console.error('Failed to update pause status in sheet:', e);
-      }
     }
 
     showToast(`Lead ${lead.name} is now ${newStatus}.`, 'info');
@@ -848,11 +788,11 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
   // Check single lead for replies
   const handleCheckSingleReply = async (lead: Lead) => {
     if (!token) {
-      showToast('Please sign in with Google to check Gmail threads.', 'error');
+      showToast('Please sign in with Microsoft to check email threads.', 'error');
       return;
     }
     if (!lead.threadId) {
-      showToast('No Gmail thread initialized yet for this lead.', 'info');
+      showToast('No email thread initialized yet for this lead.', 'info');
       return;
     }
 
@@ -884,13 +824,13 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
   // Bulk check replies on all active leads
   const handleCheckAllReplies = async () => {
     if (!token) {
-      showToast('Please sign in with Google to check replies.', 'error');
+      showToast('Please sign in with Microsoft to check replies.', 'error');
       return;
     }
 
     const leadsWithThreads = leads.filter(l => l.threadId && (l.status === 'Active' || l.status === 'Paused'));
     if (leadsWithThreads.length === 0) {
-      showToast('No active leads with active Gmail threads to check.', 'info');
+      showToast('No active leads with active email threads to check.', 'info');
       return;
     }
 
@@ -919,10 +859,6 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
 
           const idx = updatedList.findIndex(l => l.leadId === targetLead.leadId);
           if (idx !== -1) updatedList[idx] = updated;
-
-          if (spreadsheetId && targetLead.rowIndex) {
-            await updateLeadRow(token, spreadsheetId, updated);
-          }
         }
       }
 
@@ -954,8 +890,8 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
       isOpen: true,
       title: `Send Stage ${nextStageNum}: ${template.name}?`,
       message: isReply
-        ? `This will send a reply inside the existing Gmail thread to ${lead.name} (${lead.email}).`
-        : `This will initialize a new Gmail thread by sending Stage 1 Introduction to ${lead.name} (${lead.email}).`,
+        ? `This will send a reply inside the existing Outlook thread to ${lead.name} (${lead.email}).`
+        : `This will initialize a new Outlook thread by sending Stage 1 Introduction to ${lead.name} (${lead.email}).`,
       details: [
         `Recipient: ${lead.name} (${lead.email})`,
         `Company: ${lead.company}`,
@@ -972,7 +908,7 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
 
   const executeSendStageEmail = async (lead: Lead, template: StageTemplate, stageNum: number) => {
     if (!token) {
-      showToast('Please sign in with Google first.', 'error');
+      showToast('Please sign in with Microsoft first.', 'error');
       return;
     }
 
@@ -1001,7 +937,7 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
         }
       }
 
-      // 2. Dispatch email via Gmail
+      // 2. Dispatch email via Outlook
       const result = await sendStageEmail(
         token,
         lead,
@@ -1024,11 +960,11 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
       };
 
       await handleUpdateLead(updatedLead);
-      showToast(`Stage ${stageNum} sent to ${lead.name} via Gmail!`, 'success');
+      showToast(`Stage ${stageNum} sent to ${lead.name} via Outlook!`, 'success');
 
     } catch (err: any) {
       console.error('Send failed:', err);
-      showToast(`Send failed: ${err.message || 'Gmail error'}`, 'error');
+      showToast(`Send failed: ${err.message || 'Outlook error'}`, 'error');
     }
   };
 
@@ -1074,10 +1010,10 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
             setCurrentTab(tab);
           }
         }}
-        onSync={syncWithSheet}
+        onSync={syncData}
         isSyncing={isSyncing}
         onOpenScheduler={() => setIsSchedulerOpen(true)}
-        onOpenConnectSheet={() => setIsConnectSheetOpen(true)}
+        onOpenConnectSheet={() => {}}
         onOpenImportLeads={() => setIsImportLeadsOpen(true)}
         onSignIn={handleSignIn}
         onSignOut={handleSignOut}
@@ -1102,44 +1038,6 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
               <AlertCircle className="w-4 h-4 text-white shrink-0" />
             )}
             <span>{toastMessage.text}</span>
-          </div>
-        </div>
-      )}
-
-      {/* One-time non-blocking banner prompting connection on app load if no Sheet is connected */}
-      {!spreadsheetId && !isBannerDismissed && (
-        <div 
-          id="unconnected-sheet-banner" 
-          className="bg-amber-50 border-b border-amber-200 py-2.5 px-4 text-xs sm:text-sm text-amber-900 transition-all animate-in fade-in slide-in-from-top-1 duration-150"
-        >
-          <div className="max-w-7xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-3">
-            <div className="flex items-center gap-2.5">
-              <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
-              <span>
-                <strong className="font-semibold text-amber-950">Google Sheet Not Connected:</strong>{' '}
-                <span className="text-amber-800">
-                  Data is stored locally only. <span className="font-semibold text-amber-950">Known limitation:</span> Local data can be lost on server restart without a persistent volume. Connect or create a Google Sheet for durable cloud persistence.
-                </span>
-              </span>
-            </div>
-            <div className="flex items-center gap-2 shrink-0">
-              <button
-                id="btn-banner-connect-sheet"
-                onClick={() => setIsConnectSheetOpen(true)}
-                className="px-3 py-1 bg-amber-600 hover:bg-amber-700 active:bg-amber-800 text-white font-semibold rounded-lg shadow-2xs transition-colors text-xs"
-              >
-                Connect Sheet
-              </button>
-              <button
-                id="btn-dismiss-sheet-banner"
-                onClick={() => setIsBannerDismissed(true)}
-                className="p-1 text-amber-700 hover:text-amber-950 hover:bg-amber-100 rounded-md transition-colors"
-                title="Dismiss banner"
-                aria-label="Dismiss banner"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
           </div>
         </div>
       )}
@@ -1267,18 +1165,6 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
         onTasksCreated={handleTasksCreated}
       />
 
-      {/* Connect / Create Google Sheet Modal */}
-      <SheetConnectModal
-        isOpen={isConnectSheetOpen}
-        onClose={() => setIsConnectSheetOpen(false)}
-        token={token}
-        currentSpreadsheetId={spreadsheetId}
-        currentSpreadsheetName={spreadsheetName}
-        onConnected={handleSheetConnected}
-        onDisconnect={handleSheetDisconnected}
-        onLeadsMigrated={(migratedLeads) => setLeads(migratedLeads)}
-      />
-
       {/* Add Single Lead Modal */}
       <AddLeadModal
         isOpen={isAddLeadOpen}
@@ -1317,7 +1203,7 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
         title={confirmDialog.title}
         message={confirmDialog.message}
         details={confirmDialog.details}
-        confirmText="Send Email via Gmail"
+        confirmText="Send Email via Outlook"
         onConfirm={confirmDialog.onConfirm}
         onCancel={() => setConfirmDialog(prev => ({ ...prev, isOpen: false }))}
       />
