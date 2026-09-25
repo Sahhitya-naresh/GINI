@@ -29,6 +29,7 @@ import { runDueCampaignsJob } from './runnerBackend.ts';
 import {
   sendAppEmail,
   checkAppThreadForReply,
+  getAppConversationThread,
   getServiceAccountProfile,
   sendDirectTestEmail
 } from './msGraphService.ts';
@@ -634,6 +635,18 @@ app.post('/api/email/send-stage', async (req, res) => {
     res.json(result);
   } catch (err: any) {
     console.error('API /api/email/send-stage error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.get('/api/email/thread', async (req, res) => {
+  try {
+    const threadId = req.query.threadId as string;
+    const leadEmail = req.query.leadEmail as string;
+    const result = await getAppConversationThread(threadId, leadEmail);
+    res.json({ success: true, ...result });
+  } catch (err: any) {
+    console.error('API /api/email/thread error:', err);
     res.status(500).json({ success: false, error: err.message });
   }
 });

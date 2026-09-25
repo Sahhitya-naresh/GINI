@@ -416,7 +416,7 @@ export const WorkflowNodeInspector: React.FC<WorkflowNodeInspectorProps> = ({
                         });
                       }}
                       className="w-full px-2.5 py-1.5 border border-slate-300 rounded-lg focus:outline-none focus:border-red-500 font-semibold bg-white text-xs cursor-pointer"
-                      title="Select connected Gmail account for this specific email stage"
+                      title="Select sender account for this specific email stage"
                     >
                       <option value="">Campaign Default Inbox</option>
                       {senders.map(s => (

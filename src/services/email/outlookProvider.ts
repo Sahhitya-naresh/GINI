@@ -49,8 +49,27 @@ export class OutlookProvider implements EmailProvider {
   async getThread(
     _token?: string,
     threadId?: string,
-    _userEmail?: string
+    _userEmail?: string,
+    leadEmail?: string
   ): Promise<{ messages: EmailThreadMessage[]; subject: string }> {
+    if (!threadId && !leadEmail) {
+      return { messages: [], subject: '' };
+    }
+    try {
+      const params = new URLSearchParams();
+      if (threadId) params.append('threadId', threadId);
+      if (leadEmail) params.append('leadEmail', leadEmail);
+      const res = await fetch(`/api/email/thread?${params.toString()}`);
+      if (res.ok) {
+        const data = await res.json();
+        return {
+          messages: data.messages || [],
+          subject: data.subject || ''
+        };
+      }
+    } catch (err) {
+      console.warn('[OutlookProvider] Could not fetch thread messages:', err);
+    }
     return {
       messages: [],
       subject: threadId ? `Conversation ${threadId}` : 'Outlook Thread'

@@ -127,7 +127,7 @@ export const EmailNode = memo(({ id, data, selected }: CustomNodeProps) => {
         </div>
         <div className="flex items-center gap-1.5">
           <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-red-100 text-red-800">
-            Gmail Send
+            Email Send
           </span>
           <button
             onClick={(e) => {

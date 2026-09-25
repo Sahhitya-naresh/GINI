@@ -395,6 +395,136 @@ export async function checkAppThreadForReply(params: CheckReplyParams): Promise<
   return { hasReplied: false };
 }
 
+export interface AppThreadMessage {
+  id: string;
+  threadId: string;
+  from: string;
+  to: string;
+  date: string;
+  subject: string;
+  snippet: string;
+  bodyHtml?: string;
+  bodyText?: string;
+  isFromLead: boolean;
+  messageIdHeader?: string;
+}
+
+export interface AppThreadResult {
+  messages: AppThreadMessage[];
+  subject: string;
+}
+
+/**
+ * Fetches all messages (both sent and received) in a conversation thread
+ * using Microsoft Graph API for the app-only service account mailbox.
+ */
+export async function getAppConversationThread(
+  threadId?: string,
+  leadEmail?: string
+): Promise<AppThreadResult> {
+  const config = getGraphConfig();
+  if (!config.serviceAccount) {
+    return { messages: [], subject: '' };
+  }
+
+  const token = await getAppAccessToken();
+  const serviceAccount = config.serviceAccount;
+  const cleanLeadEmail = (leadEmail || '').trim().toLowerCase();
+
+  let rawMessages: any[] = [];
+  let threadSubject = '';
+
+  // 1. Query by conversationId if valid
+  if (threadId && !threadId.startsWith('graph-conv-')) {
+    try {
+      // NOTE: Do not combine $filter=conversationId with $orderby to prevent InefficientFilter error from Graph.
+      const url = `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(serviceAccount)}/messages?$filter=conversationId eq '${encodeURIComponent(threadId)}'&$top=50&$select=id,conversationId,subject,from,toRecipients,receivedDateTime,sentDateTime,bodyPreview,body,internetMessageId`;
+      const res = await fetch(url, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (res.ok) {
+        const data = await res.json();
+        rawMessages = data.value || [];
+      } else {
+        console.warn(`[MS Graph] Failed to query conversation messages for ${threadId}: HTTP ${res.status}`);
+      }
+    } catch (err) {
+      console.warn('[MS Graph] Conversation messages query error:', err);
+    }
+  }
+
+  // 2. Fallback by lead email if conversationId produced no messages
+  if (rawMessages.length === 0 && cleanLeadEmail) {
+    try {
+      const fromUrl = `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(serviceAccount)}/messages?$filter=from/emailAddress/address eq '${encodeURIComponent(cleanLeadEmail)}'&$top=20&$select=id,conversationId,subject,from,toRecipients,receivedDateTime,sentDateTime,bodyPreview,body,internetMessageId`;
+      const fromRes = await fetch(fromUrl, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (fromRes.ok) {
+        const fromData = await fromRes.json();
+        rawMessages = fromData.value || [];
+      }
+    } catch (err) {
+      console.warn('[MS Graph] Fallback messages query error:', err);
+    }
+  }
+
+  // Sort messages chronologically in memory (oldest first)
+  rawMessages.sort((a, b) => {
+    const timeA = new Date(a.receivedDateTime || a.sentDateTime || 0).getTime();
+    const timeB = new Date(b.receivedDateTime || b.sentDateTime || 0).getTime();
+    return timeA - timeB;
+  });
+
+  const parsedMessages: AppThreadMessage[] = rawMessages.map(msg => {
+    const fromAddress = (msg.from?.emailAddress?.address || '').trim();
+    const fromName = msg.from?.emailAddress?.name || fromAddress;
+    const fromFormatted = fromAddress
+      ? (fromName && fromName.toLowerCase() !== fromAddress.toLowerCase() ? `"${fromName}" <${fromAddress}>` : fromAddress)
+      : '';
+
+    const toRecipients: any[] = msg.toRecipients || [];
+    const toFormatted = toRecipients
+      .map(r => {
+        const addr = r.emailAddress?.address || '';
+        const name = r.emailAddress?.name || addr;
+        return addr ? (name && name.toLowerCase() !== addr.toLowerCase() ? `"${name}" <${addr}>` : addr) : '';
+      })
+      .filter(Boolean)
+      .join(', ');
+
+    const subject = msg.subject || '';
+    if (!threadSubject && subject) threadSubject = subject;
+
+    const date = msg.receivedDateTime || msg.sentDateTime || new Date().toISOString();
+    const cleanSender = fromAddress.toLowerCase();
+    const isServiceAccount = cleanSender === serviceAccount.toLowerCase();
+    const isFromLead = cleanLeadEmail ? (cleanSender === cleanLeadEmail || !isServiceAccount) : !isServiceAccount;
+
+    const bodyHtml = msg.body?.contentType === 'html' ? msg.body?.content : undefined;
+    const bodyText = msg.body?.contentType === 'text' ? msg.body?.content : (msg.bodyPreview || '');
+
+    return {
+      id: msg.id,
+      threadId: msg.conversationId || threadId || '',
+      from: fromFormatted,
+      to: toFormatted,
+      date,
+      subject,
+      snippet: msg.bodyPreview || '',
+      bodyHtml,
+      bodyText,
+      isFromLead,
+      messageIdHeader: msg.internetMessageId || ''
+    };
+  });
+
+  return {
+    messages: parsedMessages,
+    subject: threadSubject || (threadId ? `Conversation ${threadId}` : 'Email Thread')
+  };
+}
+
 /**
  * Returns service account configuration details for frontend UI
  */

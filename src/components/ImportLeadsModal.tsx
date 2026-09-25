@@ -276,7 +276,7 @@ export const ImportLeadsModal: React.FC<ImportLeadsModalProps> = ({
       if (existingEmailMap.has(lowerEmail)) {
         const existing = existingEmailMap.get(lowerEmail)!;
         isDuplicate = true;
-        duplicateReason = `Already in Sheet (${existing.leadId}: ${existing.name || existing.company}, Stage ${existing.currentStage})`;
+        duplicateReason = `Already in Database (${existing.leadId}: ${existing.name || existing.company}, Stage ${existing.currentStage})`;
       } else if (seenInFileEmails.has(lowerEmail)) {
         isDuplicate = true;
         duplicateReason = 'Duplicate entry within this uploaded file';
@@ -380,7 +380,7 @@ export const ImportLeadsModal: React.FC<ImportLeadsModalProps> = ({
       onClose();
     } catch (err: any) {
       console.error('Import commit error:', err);
-      setCommitError(err.message || 'Failed to save leads to Google Sheet.');
+      setCommitError(err.message || 'Failed to save leads to database.');
     }
   };
 
@@ -537,7 +537,7 @@ export const ImportLeadsModal: React.FC<ImportLeadsModalProps> = ({
             <div className="p-4 bg-red-50 border border-red-200 rounded-xl flex items-start gap-3 text-red-800 text-xs">
               <AlertTriangle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
               <div className="flex-1">
-                <p className="font-bold">Google Sheet Commit Error</p>
+                <p className="font-bold">Database Save Error</p>
                 <p className="mt-0.5">{commitError}</p>
                 <p className="mt-1 text-slate-600">
                   Your leads have not been lost. Please review the error above, verify your connection, and click Commit again to retry.
@@ -792,7 +792,7 @@ export const ImportLeadsModal: React.FC<ImportLeadsModalProps> = ({
                   />
                   <div>
                     <label htmlFor="chk-skip-duplicates" className="font-bold text-slate-800 cursor-pointer">
-                      Skip duplicates against existing leads in the Sheet (Default / Safe)
+                      Skip duplicates against existing leads in the database (Default / Safe)
                     </label>
                     <p className="text-slate-500 mt-0.5">
                       Prevents silently overwriting an in-progress 7-stage sequence for an already active or replied prospect.
@@ -945,7 +945,7 @@ export const ImportLeadsModal: React.FC<ImportLeadsModalProps> = ({
                 {isImporting ? (
                   <>
                     <RefreshCw className="w-4 h-4 animate-spin" />
-                    <span>Appending to Sheets...</span>
+                    <span>Saving to Database...</span>
                   </>
                 ) : (
                   <>

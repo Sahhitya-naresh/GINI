@@ -551,11 +551,11 @@ export const CampaignSchedulerModal: React.FC<CampaignSchedulerModalProps> = ({
               <span>Automated Execution Safeguards:</span>
             </h4>
             <ol className="list-decimal list-inside space-y-1 pl-1">
-              <li><strong>Polls Gmail Thread:</strong> Before each send, verifies if the lead sent a reply.</li>
+              <li><strong>Polls Email Thread:</strong> Before each send, verifies if the lead sent a reply.</li>
               <li><strong>Reply Safety Brake:</strong> If reply is detected, status instantly becomes <em>Replied</em> and all future stages halt permanently.</li>
               <li><strong>Threaded Send:</strong> Sends stage email inside the existing conversation thread (with <em>In-Reply-To</em> headers).</li>
               <li><strong>Calculates Next Schedule:</strong> Advances stage (+1) and computes next date (+3 business days, skipping weekends).</li>
-              <li><strong>Direct Sheet Sync:</strong> Writes the updated row directly back to Google Sheets.</li>
+              <li><strong>Database Sync:</strong> Writes the updated lead record directly back to MongoDB.</li>
             </ol>
           </div>
 
@@ -642,7 +642,7 @@ export const CampaignSchedulerModal: React.FC<CampaignSchedulerModalProps> = ({
                   className="mt-0.5 rounded border-amber-300 text-red-600 focus:ring-red-500"
                 />
                 <span className="text-xs text-amber-900 leading-relaxed">
-                  I confirm dispatching stage emails and updating Google Sheet rows for these <strong>{dueLeads.length}</strong> leads through my connected Gmail account.
+                  I confirm dispatching stage emails and updating database records for these <strong>{dueLeads.length}</strong> leads through the connected service account.
                 </span>
               </label>
             </div>

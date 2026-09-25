@@ -114,7 +114,7 @@ export const AddLeadModal: React.FC<AddLeadModalProps> = ({
             </div>
             <div>
               <h2 className="text-lg font-bold text-slate-900">Add New Prospect Lead</h2>
-              <p className="text-xs text-slate-500">Will be appended to your Google Sheet database</p>
+              <p className="text-xs text-slate-500">Will be saved to your MongoDB database</p>
             </div>
           </div>
           <button
@@ -248,7 +248,7 @@ export const AddLeadModal: React.FC<AddLeadModalProps> = ({
               disabled={isSubmitting}
               className="px-5 py-2 text-xs font-semibold text-white bg-red-600 hover:bg-red-700 active:bg-red-800 disabled:opacity-50 rounded-lg shadow-xs shadow-red-500/20"
             >
-              {isSubmitting ? 'Saving to Sheets...' : 'Save Lead to Google Sheets'}
+              {isSubmitting ? 'Saving to Database...' : 'Save Lead to Database'}
             </button>
           </div>
         </form>

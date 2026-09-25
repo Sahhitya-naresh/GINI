@@ -173,7 +173,7 @@ export const BrandLogo: React.FC<BrandLogoProps> = ({
 
         <div className="flex items-center gap-2">
           <p className="text-[11px] text-slate-500 hidden sm:block font-medium">
-            Smart Gmail & Google Sheets Campaign Engine
+            Multi-Stage Outreach & Campaign Engine
           </p>
 
           {allowUploadDirectly && onLogoChange && (

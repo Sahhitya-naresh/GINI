@@ -108,16 +108,16 @@ export const NeedsManualReplyView: React.FC<NeedsManualReplyViewProps> = ({
                     className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-red-700 bg-red-50 hover:bg-red-100 rounded-lg transition-colors"
                   >
                     <Eye className="w-3.5 h-3.5" />
-                    <span>View Gmail Thread</span>
+                    <span>View Email Thread</span>
                   </button>
 
                   {lead.threadId && (
                     <a
-                      href={`https://mail.google.com/mail/u/0/#inbox/${lead.threadId}`}
+                      href={`https://outlook.office.com/mail/deeplink/read/${encodeURIComponent(lead.threadId)}`}
                       target="_blank"
                       rel="noreferrer"
                       className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"
-                      title="Open in Gmail"
+                      title="Open in Outlook"
                     >
                       <ExternalLink className="w-4 h-4" />
                     </a>

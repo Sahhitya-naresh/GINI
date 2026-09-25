@@ -100,26 +100,26 @@ export const LeadDetailModal: React.FC<LeadDetailModalProps> = ({
     if (lead) {
       setEditedNotes(lead.notes || '');
       setEditedPainPoint(lead.painPoint || '');
-      if (lead.threadId && token) {
+      if (lead.threadId || lead.email) {
         loadThread();
       } else {
         setThreadMessages([]);
       }
     }
-  }, [lead, token]);
+  }, [lead]);
 
   if (!isOpen || !lead) return null;
 
   const loadThread = async () => {
-    if (!lead.threadId || !token) return;
+    if (!lead || (!lead.threadId && !lead.email)) return;
     setIsLoadingThread(true);
     setThreadError(null);
     try {
-      const data = await getOutlookThread(token, lead.threadId, userEmail);
+      const data = await getOutlookThread(token, lead.threadId, userEmail, lead.email);
       setThreadMessages(data.messages);
     } catch (err: any) {
       console.error('Failed to load email thread:', err);
-      setThreadError(err.message || 'Could not fetch thread messages from Outlook.');
+      setThreadError(err.message || 'Could not fetch conversation thread messages.');
     } finally {
       setIsLoadingThread(false);
     }
@@ -275,7 +275,7 @@ export const LeadDetailModal: React.FC<LeadDetailModalProps> = ({
                   <button
                     onClick={() => onCheckReply(lead)}
                     className="py-2 px-3 text-xs font-medium text-slate-700 bg-white border border-slate-300 rounded-lg hover:bg-red-50 hover:text-red-700 transition-colors flex items-center gap-1.5"
-                    title="Poll Gmail for lead replies"
+                    title="Check for lead replies"
                   >
                     <RefreshCw className="w-3.5 h-3.5 text-red-600" />
                     <span>Check Reply</span>
@@ -299,7 +299,7 @@ export const LeadDetailModal: React.FC<LeadDetailModalProps> = ({
                 <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-xs text-red-950 flex items-start gap-2">
                   <CheckCircle2 className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
                   <div>
-                    <strong className="font-semibold">Automated sequence stopped:</strong> A reply was detected from {lead.name}. Please follow up manually via Gmail.
+                    <strong className="font-semibold">Automated sequence stopped:</strong> A reply was detected from {lead.name}. Please follow up manually in Outlook.
                   </div>
                 </div>
               )}
@@ -470,7 +470,7 @@ export const LeadDetailModal: React.FC<LeadDetailModalProps> = ({
                     className="flex items-center gap-1 text-emerald-600 hover:text-emerald-800 font-semibold"
                   >
                     <Save className="w-3.5 h-3.5" />
-                    <span>Save to Sheets</span>
+                    <span>Save Changes</span>
                   </button>
                 )}
               </div>
@@ -510,23 +510,27 @@ export const LeadDetailModal: React.FC<LeadDetailModalProps> = ({
 
           </div>
 
-          {/* Right Gmail Thread View (7 cols) */}
+          {/* Right Email Thread View (7 cols) */}
           <div className="lg:col-span-7 space-y-4">
             <div className="flex items-center justify-between border-b border-slate-200 pb-2">
               <div className="flex items-center gap-2">
                 <MessageSquare className="w-4 h-4 text-red-600" />
-                <h3 className="text-sm font-bold text-slate-900">Gmail Conversation Thread</h3>
+                <h3 className="text-sm font-bold text-slate-900">Email Conversation Thread</h3>
               </div>
 
               {lead.threadId ? (
                 <div className="flex items-center gap-2">
                   <a
-                    href={`https://mail.google.com/mail/u/0/#inbox/${lead.threadId}`}
+                    href={
+                      threadMessages.length > 0 && threadMessages[threadMessages.length - 1]?.id
+                        ? `https://outlook.office.com/mail/deeplink/read/${encodeURIComponent(threadMessages[threadMessages.length - 1].id)}`
+                        : `https://outlook.office.com/mail/`
+                    }
                     target="_blank"
                     rel="noreferrer"
                     className="flex items-center gap-1 text-xs text-red-600 hover:text-red-800 font-medium"
                   >
-                    <span>Open in Gmail</span>
+                    <span>Open in Outlook</span>
                     <ExternalLink className="w-3 h-3" />
                   </a>
                   <button
@@ -547,7 +551,7 @@ export const LeadDetailModal: React.FC<LeadDetailModalProps> = ({
                 <Mail className="w-8 h-8 text-slate-400 mx-auto mb-2" />
                 <h4 className="text-sm font-semibold text-slate-800">No Sent Emails in Thread Yet</h4>
                 <p className="text-xs text-slate-500 max-w-sm mx-auto mt-1 mb-4">
-                  Stage 1 has not been dispatched to {lead.name} yet. When sent, a new Gmail thread will be initialized and tracked here automatically.
+                  Stage 1 has not been dispatched to {lead.name} yet. When sent, a new email thread will be initialized and tracked here automatically.
                 </p>
                 <button
                   onClick={() => onSendNextStage(lead)}
@@ -559,11 +563,11 @@ export const LeadDetailModal: React.FC<LeadDetailModalProps> = ({
             ) : isLoadingThread ? (
               <div className="p-12 text-center">
                 <div className="w-7 h-7 border-2 border-red-600 border-t-transparent rounded-full animate-spin mx-auto mb-2" />
-                <p className="text-xs text-slate-500">Loading full Gmail thread...</p>
+                <p className="text-xs text-slate-500">Loading conversation thread...</p>
               </div>
             ) : threadError ? (
               <div className="p-4 bg-amber-50 rounded-xl border border-amber-200 text-xs text-amber-800">
-                <p className="font-semibold mb-1">Could not fetch Gmail thread:</p>
+                <p className="font-semibold mb-1">Could not fetch conversation thread:</p>
                 <p>{threadError}</p>
               </div>
             ) : threadMessages.length === 0 ? (
@@ -633,15 +637,15 @@ export const LeadDetailModal: React.FC<LeadDetailModalProps> = ({
         {/* Footer */}
         <div className="p-4 bg-slate-50 border-t border-slate-200 flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <span className="text-xs text-slate-500">
-              Row #{lead.rowIndex || '—'} in Google Sheets
+            <span className="text-xs text-slate-500 font-mono">
+              Lead ID: {lead.leadId} &bull; MongoDB Database
             </span>
             {onDeleteLead && (
               !isConfirmingDelete ? (
                 <button
                   onClick={() => setIsConfirmingDelete(true)}
                   className="flex items-center gap-1.5 px-2.5 py-1 text-xs font-semibold text-red-600 hover:text-red-700 hover:bg-red-50 rounded-lg border border-red-200 transition-colors cursor-pointer"
-                  title="Delete this lead directly from Google Sheet and database"
+                  title="Delete this lead from database"
                 >
                   <Trash2 className="w-3.5 h-3.5" />
                   <span>Delete Lead</span>

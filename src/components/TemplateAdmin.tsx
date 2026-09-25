@@ -341,7 +341,7 @@ export const TemplateAdmin: React.FC<TemplateAdminProps> = ({
                 <label className="block text-xs font-semibold text-slate-700">Subject Line</label>
                 {selectedStageNumber > 1 && (
                   <span className="text-[11px] text-amber-700 bg-amber-50 px-2 py-0.5 rounded border border-amber-200 font-medium">
-                    Sends in existing Gmail thread (Re:)
+                    Sends in existing email thread (Re:)
                   </span>
                 )}
               </div>
