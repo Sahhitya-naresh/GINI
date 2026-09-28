@@ -24,7 +24,7 @@ import {
 } from 'lucide-react';
 import { Lead, StageTemplate, EmailThreadMessage, CampaignWorkflow } from '../types';
 import { getOutlookThread } from '../services/outlookService';
-import { formatDisplayDate } from '../utils/dateUtils';
+import { formatDisplayDate, formatDisplayTimestamp } from '../utils/dateUtils';
 import { recordTrackingEvent } from '../services/trackingService';
 
 interface LeadDetailModalProps {
@@ -65,6 +65,25 @@ export const LeadDetailModal: React.FC<LeadDetailModalProps> = ({
   const [isConfirmingDelete, setIsConfirmingDelete] = useState(false);
   const [isSimulatingTracking, setIsSimulatingTracking] = useState(false);
   const [pendingCampaignChange, setPendingCampaignChange] = useState<{ targetCampaignId: string; targetCampaignName: string } | null>(null);
+  const [showDebugLog, setShowDebugLog] = useState(false);
+  const [debugEvents, setDebugEvents] = useState<Array<{ type: string; timestamp: string; userAgent: string }>>([]);
+  const [isLoadingDebug, setIsLoadingDebug] = useState(false);
+
+  const fetchDebugEvents = async () => {
+    if (!lead?.leadId) return;
+    setIsLoadingDebug(true);
+    try {
+      const res = await fetch(`/api/track/debug?leadId=${encodeURIComponent(lead.leadId)}`);
+      const data = await res.json();
+      if (data.success) {
+        setDebugEvents(data.events || []);
+      }
+    } catch (e) {
+      console.error('Failed to load debug events:', e);
+    } finally {
+      setIsLoadingDebug(false);
+    }
+  };
 
   const handleSelectCampaign = (targetId: string) => {
     if (!lead) return;
@@ -458,8 +477,8 @@ export const LeadDetailModal: React.FC<LeadDetailModalProps> = ({
                     <span className="text-[10px] text-slate-400">times</span>
                   </div>
                   {lead.lastOpenedDate && (
-                    <span className="text-[10px] text-slate-500 block truncate mt-1">
-                      Last: {formatDisplayDate(lead.lastOpenedDate)}
+                    <span className="text-[10px] text-slate-500 block truncate mt-1" title={lead.lastOpenedDate}>
+                      Last: {formatDisplayTimestamp(lead.lastOpenedDate)}
                     </span>
                   )}
                 </div>
@@ -482,11 +501,54 @@ export const LeadDetailModal: React.FC<LeadDetailModalProps> = ({
                     <span className="text-[10px] text-slate-400">clicks</span>
                   </div>
                   {lead.lastClickedDate && (
-                    <span className="text-[10px] text-slate-500 block truncate mt-1">
-                      Last: {formatDisplayDate(lead.lastClickedDate)}
+                    <span className="text-[10px] text-slate-500 block truncate mt-1" title={lead.lastClickedDate}>
+                      Last: {formatDisplayTimestamp(lead.lastClickedDate)}
                     </span>
                   )}
                 </div>
+              </div>
+
+              {/* Debug Tracking Log Section */}
+              <div className="pt-1">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const next = !showDebugLog;
+                    setShowDebugLog(next);
+                    if (next) fetchDebugEvents();
+                  }}
+                  className="text-[11px] text-slate-500 hover:text-slate-800 font-medium flex items-center justify-between w-full py-1 border-t border-slate-100"
+                >
+                  <span className="flex items-center gap-1">
+                    <Info className="w-3 h-3 text-slate-400" />
+                    <span>Debug Tracking Events</span>
+                  </span>
+                  <span className="text-[10px] text-blue-600 hover:underline">{showDebugLog ? 'Hide' : 'View recent events log'}</span>
+                </button>
+
+                {showDebugLog && (
+                  <div className="mt-2 p-2 bg-slate-50 border border-slate-200 rounded-lg max-h-48 overflow-y-auto space-y-1.5 font-mono text-[10px]">
+                    {isLoadingDebug ? (
+                      <div className="text-slate-400 text-center py-2">Loading debug events...</div>
+                    ) : debugEvents.length === 0 ? (
+                      <div className="text-slate-400 text-center py-2">No tracking events recorded yet for this lead.</div>
+                    ) : (
+                      debugEvents.map((evt, idx) => (
+                        <div key={idx} className="p-1.5 bg-white rounded border border-slate-200 flex flex-col gap-0.5">
+                          <div className="flex items-center justify-between">
+                            <span className={`font-bold uppercase ${evt.type === 'open' ? 'text-blue-600' : 'text-purple-600'}`}>
+                              {evt.type}
+                            </span>
+                            <span className="text-slate-500">{formatDisplayTimestamp(evt.timestamp)}</span>
+                          </div>
+                          <div className="text-slate-600 truncate text-[9px]" title={evt.userAgent}>
+                            Agent: {evt.userAgent || 'Unknown'}
+                          </div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                )}
               </div>
 
               <div className="p-2 bg-amber-50/70 border border-amber-200/70 rounded-lg flex items-start gap-1.5 text-[10.5px] text-amber-800 mt-2">

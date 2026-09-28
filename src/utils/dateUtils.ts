@@ -63,3 +63,25 @@ export function formatDisplayDate(dateStr?: string): string {
     return dateStr;
   }
 }
+
+/**
+ * Formats a date string with both date and time timestamp for UI display
+ */
+export function formatDisplayTimestamp(dateStr?: string): string {
+  if (!dateStr) return '—';
+  try {
+    const d = new Date(dateStr);
+    if (isNaN(d.getTime())) return dateStr;
+    return d.toLocaleString(undefined, {
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit',
+      second: '2-digit'
+    });
+  } catch {
+    return dateStr;
+  }
+}
+

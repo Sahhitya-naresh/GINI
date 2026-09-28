@@ -598,6 +598,32 @@ export async function recordTrackingEvent(event: TrackingEvent): Promise<Trackin
     { upsert: true }
   );
 
+  // Synchronously update the matching lead document in MongoDB
+  try {
+    const leadsCol = db.collection<BackendLead>(COLLECTIONS.LEADS);
+    const filterConditions: any[] = [];
+    if (event.leadId && event.leadId !== 'TEST') {
+      filterConditions.push({ leadId: event.leadId });
+    }
+    if (event.email) {
+      filterConditions.push({ email: event.email });
+    }
+    if (filterConditions.length > 0) {
+      const updateDoc: any = {
+        $set: {
+          updatedAt: new Date().toISOString(),
+          ...(event.type === 'open' ? { lastOpenedDate: event.timestamp } : { lastClickedDate: event.timestamp })
+        },
+        $inc: {
+          ...(event.type === 'open' ? { opensCount: 1 } : { clicksCount: 1 })
+        }
+      };
+      await leadsCol.updateOne({ $or: filterConditions }, updateDoc);
+    }
+  } catch (leadUpdateErr) {
+    console.warn('Could not update lead engagement counters on tracking event:', leadUpdateErr);
+  }
+
   return event;
 }
 

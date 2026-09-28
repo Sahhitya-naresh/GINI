@@ -10,6 +10,7 @@
 
 import { getAppAccessToken, getGraphConfig } from './msGraphAuth.ts';
 import { renderEmailMergeTags } from '../src/data/defaultTemplates.ts';
+import { getPublicBaseUrl } from './urlHelper.ts';
 
 export interface SendAppEmailParams {
   lead: {
@@ -75,14 +76,14 @@ export function wrapLinksAndEmbedTrackingPixel(
   stage: number,
   baseUrl?: string
 ): string {
-  const cleanBase = (baseUrl || process.env.APP_URL || 'http://localhost:3000').replace(/\/+$/, '');
+  const cleanBase = (baseUrl || getPublicBaseUrl()).replace(/\/+$/, '');
   const campaign = encodeURIComponent(lead.campaign || 'Default');
   const leadId = encodeURIComponent(lead.leadId || '');
   const leadEmail = encodeURIComponent(lead.email || '');
 
   // 1. Wrap hyperlinks with click tracking
   let modifiedHtml = htmlContent.replace(
-    /<a\s+([^>]*?)href=(["'])(https?:\/\/[^"'\s>]+)\2([^>]*)>/gi,
+    /<a\s+([^>]*?)href\s*=\s*(["'])(https?:\/\/[^"'\s>]+)\2([^>]*)>/gi,
     (_match, pre, quote, originalUrl, post) => {
       if (originalUrl.includes('/api/track/click')) return _match;
       const clickTrackUrl = `${cleanBase}/api/track/click?url=${encodeURIComponent(originalUrl)}&leadId=${leadId}&email=${leadEmail}&stage=${stage}&campaign=${campaign}`;
@@ -90,9 +91,9 @@ export function wrapLinksAndEmbedTrackingPixel(
     }
   );
 
-  // 2. Embed 1x1 transparent tracking pixel
+  // 2. Embed 1x1 transparent tracking pixel (plain 1x1 image at the very end of the body, not hidden with display:none)
   const openTrackUrl = `${cleanBase}/api/track/open?leadId=${leadId}&email=${leadEmail}&stage=${stage}&campaign=${campaign}&t=${Date.now()}`;
-  const pixelTag = `<div style="display:none;max-height:0px;overflow:hidden;mso-hide:all;"><img src="${openTrackUrl}" width="1" height="1" border="0" alt="" style="display:none !important;width:1px;height:1px;border:0;" /></div>`;
+  const pixelTag = `<img src="${openTrackUrl}" width="1" height="1" alt="" style="border:0;width:1px;height:1px;" />`;
 
   if (modifiedHtml.includes('</body>')) {
     modifiedHtml = modifiedHtml.replace('</body>', `${pixelTag}</body>`);

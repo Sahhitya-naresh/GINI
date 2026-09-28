@@ -34,8 +34,11 @@ import {
   sendDirectTestEmail
 } from './msGraphService.ts';
 import { getAuthDiagnostics } from './msGraphAuth.ts';
+import { getPublicBaseUrl } from './urlHelper.ts';
 
 export const app = express();
+
+app.set('trust proxy', true);
 
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
@@ -231,7 +234,11 @@ const handleOpenTracking = async (req: express.Request, res: express.Response) =
       userAgent: req.headers['user-agent'] || ''
     };
 
-    recordTrackingEvent(newEvent).catch(err => console.warn('Failed to record open event:', err));
+    try {
+      await recordTrackingEvent(newEvent);
+    } catch (err: any) {
+      console.error('Failed to record open event:', err);
+    }
   }
 
   res.set({
@@ -272,10 +279,50 @@ app.get('/api/track/click', async (req, res) => {
       userAgent: req.headers['user-agent'] || ''
     };
 
-    recordTrackingEvent(newEvent).catch(err => console.warn('Failed to record click event:', err));
+    try {
+      await recordTrackingEvent(newEvent);
+    } catch (err: any) {
+      console.error('Failed to record click event:', err);
+    }
   }
 
   res.redirect(302, targetUrl);
+});
+
+// --- Debug Tracking Endpoint ---
+
+app.get('/api/track/debug', async (req, res) => {
+  try {
+    const leadId = (req.query.leadId || '').toString().trim();
+    if (!leadId) {
+      return res.status(400).json({ success: false, error: 'leadId is required' });
+    }
+
+    const allEvents = await loadTrackingEvents();
+    const leadEvents = allEvents.filter(e =>
+      e.leadId === leadId ||
+      (e.email && e.email.toLowerCase() === leadId.toLowerCase())
+    );
+
+    // Sort descending by timestamp
+    leadEvents.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+
+    const latest20 = leadEvents.slice(0, 20).map(e => ({
+      type: e.type,
+      timestamp: e.timestamp,
+      userAgent: e.userAgent || ''
+    }));
+
+    res.json({
+      success: true,
+      leadId,
+      totalEvents: leadEvents.length,
+      events: latest20
+    });
+  } catch (err: any) {
+    console.error('API /api/track/debug error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
 });
 
 // --- Tracking Stats Endpoint ---
@@ -576,10 +623,8 @@ app.post('/api/emails/send', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Recipient "to" and "subject" are required' });
     }
 
-    const host = req.get('host') || 'localhost:3000';
-    const protocol = req.protocol || 'http';
-    const baseUrl = `${protocol}://${host}`;
-    const trackingPixelHtml = `<img src="${baseUrl}/api/track/open?leadId=${encodeURIComponent(leadId || '')}&stage=${encodeURIComponent(stage || 1)}&campaign=${encodeURIComponent(campaign || 'default')}" width="1" height="1" style="display:none;" alt="" />`;
+    const baseUrl = getPublicBaseUrl(req);
+    const trackingPixelHtml = `<img src="${baseUrl}/api/track/open?leadId=${encodeURIComponent(leadId || '')}&stage=${encodeURIComponent(stage || 1)}&campaign=${encodeURIComponent(campaign || 'default')}" width="1" height="1" alt="" style="border:0;width:1px;height:1px;" />`;
 
     res.json({
       success: true,
@@ -620,9 +665,7 @@ app.post('/api/email/send-stage', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Stage template is required' });
     }
 
-    const host = req.get('host') || 'localhost:3000';
-    const protocol = req.protocol || 'http';
-    const baseUrl = `${protocol}://${host}`;
+    const baseUrl = getPublicBaseUrl(req);
 
     const result = await sendAppEmail({
       lead,

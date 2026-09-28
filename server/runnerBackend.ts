@@ -9,6 +9,7 @@ import {
   saveLocalTasks
 } from './mongoBackend.ts';
 import { checkAppThreadForReply, sendAppEmail } from './msGraphService.ts';
+import { getPublicBaseUrl } from './urlHelper.ts';
 import { DEFAULT_STAGE_TEMPLATES } from '../src/data/defaultTemplates.ts';
 
 export interface CampaignRunResult {
@@ -412,12 +413,14 @@ export async function runDueCampaignsJob(
         const sendFromAccount = sender ? sender.email : (currentNode.data?.senderEmail || userEmail || 'Default Inbox');
         const template = DEFAULT_STAGE_TEMPLATES.find(t => t.stage === stageNum) || DEFAULT_STAGE_TEMPLATES[0];
 
+        const baseUrl = getPublicBaseUrl();
         try {
           const sendResult = await sendAppEmail({
             lead: lead as any,
             template,
             stageNum,
-            senderDisplayName: sender?.name
+            senderDisplayName: sender?.name,
+            baseUrl
           });
           lead.threadId = sendResult.threadId;
         } catch (sendErr: any) {
