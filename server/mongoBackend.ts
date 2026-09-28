@@ -122,7 +122,11 @@ export async function listLeads(token?: string, spreadsheetId?: string): Promise
     .collection<BackendLead>(COLLECTIONS.LEADS)
     .find({}, { projection: { _id: 0 } })
     .toArray();
-  return leads;
+  return leads.map(l => ({
+    ...l,
+    campaign: (l.campaign && l.campaign.trim()) ? l.campaign.trim() : 'Default',
+    campaignId: l.campaignId || ''
+  }));
 }
 
 /**

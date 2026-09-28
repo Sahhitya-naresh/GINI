@@ -22,7 +22,7 @@ import {
   Info,
   Sparkles
 } from 'lucide-react';
-import { Lead, StageTemplate, EmailThreadMessage } from '../types';
+import { Lead, StageTemplate, EmailThreadMessage, CampaignWorkflow } from '../types';
 import { getOutlookThread } from '../services/outlookService';
 import { formatDisplayDate } from '../utils/dateUtils';
 import { recordTrackingEvent } from '../services/trackingService';
@@ -39,6 +39,7 @@ interface LeadDetailModalProps {
   onTogglePause: (lead: Lead) => void;
   onSendNextStage: (lead: Lead) => void;
   onCheckReply: (lead: Lead) => void;
+  campaigns?: CampaignWorkflow[];
 }
 
 export const LeadDetailModal: React.FC<LeadDetailModalProps> = ({
@@ -52,7 +53,8 @@ export const LeadDetailModal: React.FC<LeadDetailModalProps> = ({
   onDeleteLead,
   onTogglePause,
   onSendNextStage,
-  onCheckReply
+  onCheckReply,
+  campaigns = []
 }) => {
   const [threadMessages, setThreadMessages] = useState<EmailThreadMessage[]>([]);
   const [isLoadingThread, setIsLoadingThread] = useState(false);
@@ -62,6 +64,56 @@ export const LeadDetailModal: React.FC<LeadDetailModalProps> = ({
   const [editedPainPoint, setEditedPainPoint] = useState('');
   const [isConfirmingDelete, setIsConfirmingDelete] = useState(false);
   const [isSimulatingTracking, setIsSimulatingTracking] = useState(false);
+  const [pendingCampaignChange, setPendingCampaignChange] = useState<{ targetCampaignId: string; targetCampaignName: string } | null>(null);
+
+  const handleSelectCampaign = (targetId: string) => {
+    if (!lead) return;
+    const targetCampaign = campaigns.find(c => c.id === targetId);
+    const targetName = targetCampaign ? targetCampaign.name : 'Default';
+    const currentCampId = lead.campaignId || campaigns.find(c => c.name.toLowerCase() === (lead.campaign || '').toLowerCase())?.id || '';
+    
+    // If selecting same value, do nothing
+    if (targetId === currentCampId || (targetId === '' && (!currentCampId || lead.campaign === 'Default'))) {
+      return;
+    }
+
+    const isMidSequence = (lead.currentStage || 0) > 0 || Boolean(lead.currentNodeId);
+    if (isMidSequence) {
+      setPendingCampaignChange({ targetCampaignId: targetId, targetCampaignName: targetName });
+    } else {
+      executeCampaignChange(targetId, targetName);
+    }
+  };
+
+  const executeCampaignChange = (targetId: string, targetName: string) => {
+    if (!lead) return;
+    const targetCampaign = campaigns.find(c => c.id === targetId);
+    
+    // Find first node of target campaign
+    let firstNodeId = '';
+    if (targetCampaign) {
+      const nodes = (targetCampaign as any).workflow_graph?.nodes || (targetCampaign as any).nodes || [];
+      const edges = (targetCampaign as any).workflow_graph?.edges || (targetCampaign as any).edges || [];
+      const startNode = nodes.find((n: any) => n.data?.nodeType === 'start' || n.type === 'start' || n.type === 'startNode');
+      if (startNode) {
+        const firstEdge = edges.find((e: any) => e.source === startNode.id);
+        firstNodeId = firstEdge ? firstEdge.target : startNode.id;
+      } else if (nodes.length > 0) {
+        firstNodeId = nodes[0].id;
+      }
+    }
+
+    const updated: Lead = {
+      ...lead,
+      campaign: targetName,
+      campaignId: targetId,
+      currentStage: 0,
+      currentNodeId: firstNodeId,
+      nodeEnteredDate: new Date().toISOString().split('T')[0]
+    };
+    onUpdateLead(updated);
+    setPendingCampaignChange(null);
+  };
 
   const handleSimulateTracking = async (type: 'open' | 'click') => {
     if (!lead || isSimulatingTracking) return;
@@ -324,14 +376,26 @@ export const LeadDetailModal: React.FC<LeadDetailModalProps> = ({
                   <span className="font-medium text-slate-800">{lead.industry}</span>
                 </div>
               )}
-              {lead.campaign && (
-                <div className="flex justify-between py-1 border-b border-slate-100">
-                  <span className="text-slate-500 flex items-center gap-1">
-                    <Tag className="w-3 h-3 text-slate-400" /> Campaign:
-                  </span>
-                  <span className="px-2 py-0.5 rounded bg-slate-100 font-medium text-slate-700">{lead.campaign}</span>
-                </div>
-              )}
+              <div className="flex justify-between items-center py-1 border-b border-slate-100">
+                <span className="text-slate-500 flex items-center gap-1">
+                  <Tag className="w-3 h-3 text-slate-400" /> Campaign:
+                </span>
+                <select
+                  value={lead.campaignId || (campaigns.find(c => c.name.toLowerCase() === (lead.campaign || '').toLowerCase())?.id || '')}
+                  onChange={(e) => handleSelectCampaign(e.target.value)}
+                  className="text-xs px-2 py-1 border border-slate-300 rounded-md bg-white text-slate-800 font-medium focus:ring-2 focus:ring-red-500 max-w-[200px]"
+                >
+                  <option value="">No campaign / Default</option>
+                  {campaigns.map(c => {
+                    const isActive = Boolean(c.is_active ?? (c as any).isActive);
+                    return (
+                      <option key={c.id} value={c.id}>
+                        {c.name} ({isActive ? 'Active' : 'Inactive'})
+                      </option>
+                    );
+                  })}
+                </select>
+              </div>
               {lead.currentNodeId && (
                 <div className="flex justify-between py-1 border-b border-slate-100">
                   <span className="text-slate-500">Workflow Step:</span>
@@ -682,6 +746,52 @@ export const LeadDetailModal: React.FC<LeadDetailModalProps> = ({
         </div>
 
       </div>
+
+      {/* Confirmation Modal for Mid-Sequence Campaign Change */}
+      {pendingCampaignChange && (
+        <div className="fixed inset-0 z-60 flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-4">
+          <div className="w-full max-w-md bg-white rounded-2xl shadow-2xl border border-amber-200 overflow-hidden p-6 animate-in fade-in zoom-in-95 duration-150 space-y-4">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl bg-amber-50 text-amber-600 border border-amber-200 flex items-center justify-center shrink-0">
+                <AlertTriangle className="w-5 h-5" />
+              </div>
+              <div>
+                <h4 className="text-base font-bold text-slate-900">Restart Campaign Sequence?</h4>
+                <p className="text-xs text-slate-500">Lead is currently mid-sequence (Stage {lead.currentStage})</p>
+              </div>
+            </div>
+
+            <div className="p-3.5 bg-amber-50/60 border border-amber-200 rounded-xl text-xs space-y-2 text-slate-700">
+              <p className="font-semibold text-amber-900">
+                Moving this lead to &ldquo;{pendingCampaignChange.targetCampaignName}&rdquo; will:
+              </p>
+              <ul className="list-disc list-inside space-y-1 text-slate-600">
+                <li>Restart the lead at the new campaign&apos;s first workflow node (Stage 0).</li>
+                <li>Keep all previous sent-email history and message threads intact.</li>
+                <li>Preserve existing open &amp; click tracking metrics.</li>
+                <li>Leads that have <strong>Replied</strong> stay excluded from automation regardless of campaign.</li>
+              </ul>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100">
+              <button
+                type="button"
+                onClick={() => setPendingCampaignChange(null)}
+                className="px-3.5 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-lg transition-colors cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => executeCampaignChange(pendingCampaignChange.targetCampaignId, pendingCampaignChange.targetCampaignName)}
+                className="px-4 py-2 text-xs font-bold text-white bg-amber-600 hover:bg-amber-700 rounded-lg shadow-xs shadow-amber-500/20 transition-all cursor-pointer"
+              >
+                Confirm &amp; Restart Sequence
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

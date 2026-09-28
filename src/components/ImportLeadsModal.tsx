@@ -15,7 +15,7 @@ import {
   FolderPlus,
   Users
 } from 'lucide-react';
-import { Lead, ImportCandidate } from '../types';
+import { Lead, ImportCandidate, CampaignWorkflow } from '../types';
 import { getTodayDateString } from '../utils/dateUtils';
 
 interface ImportLeadsModalProps {
@@ -24,6 +24,7 @@ interface ImportLeadsModalProps {
   existingLeads?: Lead[];
   onCommitImport: (newLeads: Lead[], summary: { imported: number; skippedDuplicates: number; invalid: number }) => Promise<void>;
   isImporting?: boolean;
+  campaigns?: CampaignWorkflow[];
 }
 
 type TargetField = 
@@ -35,6 +36,7 @@ type TargetField =
   | 'linkedin_url'
   | 'pain_point'
   | 'industry'
+  | 'campaign'
   | 'notes';
 
 const TARGET_FIELDS: { key: TargetField; label: string; required: boolean; hint: string }[] = [
@@ -45,6 +47,7 @@ const TARGET_FIELDS: { key: TargetField; label: string; required: boolean; hint:
   { key: 'job_title', label: 'Job Title', required: false, hint: 'Stored for targeting & personalization' },
   { key: 'pain_point', label: 'Pain Point(s)', required: false, hint: 'Used for {{pain_point}} merge tag' },
   { key: 'industry', label: 'Industry', required: false, hint: 'Stored for industry benchmarking' },
+  { key: 'campaign', label: 'Campaign (Optional)', required: false, hint: 'Row value overrides dropdown if matching campaign name found' },
   { key: 'linkedin_url', label: 'LinkedIn URL', required: false, hint: 'Stored data ready for future LinkedIn outreach' },
   { key: 'notes', label: 'Notes', required: false, hint: 'Internal CRM notes & context' },
 ];
@@ -54,7 +57,8 @@ export const ImportLeadsModal: React.FC<ImportLeadsModalProps> = ({
   onClose,
   existingLeads,
   onCommitImport,
-  isImporting
+  isImporting,
+  campaigns = []
 }) => {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -72,10 +76,12 @@ export const ImportLeadsModal: React.FC<ImportLeadsModalProps> = ({
     linkedin_url: '',
     pain_point: '',
     industry: '',
+    campaign: '',
     notes: ''
   });
 
-  const [campaignName, setCampaignName] = useState<string>('Outbound Campaign');
+  const [selectedCampaignId, setSelectedCampaignId] = useState<string>('');
+  const [unmatchedOverrides, setUnmatchedOverrides] = useState<Record<string, 'assign_dropdown' | 'skip'>>({});
   const [skipDuplicates, setSkipDuplicates] = useState<boolean>(true);
   const [previewTab, setPreviewTab] = useState<'all' | 'valid' | 'duplicates' | 'invalid'>('all');
   const [commitError, setCommitError] = useState<string | null>(null);
@@ -93,6 +99,7 @@ export const ImportLeadsModal: React.FC<ImportLeadsModalProps> = ({
       linkedin_url: '',
       pain_point: '',
       industry: '',
+      campaign: '',
       notes: ''
     };
 
@@ -106,6 +113,7 @@ export const ImportLeadsModal: React.FC<ImportLeadsModalProps> = ({
       if (serverDetected.linkedinUrl && headers.includes(serverDetected.linkedinUrl)) newMapping.linkedin_url = serverDetected.linkedinUrl;
       if (serverDetected.painPoint && headers.includes(serverDetected.painPoint)) newMapping.pain_point = serverDetected.painPoint;
       if (serverDetected.industry && headers.includes(serverDetected.industry)) newMapping.industry = serverDetected.industry;
+      if (serverDetected.campaign && headers.includes(serverDetected.campaign)) newMapping.campaign = serverDetected.campaign;
       if (serverDetected.notes && headers.includes(serverDetected.notes)) newMapping.notes = serverDetected.notes;
     }
 
@@ -130,6 +138,8 @@ export const ImportLeadsModal: React.FC<ImportLeadsModalProps> = ({
         newMapping.pain_point = header;
       } else if (!newMapping.industry && (norm === 'industry' || norm === 'sector' || norm === 'vertical')) {
         newMapping.industry = header;
+      } else if (!newMapping.campaign && (norm === 'campaign' || norm === 'campaignname' || norm === 'campaign_name' || norm === 'sequence' || norm === 'workflow')) {
+        newMapping.campaign = header;
       } else if (!newMapping.notes && (norm === 'notes' || norm === 'note' || norm === 'comments' || norm === 'description')) {
         newMapping.notes = header;
       }
@@ -239,6 +249,10 @@ export const ImportLeadsModal: React.FC<ImportLeadsModalProps> = ({
 
     const seenInFileEmails = new Set<string>();
 
+    const dropdownCamp = campaigns.find(c => c.id === selectedCampaignId);
+    const defaultDropdownName = dropdownCamp ? dropdownCamp.name : 'Default';
+    const defaultDropdownId = dropdownCamp ? dropdownCamp.id : '';
+
     return (rawRows || []).map((row, index) => {
       const id = `cand-${index}`;
       const email = String(columnMapping.email ? row[columnMapping.email] || '' : '').trim();
@@ -266,6 +280,30 @@ export const ImportLeadsModal: React.FC<ImportLeadsModalProps> = ({
       } else if (!emailRegex.test(email)) {
         isValid = false;
         validationError = 'Malformed email format';
+      }
+
+      // Campaign resolution
+      const rawFileCampaign = columnMapping.campaign ? String(row[columnMapping.campaign] || '').trim() : '';
+      let resolvedCampaign = defaultDropdownName;
+      let resolvedCampaignId = defaultDropdownId;
+      let hasUnmatchedCampaign = false;
+
+      if (rawFileCampaign) {
+        const match = campaigns.find(c => c.name.trim().toLowerCase() === rawFileCampaign.toLowerCase());
+        if (match) {
+          resolvedCampaign = match.name;
+          resolvedCampaignId = match.id;
+        } else {
+          hasUnmatchedCampaign = true;
+          const userAction = unmatchedOverrides[id] || 'assign_dropdown';
+          if (userAction === 'skip') {
+            isValid = false;
+            validationError = `Unmatched campaign "${rawFileCampaign}" (marked to skip)`;
+          } else {
+            resolvedCampaign = defaultDropdownName;
+            resolvedCampaignId = defaultDropdownId;
+          }
+        }
       }
 
       // Duplicate detection
@@ -298,14 +336,17 @@ export const ImportLeadsModal: React.FC<ImportLeadsModalProps> = ({
         painPoint: painPoint || 'Streamlining outreach & workflow bottlenecks',
         industry,
         notes,
-        campaign: campaignName.trim() || 'Default Campaign',
+        campaign: resolvedCampaign,
+        campaignId: resolvedCampaignId,
+        rawCampaignFromFile: rawFileCampaign,
+        hasUnmatchedCampaign,
         isValid,
         validationError,
         isDuplicate,
         duplicateReason
       };
     });
-  }, [step, rawRows, columnMapping, existingLeads, campaignName]);
+  }, [step, rawRows, columnMapping, existingLeads, selectedCampaignId, campaigns, unmatchedOverrides]);
 
   const validToImport = candidates.filter(c => c.isValid && (!skipDuplicates || !c.isDuplicate));
   const skippedDuplicates = candidates.filter(c => c.isValid && c.isDuplicate);
@@ -359,7 +400,8 @@ export const ImportLeadsModal: React.FC<ImportLeadsModalProps> = ({
         painPoint: c.painPoint,
         industry: c.industry,
         notes: c.notes,
-        campaign: c.campaign,
+        campaign: c.campaign || 'Default',
+        campaignId: c.campaignId || '',
         currentStage: 0, // Starts at Stage 0
         status: 'Active', // Active sequence
         lastEmailSentDate: '',
@@ -633,35 +675,31 @@ export const ImportLeadsModal: React.FC<ImportLeadsModalProps> = ({
                 </div>
               )}
 
-              {/* Campaign Tagging */}
+              {/* Assign to Campaign Dropdown */}
               <div className="p-4 bg-white rounded-xl border border-slate-200 space-y-2">
                 <div className="flex items-center gap-2">
                   <FolderPlus className="w-4 h-4 text-red-600" />
-                  <label className="text-xs font-bold text-slate-900">Campaign Tag / Batch Grouping</label>
+                  <label className="text-xs font-bold text-slate-900">Assign to Campaign</label>
                 </div>
                 <p className="text-xs text-slate-500">
-                  Assign a campaign tag to easily segment and view analytics for this outreach batch.
+                  Select a default campaign for imported leads. If your file contains an optional &ldquo;campaign&rdquo; column, matching campaign names will override this selection for that row.
                 </p>
                 <div className="flex items-center gap-3">
-                  <input
-                    type="text"
-                    value={campaignName}
-                    onChange={(e) => setCampaignName(e.target.value)}
-                    placeholder="e.g. Q3 Inbound Tech, Enterprise Batch 1"
-                    className="flex-1 px-3 py-2 text-xs sm:text-sm border border-slate-300 rounded-lg focus:ring-2 focus:ring-red-500 focus:outline-none"
-                  />
-                  <div className="flex items-center gap-1.5 flex-wrap">
-                    {['Q3 Enterprise', 'Cold Inbound', 'Executive Outreach'].map(tag => (
-                      <button
-                        key={tag}
-                        type="button"
-                        onClick={() => setCampaignName(tag)}
-                        className="px-2 py-1 text-[11px] font-medium bg-slate-100 hover:bg-red-50 text-slate-700 hover:text-red-700 rounded-md border border-slate-200 transition-colors"
-                      >
-                        {tag}
-                      </button>
-                    ))}
-                  </div>
+                  <select
+                    value={selectedCampaignId}
+                    onChange={(e) => setSelectedCampaignId(e.target.value)}
+                    className="w-full px-3 py-2 text-xs sm:text-sm border border-slate-300 rounded-lg focus:ring-2 focus:ring-red-500 focus:outline-none bg-white font-medium"
+                  >
+                    <option value="">No campaign / Default</option>
+                    {campaigns.map(c => {
+                      const isActive = Boolean(c.is_active ?? (c as any).isActive);
+                      return (
+                        <option key={c.id} value={c.id}>
+                          {c.name} ({isActive ? 'Active' : 'Inactive'})
+                        </option>
+                      );
+                    })}
+                  </select>
                 </div>
               </div>
 
@@ -808,6 +846,49 @@ export const ImportLeadsModal: React.FC<ImportLeadsModalProps> = ({
                 </div>
               </div>
 
+              {/* Unmatched Campaign Alert Banner */}
+              {candidates.some(c => c.hasUnmatchedCampaign) && (
+                <div className="p-3.5 bg-amber-50 border border-amber-200 rounded-xl flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs text-amber-900">
+                  <div className="flex items-start gap-2">
+                    <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                    <div>
+                      <p className="font-bold">Unmatched Campaign Names Detected in File</p>
+                      <p className="text-[11px] text-amber-800">
+                        Some rows contain campaign names that do not match any known campaign. You can assign them to the selected dropdown campaign ({campaigns.find(c => c.id === selectedCampaignId)?.name || 'Default'}) or skip those rows.
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const newOverrides: Record<string, 'assign_dropdown' | 'skip'> = {};
+                        candidates.forEach(c => {
+                          if (c.hasUnmatchedCampaign) newOverrides[c.id] = 'assign_dropdown';
+                        });
+                        setUnmatchedOverrides(newOverrides);
+                      }}
+                      className="px-2.5 py-1 text-xs font-semibold bg-white border border-amber-300 hover:bg-amber-100 rounded-md text-amber-900 transition-colors shadow-2xs cursor-pointer"
+                    >
+                      Assign All to Dropdown
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const newOverrides: Record<string, 'assign_dropdown' | 'skip'> = {};
+                        candidates.forEach(c => {
+                          if (c.hasUnmatchedCampaign) newOverrides[c.id] = 'skip';
+                        });
+                        setUnmatchedOverrides(newOverrides);
+                      }}
+                      className="px-2.5 py-1 text-xs font-semibold bg-red-50 border border-red-300 hover:bg-red-100 rounded-md text-red-700 transition-colors shadow-2xs cursor-pointer"
+                    >
+                      Skip All Unmatched
+                    </button>
+                  </div>
+                </div>
+              )}
+
               {/* Preview Table */}
               <div className="border border-slate-200 rounded-xl overflow-hidden shadow-2xs">
                 <div className="px-4 py-2.5 bg-slate-100/80 border-b border-slate-200 flex items-center justify-between text-xs">
@@ -837,6 +918,7 @@ export const ImportLeadsModal: React.FC<ImportLeadsModalProps> = ({
                     <thead className="bg-slate-50 sticky top-0 border-b border-slate-200 text-slate-500 font-semibold uppercase text-[10px]">
                       <tr>
                         <th className="py-2.5 px-3">Status</th>
+                        <th className="py-2.5 px-3">Campaign</th>
                         <th className="py-2.5 px-3">Name</th>
                         <th className="py-2.5 px-3">Email</th>
                         <th className="py-2.5 px-3">Company</th>
@@ -865,6 +947,45 @@ export const ImportLeadsModal: React.FC<ImportLeadsModalProps> = ({
                                 <span>Ready</span>
                               </span>
                             )}
+                          </td>
+                          <td className="py-2.5 px-3 whitespace-nowrap">
+                            <div className="flex flex-col gap-1">
+                              <span className="font-semibold text-slate-800">
+                                {c.campaign || 'Default'}
+                              </span>
+                              {c.hasUnmatchedCampaign && (
+                                <div className="flex flex-col gap-1">
+                                  <span className="inline-flex items-center gap-1 text-[10px] font-bold px-1.5 py-0.5 rounded bg-amber-100 text-amber-800" title={`Unmatched name in file: "${c.rawCampaignFromFile}"`}>
+                                    <AlertTriangle className="w-3 h-3 text-amber-600 shrink-0" />
+                                    <span>Unmatched: &ldquo;{c.rawCampaignFromFile}&rdquo;</span>
+                                  </span>
+                                  <div className="flex items-center gap-1 text-[10px]">
+                                    <button
+                                      type="button"
+                                      onClick={() => setUnmatchedOverrides(prev => ({ ...prev, [c.id]: 'assign_dropdown' }))}
+                                      className={`px-1.5 py-0.5 rounded font-semibold transition-colors cursor-pointer ${
+                                        (unmatchedOverrides[c.id] || 'assign_dropdown') === 'assign_dropdown'
+                                          ? 'bg-slate-900 text-white'
+                                          : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                                      }`}
+                                    >
+                                      Assign Dropdown
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => setUnmatchedOverrides(prev => ({ ...prev, [c.id]: 'skip' }))}
+                                      className={`px-1.5 py-0.5 rounded font-semibold transition-colors cursor-pointer ${
+                                        unmatchedOverrides[c.id] === 'skip'
+                                          ? 'bg-red-600 text-white'
+                                          : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                                      }`}
+                                    >
+                                      Skip
+                                    </button>
+                                  </div>
+                                </div>
+                              )}
+                            </div>
                           </td>
                           <td className="py-2.5 px-3 font-medium text-slate-900">{c.name}</td>
                           <td className="py-2.5 px-3 font-mono text-slate-700">{c.email}</td>

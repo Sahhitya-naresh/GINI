@@ -164,8 +164,8 @@ export async function runDueCampaignsJob(
 
     // Find leads assigned to this active campaign
     const campaignLeads = leads.filter(l => {
-      // Must not be Paused or Completed
-      if (l.status === 'Paused' || l.status === 'Completed' || l.status === 'Broke Up') {
+      // Must not be Paused, Completed, Broke Up, or Replied
+      if (l.status === 'Paused' || l.status === 'Completed' || l.status === 'Broke Up' || l.status === 'Replied') {
         return false;
       }
       return l.campaignId === campaign.id || l.campaign === campaign.name;
@@ -194,6 +194,7 @@ export async function runDueCampaignsJob(
 
         if (currentNode) {
           lead.campaignId = campaign.id;
+          lead.campaign = campaign.name;
           lead.currentNodeId = currentNode.id;
           lead.nodeEnteredDate = todayStr;
           await updateLead(lead, token, spreadsheetId);

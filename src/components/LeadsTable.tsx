@@ -1,5 +1,5 @@
 import React, { useState, useMemo } from 'react';
-import { Lead, StageTemplate } from '../types';
+import { Lead, StageTemplate, CampaignWorkflow } from '../types';
 import { formatDisplayDate, isLeadDueForNextSend, getTodayDateString } from '../utils/dateUtils';
 import { 
   Search, 
@@ -39,6 +39,8 @@ interface LeadsTableProps {
   onOpenScheduler: () => void;
   dueCount: number;
   initialCampaignFilter?: string;
+  campaigns?: CampaignWorkflow[];
+  onBulkAssignCampaign?: (leadIds: string[], campaignId: string) => Promise<void> | void;
 }
 
 export const LeadsTable: React.FC<LeadsTableProps> = ({
@@ -54,13 +56,20 @@ export const LeadsTable: React.FC<LeadsTableProps> = ({
   isCheckingReplies,
   onOpenScheduler,
   dueCount,
-  initialCampaignFilter
+  initialCampaignFilter,
+  campaigns = [],
+  onBulkAssignCampaign
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<'ALL' | Lead['status']>('ALL');
   const [stageFilter, setStageFilter] = useState<string>('ALL');
   const [campaignFilter, setCampaignFilter] = useState<string>(initialCampaignFilter || 'ALL');
   const [leadToDelete, setLeadToDelete] = useState<Lead | null>(null);
+
+  // Bulk selection state
+  const [selectedLeadIds, setSelectedLeadIds] = useState<Set<string>>(new Set());
+  const [bulkCampaignId, setBulkCampaignId] = useState<string>('');
+  const [isBulkAssigning, setIsBulkAssigning] = useState<boolean>(false);
 
   // Update campaignFilter when initialCampaignFilter prop changes
   React.useEffect(() => {
@@ -75,8 +84,43 @@ export const LeadsTable: React.FC<LeadsTableProps> = ({
     leads.forEach(l => {
       if (l.campaign) set.add(l.campaign);
     });
+    campaigns.forEach(c => {
+      if (c.name) set.add(c.name);
+    });
     return Array.from(set).sort();
-  }, [leads]);
+  }, [leads, campaigns]);
+
+  const handleToggleSelectAll = () => {
+    if (selectedLeadIds.size === filteredLeads.length && filteredLeads.length > 0) {
+      setSelectedLeadIds(new Set());
+    } else {
+      setSelectedLeadIds(new Set(filteredLeads.map(l => l.leadId)));
+    }
+  };
+
+  const handleToggleSelectLead = (leadId: string) => {
+    setSelectedLeadIds(prev => {
+      const next = new Set(prev);
+      if (next.has(leadId)) {
+        next.delete(leadId);
+      } else {
+        next.add(leadId);
+      }
+      return next;
+    });
+  };
+
+  const handleApplyBulkCampaign = async () => {
+    if (!onBulkAssignCampaign || selectedLeadIds.size === 0 || !bulkCampaignId) return;
+    setIsBulkAssigning(true);
+    try {
+      await onBulkAssignCampaign(Array.from(selectedLeadIds), bulkCampaignId);
+      setSelectedLeadIds(new Set());
+      setBulkCampaignId('');
+    } finally {
+      setIsBulkAssigning(false);
+    }
+  };
 
   // Filtered and deduplicated leads
   const filteredLeads = useMemo(() => {
@@ -321,12 +365,62 @@ export const LeadsTable: React.FC<LeadsTableProps> = ({
         </div>
       </div>
 
+      {/* Bulk Campaign Assignment Bar */}
+      {selectedLeadIds.size > 0 && (
+        <div className="p-3 bg-slate-900 text-white rounded-xl shadow-lg border border-slate-800 flex flex-wrap items-center justify-between gap-3 text-xs animate-in fade-in slide-in-from-top-2 duration-150">
+          <div className="flex items-center gap-3">
+            <span className="font-bold px-2 py-0.5 rounded bg-red-600 text-white text-[11px]">
+              {selectedLeadIds.size} Lead{selectedLeadIds.size > 1 ? 's' : ''} Selected
+            </span>
+            <span className="text-slate-300 font-medium">Assign to Campaign:</span>
+            <select
+              value={bulkCampaignId}
+              onChange={(e) => setBulkCampaignId(e.target.value)}
+              className="bg-slate-800 text-white border border-slate-700 rounded-lg px-2.5 py-1.5 focus:ring-2 focus:ring-red-500 font-medium text-xs cursor-pointer"
+            >
+              <option value="">Choose Campaign...</option>
+              <option value="__default__">No campaign / Default</option>
+              {campaigns.map(c => {
+                const isActive = Boolean(c.is_active ?? (c as any).isActive);
+                return (
+                  <option key={c.id} value={c.id}>
+                    {c.name} ({isActive ? 'Active' : 'Inactive'})
+                  </option>
+                );
+              })}
+            </select>
+            <button
+              onClick={handleApplyBulkCampaign}
+              disabled={!bulkCampaignId || isBulkAssigning}
+              className="px-3.5 py-1.5 bg-red-600 hover:bg-red-700 disabled:opacity-50 text-white font-bold rounded-lg shadow-xs transition-colors cursor-pointer"
+            >
+              {isBulkAssigning ? 'Applying...' : 'Apply Campaign'}
+            </button>
+          </div>
+          <button
+            onClick={() => setSelectedLeadIds(new Set())}
+            className="text-xs font-semibold text-slate-400 hover:text-white transition-colors cursor-pointer"
+          >
+            Deselect All
+          </button>
+        </div>
+      )}
+
       {/* Main Leads Table */}
       <div className="bg-white rounded-xl border border-slate-200 shadow-2xs overflow-hidden">
         <div className="overflow-x-auto">
           <table className="w-full text-left border-collapse text-xs">
             <thead>
               <tr className="bg-slate-50/80 border-b border-slate-200 text-slate-500 uppercase tracking-wider font-semibold text-[11px]">
+                <th className="py-3 px-3 w-10 text-center">
+                  <input
+                    type="checkbox"
+                    checked={filteredLeads.length > 0 && selectedLeadIds.size === filteredLeads.length}
+                    onChange={handleToggleSelectAll}
+                    className="rounded text-red-600 focus:ring-red-500 border-slate-300 w-3.5 h-3.5 cursor-pointer"
+                    title="Select / Deselect all visible leads"
+                  />
+                </th>
                 <th className="py-3 px-4">Lead</th>
                 <th className="py-3 px-4">Company &amp; Role</th>
                 <th className="py-3 px-4">Current Stage</th>
@@ -350,7 +444,7 @@ export const LeadsTable: React.FC<LeadsTableProps> = ({
             <tbody className="divide-y divide-slate-100">
               {filteredLeads.length === 0 ? (
                 <tr>
-                  <td colSpan={8} className="py-12 text-center text-slate-400">
+                  <td colSpan={9} className="py-12 text-center text-slate-400">
                     <p className="text-sm font-medium text-slate-600">No leads found</p>
                     <p className="text-xs text-slate-400 mt-1">Try changing your search keywords or status filter</p>
                   </td>
@@ -368,6 +462,14 @@ export const LeadsTable: React.FC<LeadsTableProps> = ({
                         isReplied ? 'bg-red-50/40' : isDue ? 'bg-red-50/20' : ''
                       }`}
                     >
+                      <td className="py-3 px-3 text-center">
+                        <input
+                          type="checkbox"
+                          checked={selectedLeadIds.has(lead.leadId)}
+                          onChange={() => handleToggleSelectLead(lead.leadId)}
+                          className="rounded text-red-600 focus:ring-red-500 border-slate-300 w-3.5 h-3.5 cursor-pointer"
+                        />
+                      </td>
                       {/* Lead Name & Email & LinkedIn */}
                       <td className="py-3.5 px-4">
                         <div className="font-semibold text-slate-900 flex items-center gap-1.5">

@@ -199,6 +199,9 @@ export interface ImportCandidate {
   industry: string;
   notes: string;
   campaign: string;
+  campaignId?: string;
+  rawCampaignFromFile?: string;
+  hasUnmatchedCampaign?: boolean;
   isValid: boolean;
   validationError?: string;
   isDuplicate: boolean;

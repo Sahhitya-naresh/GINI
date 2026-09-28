@@ -278,6 +278,8 @@ export default function App() {
   });
   const [senders, setSenders] = useState<ConnectedSender[]>(() => loadConnectedSenders());
   const [manualTasks, setManualTasks] = useState<LeadManualTask[]>(() => loadManualTasks());
+  const [leadNeedingCampaignSend, setLeadNeedingCampaignSend] = useState<Lead | null>(null);
+  const [selectedCampaignForSend, setSelectedCampaignForSend] = useState<string>('');
 
   // Automatically load connected senders from backend on startup
   useEffect(() => {
@@ -807,15 +809,81 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
     }
   };
 
-  // Send single stage email (with confirmation dialog)
+  // Send single stage email (with confirmation dialog and campaign check)
   const handleInitiateSendNextStage = (lead: Lead) => {
+    const hasCampaign = Boolean(
+      lead.campaignId || (lead.campaign && lead.campaign.trim() !== '' && lead.campaign.toLowerCase() !== 'default')
+    );
+
+    if (!hasCampaign) {
+      setLeadNeedingCampaignSend(lead);
+      setSelectedCampaignForSend(workflows[0]?.id || '');
+      return;
+    }
+
+    startSendConfirmation(lead);
+  };
+
+  const handleConfirmAssignCampaignAndSend = async () => {
+    if (!leadNeedingCampaignSend) return;
+    const chosen = workflows.find(w => w.id === selectedCampaignForSend);
+    const campaignName = chosen ? chosen.name : 'Default';
+    const campaignId = chosen ? chosen.id : '';
+
+    const updated: Lead = {
+      ...leadNeedingCampaignSend,
+      campaign: campaignName,
+      campaignId: campaignId
+    };
+
+    await handleUpdateLead(updated);
+    setLeadNeedingCampaignSend(null);
+    startSendConfirmation(updated);
+  };
+
+  const startSendConfirmation = (lead: Lead) => {
     const nextStageNum = lead.currentStage + 1;
     if (nextStageNum > 7) {
       showToast('Lead has already completed all 7 stages.', 'info');
       return;
     }
 
-    const template = templates.find(t => t.stage === nextStageNum) || templates[0];
+    // Resolve campaign template and sender
+    const campaign = workflows.find(w => w.id === lead.campaignId || (lead.campaign && w.name.toLowerCase() === lead.campaign.toLowerCase()));
+    let template = templates.find(t => t.stage === nextStageNum) || templates[0];
+    let customSenderName = settings.senderName;
+
+    if (campaign) {
+      const nodes = (campaign as any).workflow_graph?.nodes || (campaign as any).nodes || [];
+      const startNode = nodes.find((n: any) => n.data?.nodeType === 'start' || n.type === 'start' || n.type === 'startNode');
+      const emailNodes = nodes.filter((n: any) => n.data?.nodeType === 'email' || n.type === 'email' || n.type === 'emailNode');
+      const emailNode = emailNodes.find((n: any) => n.data?.templateStage === nextStageNum) || emailNodes[0];
+
+      if (emailNode?.data) {
+        if (emailNode.data.useCustomTemplate && emailNode.data.customSubject) {
+          template = {
+            stage: emailNode.data.templateStage || nextStageNum,
+            name: emailNode.data.label || `Stage ${nextStageNum}`,
+            purpose: 'Campaign workflow step',
+            defaultGapDays: 3,
+            subject: emailNode.data.customSubject,
+            bodyHtml: (emailNode.data.customBody || '').replace(/\n/g, '<br/>')
+          };
+        } else if (emailNode.data.templateStage) {
+          const match = templates.find(t => t.stage === emailNode.data.templateStage);
+          if (match) template = match;
+        }
+
+        const senderId = emailNode.data.senderId || startNode?.data?.senderId;
+        if (senderId) {
+          const foundSender = senders.find(s => s.id === senderId || s.email === senderId);
+          if (foundSender) {
+            customSenderName = foundSender.name;
+          }
+        }
+      }
+    }
+
     const isReply = Boolean(lead.threadId);
 
     setConfirmDialog({
@@ -827,18 +895,19 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
       details: [
         `Recipient: ${lead.name} (${lead.email})`,
         `Company: ${lead.company}`,
-        `Pain Point: "${lead.painPoint || 'Default'}"`,
+        `Campaign: ${campaign ? campaign.name : lead.campaign || 'Default'}`,
+        `Sender: ${customSenderName || 'Default Outlook Account'}`,
         `Subject: ${template.subject}`,
         `Next Send Date: +${settings.stageGapDays[nextStageNum] || 3} business days`
       ],
       onConfirm: async () => {
         setConfirmDialog(prev => ({ ...prev, isOpen: false }));
-        await executeSendStageEmail(lead, template, nextStageNum);
+        await executeSendStageEmail(lead, template, nextStageNum, customSenderName);
       }
     });
   };
 
-  const executeSendStageEmail = async (lead: Lead, template: StageTemplate, stageNum: number) => {
+  const executeSendStageEmail = async (lead: Lead, template: StageTemplate, stageNum: number, customSenderName?: string) => {
     try {
       showToast(`Sending Stage ${stageNum} to ${lead.name}...`, 'info');
 
@@ -870,7 +939,7 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
         lead,
         template,
         userEmail,
-        settings.senderName
+        customSenderName || settings.senderName
       );
 
       const today = getTodayDateString();
@@ -892,6 +961,38 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
     } catch (err: any) {
       console.error('Send failed:', err);
       showToast(`Send failed: ${err.message || 'Outlook error'}`, 'error');
+    }
+  };
+
+  // Bulk assign multiple leads to a campaign
+  const handleBulkAssignCampaign = async (leadIds: string[], campaignId: string) => {
+    const chosen = workflows.find(w => w.id === campaignId);
+    const campaignName = chosen ? chosen.name : 'Default';
+    const finalCampaignId = chosen ? chosen.id : '';
+
+    const updatedLeads = leads.map(l => {
+      if (leadIds.includes(l.leadId)) {
+        return {
+          ...l,
+          campaign: campaignName,
+          campaignId: finalCampaignId
+        };
+      }
+      return l;
+    });
+
+    setLeads(updatedLeads);
+
+    try {
+      const toUpdate = updatedLeads.filter(l => leadIds.includes(l.leadId));
+      await fetch('/api/leads/batch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ leads: toUpdate })
+      });
+      showToast(`Assigned ${leadIds.length} lead${leadIds.length > 1 ? 's' : ''} to "${campaignName}"!`, 'success');
+    } catch (err: any) {
+      showToast(`Bulk update saved locally, backend warning: ${err.message}`, 'info');
     }
   };
 
@@ -970,6 +1071,8 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
           <LeadsTable
             leads={leads}
             templates={templates}
+            campaigns={workflows}
+            onBulkAssignCampaign={handleBulkAssignCampaign}
             initialCampaignFilter={leadsCampaignFilter}
             onSelectLead={(lead) => {
               setSelectedLead(lead);
@@ -1069,6 +1172,7 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
         onUpdateLead={handleUpdateLead}
         onDeleteLead={handleDeleteLead}
         onCheckReply={handleCheckSingleReply}
+        campaigns={workflows}
       />
 
       {/* Campaign Sequencing Runner Modal */}
@@ -1095,6 +1199,7 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
         existingLeads={leads}
         existingLeadsCount={leads.length}
         existingCount={leads.length}
+        campaigns={workflows}
       />
 
       {/* CSV / Excel Lead Import Modal */}
@@ -1104,6 +1209,7 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
           onClose={() => setIsImportLeadsOpen(false)}
           existingLeads={leads || []}
           onCommitImport={handleCommitImport}
+          campaigns={workflows}
         />
       )}
 
@@ -1118,6 +1224,63 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
         senders={senders}
         onSaveSenders={handleSaveSenders}
       />
+
+      {/* Assign Campaign Before Sending Dialog */}
+      {leadNeedingCampaignSend && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-4">
+          <div className="w-full max-w-md bg-white rounded-2xl shadow-2xl border border-red-100 overflow-hidden p-6 animate-in fade-in zoom-in-95 duration-150 space-y-4">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl bg-red-50 text-red-600 border border-red-200 flex items-center justify-center shrink-0 shadow-2xs">
+                <Send className="w-5 h-5" />
+              </div>
+              <div>
+                <h4 className="text-base font-bold text-slate-900">Choose Campaign to Send</h4>
+                <p className="text-xs text-slate-500">Lead has no campaign assigned yet</p>
+              </div>
+            </div>
+
+            <p className="text-xs text-slate-600">
+              Please choose which campaign sequence to enroll <strong>{leadNeedingCampaignSend.name}</strong> ({leadNeedingCampaignSend.email}) into before dispatching this email.
+            </p>
+
+            <div className="space-y-1.5">
+              <label className="block text-xs font-semibold text-slate-700">Campaign:</label>
+              <select
+                value={selectedCampaignForSend}
+                onChange={(e) => setSelectedCampaignForSend(e.target.value)}
+                className="w-full text-xs sm:text-sm px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-red-500 bg-white font-medium cursor-pointer"
+              >
+                <option value="">No campaign / Default</option>
+                {workflows.map(c => {
+                  const isActive = Boolean(c.is_active ?? (c as any).isActive);
+                  return (
+                    <option key={c.id} value={c.id}>
+                      {c.name} ({isActive ? 'Active' : 'Inactive'})
+                    </option>
+                  );
+                })}
+              </select>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100">
+              <button
+                type="button"
+                onClick={() => setLeadNeedingCampaignSend(null)}
+                className="px-3.5 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-lg transition-colors cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmAssignCampaignAndSend}
+                className="px-4 py-2 text-xs font-bold text-white bg-red-600 hover:bg-red-700 rounded-lg shadow-xs shadow-red-500/20 transition-all cursor-pointer"
+              >
+                Assign &amp; Continue Send
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Generic Confirmation Modal */}
       <ConfirmationModal

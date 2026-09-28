@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { X, UserPlus, AlertCircle } from 'lucide-react';
-import { Lead } from '../types';
+import { Lead, CampaignWorkflow } from '../types';
 
 interface AddLeadModalProps {
   isOpen: boolean;
@@ -9,6 +9,7 @@ interface AddLeadModalProps {
   existingLeads?: Lead[];
   existingLeadsCount?: number;
   existingCount?: number;
+  campaigns?: CampaignWorkflow[];
 }
 
 export const AddLeadModal: React.FC<AddLeadModalProps> = ({
@@ -17,7 +18,8 @@ export const AddLeadModal: React.FC<AddLeadModalProps> = ({
   onAddLead,
   existingLeads,
   existingLeadsCount,
-  existingCount
+  existingCount,
+  campaigns = []
 }) => {
   const computeNextLeadId = (): string => {
     let maxId = 100;
@@ -39,6 +41,7 @@ export const AddLeadModal: React.FC<AddLeadModalProps> = ({
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [company, setCompany] = useState('');
+  const [selectedCampaignId, setSelectedCampaignId] = useState<string>('');
   const [painPoint, setPainPoint] = useState('');
   const [notes, setNotes] = useState('');
   const [currentStage, setCurrentStage] = useState<number>(0);
@@ -55,6 +58,7 @@ export const AddLeadModal: React.FC<AddLeadModalProps> = ({
       setName('');
       setEmail('');
       setCompany('');
+      setSelectedCampaignId('');
       setPainPoint('');
       setNotes('');
       setCurrentStage(0);
@@ -77,12 +81,18 @@ export const AddLeadModal: React.FC<AddLeadModalProps> = ({
     setIsSubmitting(true);
     setError(null);
 
+    const chosenCampaign = campaigns.find(c => c.id === selectedCampaignId);
+    const campaignName = chosenCampaign ? chosenCampaign.name : 'Default';
+    const campaignId = chosenCampaign ? chosenCampaign.id : '';
+
     const newLead: Lead = {
       leadId: leadId.trim() || `LEAD-${Date.now()}`,
       name: name.trim(),
       email: email.trim(),
       company: company.trim(),
       painPoint: painPoint.trim(),
+      campaign: campaignName,
+      campaignId: campaignId,
       currentStage,
       status: 'Active',
       lastEmailSentDate: '',
@@ -155,6 +165,25 @@ export const AddLeadModal: React.FC<AddLeadModalProps> = ({
                 required
               />
             </div>
+          </div>
+
+          <div>
+            <label className="block text-xs font-semibold text-slate-700 mb-1">Campaign</label>
+            <select
+              value={selectedCampaignId}
+              onChange={(e) => setSelectedCampaignId(e.target.value)}
+              className="w-full text-xs sm:text-sm px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-red-500 bg-white"
+            >
+              <option value="">No campaign / Default</option>
+              {campaigns.map(c => {
+                const isActive = Boolean(c.is_active ?? (c as any).isActive);
+                return (
+                  <option key={c.id} value={c.id}>
+                    {c.name} ({isActive ? 'Active' : 'Inactive'})
+                  </option>
+                );
+              })}
+            </select>
           </div>
 
           <div className="grid grid-cols-2 gap-3">
