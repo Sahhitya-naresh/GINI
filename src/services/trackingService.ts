@@ -101,16 +101,12 @@ export function mergeTrackingWithLeads(
 
     return {
       ...lead,
-      opensCount: stats.opensCount !== undefined && stats.opensCount > 0 
-        ? Math.max(lead.opensCount || 0, stats.opensCount) 
-        : (lead.opensCount || 0),
-      firstOpenedDate: stats.firstOpenedDate || lead.firstOpenedDate || '',
-      lastOpenedDate: stats.lastOpenedDate || lead.lastOpenedDate || '',
-      clicksCount: stats.clicksCount !== undefined && stats.clicksCount > 0 
-        ? Math.max(lead.clicksCount || 0, stats.clicksCount) 
-        : (lead.clicksCount || 0),
-      firstClickedDate: stats.firstClickedDate || lead.firstClickedDate || '',
-      lastClickedDate: stats.lastClickedDate || lead.lastClickedDate || ''
+      opensCount: stats.opensCount !== undefined ? stats.opensCount : (lead.opensCount || 0),
+      firstOpenedDate: stats.firstOpenedDate !== undefined ? stats.firstOpenedDate : (lead.firstOpenedDate || ''),
+      lastOpenedDate: stats.lastOpenedDate !== undefined ? stats.lastOpenedDate : (lead.lastOpenedDate || ''),
+      clicksCount: stats.clicksCount !== undefined ? stats.clicksCount : (lead.clicksCount || 0),
+      firstClickedDate: stats.firstClickedDate !== undefined ? stats.firstClickedDate : (lead.firstClickedDate || ''),
+      lastClickedDate: stats.lastClickedDate !== undefined ? stats.lastClickedDate : (lead.lastClickedDate || '')
     };
   });
 }

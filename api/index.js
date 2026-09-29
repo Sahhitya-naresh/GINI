@@ -16,7 +16,7 @@ try {
 var DEFAULT_MONGODB_URI = "mongodb+srv://sahhityanaresh_db_user:test12345678@cluster0.zebcge8.mongodb.net/?appName=Cluster0";
 var isMongoPackageLoaded = typeof MongoClient === "function";
 console.log(`[MongoDB Diagnostics] Step 1: Package "mongodb" module import check: ${isMongoPackageLoaded ? "SUCCESS (MongoClient constructor is loaded)" : "FAILED"}`);
-var COLLECTIONS2 = {
+var COLLECTIONS = {
   LEADS: "leads",
   CAMPAIGNS: "campaigns",
   TASKS: "tasks",
@@ -163,12 +163,12 @@ async function getDb() {
 }
 async function ensureIndexesAndSeed(db) {
   try {
-    const leadsCol = db.collection(COLLECTIONS2.LEADS);
-    const campaignsCol = db.collection(COLLECTIONS2.CAMPAIGNS);
-    const tasksCol = db.collection(COLLECTIONS2.TASKS);
-    const sendersCol = db.collection(COLLECTIONS2.SENDERS);
-    const settingsCol = db.collection(COLLECTIONS2.SETTINGS);
-    const eventsCol = db.collection(COLLECTIONS2.TRACKING_EVENTS);
+    const leadsCol = db.collection(COLLECTIONS.LEADS);
+    const campaignsCol = db.collection(COLLECTIONS.CAMPAIGNS);
+    const tasksCol = db.collection(COLLECTIONS.TASKS);
+    const sendersCol = db.collection(COLLECTIONS.SENDERS);
+    const settingsCol = db.collection(COLLECTIONS.SETTINGS);
+    const eventsCol = db.collection(COLLECTIONS.TRACKING_EVENTS);
     await Promise.all([
       leadsCol.createIndex({ leadId: 1 }, { unique: true, name: "idx_leads_leadId_unique" }).catch(() => {
       }),
@@ -210,7 +210,7 @@ async function autoSeedFromLocalData(db) {
   };
   const dataDir = path.join(process.cwd(), "data_store");
   const trackingFile = path.join(process.cwd(), "tracking-events.json");
-  const leadsCol = db.collection(COLLECTIONS2.LEADS);
+  const leadsCol = db.collection(COLLECTIONS.LEADS);
   const existingLeadsCount = await leadsCol.countDocuments();
   if (existingLeadsCount === 0) {
     const leadsFile = path.join(dataDir, "leads.json");
@@ -234,7 +234,7 @@ async function autoSeedFromLocalData(db) {
       }
     }
   }
-  const campaignsCol = db.collection(COLLECTIONS2.CAMPAIGNS);
+  const campaignsCol = db.collection(COLLECTIONS.CAMPAIGNS);
   const existingCampaignsCount = await campaignsCol.countDocuments();
   if (existingCampaignsCount === 0) {
     const campFile = path.join(dataDir, "campaigns.json");
@@ -265,7 +265,7 @@ async function autoSeedFromLocalData(db) {
       }
     }
   }
-  const sendersCol = db.collection(COLLECTIONS2.SENDERS);
+  const sendersCol = db.collection(COLLECTIONS.SENDERS);
   const existingSendersCount = await sendersCol.countDocuments();
   if (existingSendersCount === 0) {
     const sendersFile = path.join(dataDir, "senders.json");
@@ -295,7 +295,7 @@ async function autoSeedFromLocalData(db) {
       }
     }
   }
-  const tasksCol = db.collection(COLLECTIONS2.TASKS);
+  const tasksCol = db.collection(COLLECTIONS.TASKS);
   const existingTasksCount = await tasksCol.countDocuments();
   if (existingTasksCount === 0) {
     const tasksFile = path.join(dataDir, "tasks.json");
@@ -318,7 +318,7 @@ async function autoSeedFromLocalData(db) {
       }
     }
   }
-  const settingsCol = db.collection(COLLECTIONS2.SETTINGS);
+  const settingsCol = db.collection(COLLECTIONS.SETTINGS);
   const existingSettingsCount = await settingsCol.countDocuments();
   if (existingSettingsCount === 0) {
     const settingsFile = path.join(dataDir, "settings.json");
@@ -349,7 +349,7 @@ async function autoSeedFromLocalData(db) {
     );
     result.settings = 1;
   }
-  const eventsCol = db.collection(COLLECTIONS2.TRACKING_EVENTS);
+  const eventsCol = db.collection(COLLECTIONS.TRACKING_EVENTS);
   const existingEventsCount = await eventsCol.countDocuments();
   if (existingEventsCount === 0 && fs.existsSync(trackingFile)) {
     try {
@@ -375,12 +375,12 @@ async function autoSeedFromLocalData(db) {
 async function getMongoStatus() {
   try {
     const db = await getDb();
-    const leadsCol = db.collection(COLLECTIONS2.LEADS);
-    const campaignsCol = db.collection(COLLECTIONS2.CAMPAIGNS);
-    const tasksCol = db.collection(COLLECTIONS2.TASKS);
-    const sendersCol = db.collection(COLLECTIONS2.SENDERS);
-    const settingsCol = db.collection(COLLECTIONS2.SETTINGS);
-    const eventsCol = db.collection(COLLECTIONS2.TRACKING_EVENTS);
+    const leadsCol = db.collection(COLLECTIONS.LEADS);
+    const campaignsCol = db.collection(COLLECTIONS.CAMPAIGNS);
+    const tasksCol = db.collection(COLLECTIONS.TASKS);
+    const sendersCol = db.collection(COLLECTIONS.SENDERS);
+    const settingsCol = db.collection(COLLECTIONS.SETTINGS);
+    const eventsCol = db.collection(COLLECTIONS.TRACKING_EVENTS);
     const [leads, campaigns, tasks, senders, settings, trackingEvents] = await Promise.all([
       leadsCol.countDocuments().catch(() => 0),
       campaignsCol.countDocuments().catch(() => 0),
@@ -491,7 +491,7 @@ MONGODB_DB_NAME="${dbName}"
 // server/mongoBackend.ts
 async function listLeads(token, spreadsheetId) {
   const db = await getDb();
-  const leads = await db.collection(COLLECTIONS2.LEADS).find({}, { projection: { _id: 0 } }).toArray();
+  const leads = await db.collection(COLLECTIONS.LEADS).find({}, { projection: { _id: 0 } }).toArray();
   return leads.map((l) => ({
     ...l,
     campaign: l.campaign && l.campaign.trim() ? l.campaign.trim() : "Default",
@@ -500,7 +500,7 @@ async function listLeads(token, spreadsheetId) {
 }
 async function getNextLeadId() {
   const db = await getDb();
-  const leads = await db.collection(COLLECTIONS2.LEADS).find({}, { projection: { leadId: 1 } }).toArray();
+  const leads = await db.collection(COLLECTIONS.LEADS).find({}, { projection: { leadId: 1 } }).toArray();
   let maxNum = 100;
   for (const l of leads) {
     const match = String(l.leadId || "").match(/LEAD-(\d+)/i);
@@ -515,7 +515,7 @@ async function getNextLeadId() {
 }
 async function createLead(leadData) {
   const db = await getDb();
-  const col = db.collection(COLLECTIONS2.LEADS);
+  const col = db.collection(COLLECTIONS.LEADS);
   const cleanEmail = (leadData.email || "").trim().toLowerCase();
   const rawId = (leadData.leadId || "").trim();
   if (cleanEmail) {
@@ -576,7 +576,7 @@ async function createLead(leadData) {
 }
 async function updateLead(leadData, token, spreadsheetId) {
   const db = await getDb();
-  const col = db.collection(COLLECTIONS2.LEADS);
+  const col = db.collection(COLLECTIONS.LEADS);
   if (!leadData.leadId) {
     throw new Error("updateLead requires leadId");
   }
@@ -607,13 +607,13 @@ async function updateLead(leadData, token, spreadsheetId) {
 }
 async function deleteLead(leadId) {
   const db = await getDb();
-  const col = db.collection(COLLECTIONS2.LEADS);
+  const col = db.collection(COLLECTIONS.LEADS);
   const result = await col.deleteOne({ leadId: leadId.trim() });
   return result.deletedCount > 0;
 }
 async function batchCreateLeads(leadsData) {
   const db = await getDb();
-  const col = db.collection(COLLECTIONS2.LEADS);
+  const col = db.collection(COLLECTIONS.LEADS);
   const createdOrUpdated = [];
   const allLeads = await col.find({}, { projection: { leadId: 1, email: 1 } }).toArray();
   let maxNum = 100;
@@ -679,12 +679,12 @@ async function batchCreateLeads(leadsData) {
 }
 async function listCampaigns(token, spreadsheetId) {
   const db = await getDb();
-  const campaigns = await db.collection(COLLECTIONS2.CAMPAIGNS).find({}, { projection: { _id: 0 } }).toArray();
+  const campaigns = await db.collection(COLLECTIONS.CAMPAIGNS).find({}, { projection: { _id: 0 } }).toArray();
   return campaigns;
 }
 async function saveCampaign(campaign) {
   const db = await getDb();
-  const col = db.collection(COLLECTIONS2.CAMPAIGNS);
+  const col = db.collection(COLLECTIONS.CAMPAIGNS);
   if (!campaign.id) {
     throw new Error("saveCampaign requires campaign id");
   }
@@ -708,13 +708,13 @@ async function saveCampaign(campaign) {
 }
 async function deleteCampaign(campaignId) {
   const db = await getDb();
-  const col = db.collection(COLLECTIONS2.CAMPAIGNS);
+  const col = db.collection(COLLECTIONS.CAMPAIGNS);
   const result = await col.deleteOne({ id: campaignId.trim() });
   return result.deletedCount > 0;
 }
 async function toggleCampaignActive(campaignId, isActive) {
   const db = await getDb();
-  const col = db.collection(COLLECTIONS2.CAMPAIGNS);
+  const col = db.collection(COLLECTIONS.CAMPAIGNS);
   const now = (/* @__PURE__ */ new Date()).toISOString();
   await col.updateOne(
     { id: campaignId.trim() },
@@ -730,7 +730,7 @@ async function loadLocalSenders() {
   const serviceAccount = (process.env.MICROSOFT_GRAPH_SERVICE_ACCOUNT || "").trim();
   const displayName = (process.env.MICROSOFT_GRAPH_DISPLAY_NAME || "Microsoft Graph Service Mailbox").trim();
   const db = await getDb();
-  let senders = await db.collection(COLLECTIONS2.SENDERS).find({}, { projection: { _id: 0 } }).toArray();
+  let senders = await db.collection(COLLECTIONS.SENDERS).find({}, { projection: { _id: 0 } }).toArray();
   if (senders.length === 0) {
     const defaultSender = {
       id: "sender-primary",
@@ -744,7 +744,7 @@ async function loadLocalSenders() {
       provider: "outlook",
       lastUsedAt: (/* @__PURE__ */ new Date()).toISOString()
     };
-    await db.collection(COLLECTIONS2.SENDERS).insertOne(defaultSender);
+    await db.collection(COLLECTIONS.SENDERS).insertOne(defaultSender);
     return [defaultSender];
   }
   if (serviceAccount) {
@@ -771,7 +771,7 @@ async function loadLocalSenders() {
 }
 async function saveLocalSenders(senders) {
   const db = await getDb();
-  const col = db.collection(COLLECTIONS2.SENDERS);
+  const col = db.collection(COLLECTIONS.SENDERS);
   const normalized = senders.map((s) => ({
     ...s,
     provider: s.provider || "outlook"
@@ -790,12 +790,12 @@ async function saveLocalSenders(senders) {
 }
 async function loadLocalTasks() {
   const db = await getDb();
-  const tasks = await db.collection(COLLECTIONS2.TASKS).find({}, { projection: { _id: 0 } }).toArray();
+  const tasks = await db.collection(COLLECTIONS.TASKS).find({}, { projection: { _id: 0 } }).toArray();
   return tasks;
 }
 async function saveLocalTasks(tasks) {
   const db = await getDb();
-  const col = db.collection(COLLECTIONS2.TASKS);
+  const col = db.collection(COLLECTIONS.TASKS);
   if (tasks.length > 0) {
     const ops = tasks.map((t) => ({
       updateOne: {
@@ -810,14 +810,14 @@ async function saveLocalTasks(tasks) {
 }
 async function updateLocalTask(taskId, updates) {
   const db = await getDb();
-  const col = db.collection(COLLECTIONS2.TASKS);
+  const col = db.collection(COLLECTIONS.TASKS);
   await col.updateOne({ id: taskId }, { $set: updates });
   const updated = await col.findOne({ id: taskId }, { projection: { _id: 0 } });
   return updated;
 }
 async function loadLocalSettings() {
   const db = await getDb();
-  const settings = await db.collection(COLLECTIONS2.SETTINGS).findOne({ id: "app_settings" }, { projection: { _id: 0 } });
+  const settings = await db.collection(COLLECTIONS.SETTINGS).findOne({ id: "app_settings" }, { projection: { _id: 0 } });
   if (!settings) {
     return {
       id: "app_settings",
@@ -834,7 +834,7 @@ async function loadLocalSettings() {
 }
 async function saveLocalSettings(settings) {
   const db = await getDb();
-  const col = db.collection(COLLECTIONS2.SETTINGS);
+  const col = db.collection(COLLECTIONS.SETTINGS);
   const doc = {
     ...settings,
     id: "app_settings",
@@ -849,19 +849,19 @@ async function saveLocalSettings(settings) {
 }
 async function loadTrackingEvents() {
   const db = await getDb();
-  const events = await db.collection(COLLECTIONS2.TRACKING_EVENTS).find({}, { projection: { _id: 0 } }).toArray();
+  const events = await db.collection(COLLECTIONS.TRACKING_EVENTS).find({}, { projection: { _id: 0 } }).toArray();
   return events;
 }
 async function recordTrackingEvent(event) {
   const db = await getDb();
-  const col = db.collection(COLLECTIONS2.TRACKING_EVENTS);
+  const col = db.collection(COLLECTIONS.TRACKING_EVENTS);
   await col.updateOne(
     { id: event.id },
     { $set: event },
     { upsert: true }
   );
   try {
-    const leadsCol = db.collection(COLLECTIONS2.LEADS);
+    const leadsCol = db.collection(COLLECTIONS.LEADS);
     const filterConditions = [];
     if (event.leadId && event.leadId !== "TEST") {
       filterConditions.push({ leadId: event.leadId });
@@ -888,17 +888,17 @@ async function recordTrackingEvent(event) {
 }
 async function clearAllTrackingEvents() {
   const db = await getDb();
-  const col = db.collection(COLLECTIONS2.TRACKING_EVENTS);
+  const col = db.collection(COLLECTIONS.TRACKING_EVENTS);
   await col.deleteMany({});
   return true;
 }
 async function getSystemStatsSummary() {
   const db = await getDb();
-  const leadsCol = db.collection(COLLECTIONS2.LEADS);
-  const campaignsCol = db.collection(COLLECTIONS2.CAMPAIGNS);
-  const tasksCol = db.collection(COLLECTIONS2.TASKS);
-  const sendersCol = db.collection(COLLECTIONS2.SENDERS);
-  const eventsCol = db.collection(COLLECTIONS2.TRACKING_EVENTS);
+  const leadsCol = db.collection(COLLECTIONS.LEADS);
+  const campaignsCol = db.collection(COLLECTIONS.CAMPAIGNS);
+  const tasksCol = db.collection(COLLECTIONS.TASKS);
+  const sendersCol = db.collection(COLLECTIONS.SENDERS);
+  const eventsCol = db.collection(COLLECTIONS.TRACKING_EVENTS);
   const [
     totalLeads,
     activeLeads,
@@ -2523,10 +2523,12 @@ app.post("/api/track/reset-lead", async (req, res) => {
       filter.push({ leadId: cleanLeadId });
     }
     if (cleanEmail) {
-      filter.push({ email: cleanEmail });
+      const emailRegex = new RegExp(`^${cleanEmail.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i");
+      filter.push({ email: emailRegex });
+      filter.push({ leadId: emailRegex });
     }
-    await eventsCol.deleteMany({ $or: filter });
-    await leadsCol.updateMany(
+    const deletedEvents = await eventsCol.deleteMany({ $or: filter });
+    const updatedLeads = await leadsCol.updateMany(
       { $or: filter },
       {
         $set: {
@@ -2540,7 +2542,12 @@ app.post("/api/track/reset-lead", async (req, res) => {
         }
       }
     );
-    res.json({ success: true, message: "Tracking reset successfully for lead" });
+    res.json({
+      success: true,
+      message: "Tracking reset successfully for lead",
+      deletedEvents: deletedEvents.deletedCount,
+      updatedLeads: updatedLeads.modifiedCount
+    });
   } catch (err) {
     console.error("API /api/track/reset-lead error:", err);
     res.status(500).json({ success: false, error: err.message });

@@ -21,9 +21,10 @@ import {
   recordTrackingEvent,
   clearAllTrackingEvents,
   getSystemStatsSummary,
-  TrackingEvent
+  TrackingEvent,
+  BackendLead
 } from './mongoBackend.ts';
-import { getMongoStatus, getDb, autoSeedFromLocalData, updateMongoUri } from './mongodb.ts';
+import { getMongoStatus, getDb, autoSeedFromLocalData, updateMongoUri, COLLECTIONS } from './mongodb.ts';
 import { parseFileBuffer } from './importBackend.ts';
 import { runDueCampaignsJob } from './runnerBackend.ts';
 import {
@@ -347,14 +348,16 @@ app.post('/api/track/reset-lead', async (req, res) => {
       filter.push({ leadId: cleanLeadId });
     }
     if (cleanEmail) {
-      filter.push({ email: cleanEmail });
+      const emailRegex = new RegExp(`^${cleanEmail.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i');
+      filter.push({ email: emailRegex });
+      filter.push({ leadId: emailRegex });
     }
 
     // Delete tracking events for this lead
-    await eventsCol.deleteMany({ $or: filter });
+    const deletedEvents = await eventsCol.deleteMany({ $or: filter });
 
     // Reset engagement counters on the lead document in MongoDB
-    await leadsCol.updateMany(
+    const updatedLeads = await leadsCol.updateMany(
       { $or: filter },
       {
         $set: {
@@ -369,7 +372,12 @@ app.post('/api/track/reset-lead', async (req, res) => {
       }
     );
 
-    res.json({ success: true, message: 'Tracking reset successfully for lead' });
+    res.json({
+      success: true,
+      message: 'Tracking reset successfully for lead',
+      deletedEvents: deletedEvents.deletedCount,
+      updatedLeads: updatedLeads.modifiedCount
+    });
   } catch (err: any) {
     console.error('API /api/track/reset-lead error:', err);
     res.status(500).json({ success: false, error: err.message });

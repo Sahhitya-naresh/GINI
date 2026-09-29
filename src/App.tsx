@@ -659,8 +659,11 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
   const handleUpdateLead = async (updated: Lead) => {
     try {
       const savedLead = await updateLead(updated, undefined, spreadsheetId || undefined);
-      setLeads(prev => prev.map(l => l.leadId === savedLead.leadId ? savedLead : l));
-      if (selectedLead && selectedLead.leadId === savedLead.leadId) {
+      const isTargetLead = (l: Lead) =>
+        Boolean((savedLead.leadId && l.leadId === savedLead.leadId) ||
+        (savedLead.email && l.email && l.email.toLowerCase() === savedLead.email.toLowerCase()));
+      setLeads(prev => prev.map(l => isTargetLead(l) ? savedLead : l));
+      if (selectedLead && isTargetLead(selectedLead)) {
         setSelectedLead(savedLead);
       }
       showToast('Lead details updated successfully!', 'success');

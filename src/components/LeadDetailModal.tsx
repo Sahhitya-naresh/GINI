@@ -78,7 +78,7 @@ export const LeadDetailModal: React.FC<LeadDetailModalProps> = ({
     setIsResettingTracking(true);
     try {
       await resetLeadTracking(lead.leadId, lead.email);
-      onUpdateLead({
+      await onUpdateLead({
         ...lead,
         opensCount: 0,
         clicksCount: 0,
