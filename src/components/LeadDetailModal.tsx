@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { 
   X, 
   Send, 
@@ -194,21 +194,9 @@ export const LeadDetailModal: React.FC<LeadDetailModalProps> = ({
     }
   };
 
-  useEffect(() => {
-    if (lead) {
-      setEditedNotes(lead.notes || '');
-      setEditedPainPoint(lead.painPoint || '');
-      if (lead.threadId || lead.email) {
-        loadThread();
-      } else {
-        setThreadMessages([]);
-      }
-    }
-  }, [lead]);
+  const lastLoadedThreadKeyRef = useRef<string>('');
 
-  if (!isOpen || !lead) return null;
-
-  const loadThread = async () => {
+  const loadThread = useCallback(async () => {
     if (!lead || (!lead.threadId && !lead.email)) return;
     setIsLoadingThread(true);
     setThreadError(null);
@@ -235,7 +223,34 @@ export const LeadDetailModal: React.FC<LeadDetailModalProps> = ({
     } finally {
       setIsLoadingThread(false);
     }
-  };
+  }, [lead?.threadId, lead?.email, lead?.status, token, userEmail, onCheckReply]);
+
+  useEffect(() => {
+    if (lead) {
+      setEditedNotes(lead.notes || '');
+      setEditedPainPoint(lead.painPoint || '');
+    }
+  }, [lead?.notes, lead?.painPoint]);
+
+  useEffect(() => {
+    if (!isOpen || !lead) {
+      lastLoadedThreadKeyRef.current = '';
+      return;
+    }
+
+    // Prevent re-fetching thread on 30s background metrics syncs unless lead or threadId actually changed
+    const currentKey = `${lead.leadId}_${lead.threadId || lead.email || ''}`;
+    if (lastLoadedThreadKeyRef.current !== currentKey) {
+      lastLoadedThreadKeyRef.current = currentKey;
+      if (lead.threadId || lead.email) {
+        loadThread();
+      } else {
+        setThreadMessages([]);
+      }
+    }
+  }, [isOpen, lead?.leadId, lead?.threadId, lead?.email, loadThread]);
+
+  if (!isOpen || !lead) return null;
 
   const handleSaveNotes = () => {
     onUpdateLead({
