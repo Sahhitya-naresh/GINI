@@ -1,10 +1,11 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Lead, StageTemplate, AppSettings, SendLogEntry, CampaignWorkflow, ConnectedSender, LeadManualTask, TrackingEvent } from './types';
 import { 
   getOutlookProfile, 
   checkThreadForLeadReply, 
   sendStageEmail 
 } from './services/outlookService';
+import { checkLeadForReplyAndSave } from './services/replyService';
 import { fetchTrackingStats, mergeTrackingWithLeads } from './services/trackingService';
 import { loadSavedTemplates, saveTemplatesToStorage } from './data/defaultTemplates';
 import { loadSettings, saveSettings } from './services/settingsService';
@@ -245,6 +246,12 @@ export default function App() {
   const [spreadsheetName, setSpreadsheetName] = useState<string>('MongoDB Leads Database');
   const [isSyncing, setIsSyncing] = useState(false);
   const [isCheckingReplies, setIsCheckingReplies] = useState(false);
+  const [lastCheckedTime, setLastCheckedTime] = useState<Date | null>(null);
+  const isBackgroundCheckingRef = useRef(false);
+  const leadsRef = useRef(leads);
+  useEffect(() => {
+    leadsRef.current = leads;
+  }, [leads]);
 
   // Navigation & Modals
   const [currentTab, setCurrentTab] = useState<'leads' | 'replied' | 'workflows' | 'tasks' | 'templates' | 'analytics' | 'settings'>('leads');
@@ -727,76 +734,74 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
     }
   };
 
-  // Check single lead for replies
-  const handleCheckSingleReply = async (lead: Lead) => {
-    if (!lead.threadId) {
-      showToast('No email thread initialized yet for this lead.', 'info');
-      return;
+  // Shared reply checking and processing function (reused by Check Reply button, LeadDetailModal, and background interval)
+  const checkLeadReply = useCallback(async (
+    targetLead: Lead,
+    options?: { isManual?: boolean; silent?: boolean }
+  ): Promise<{ hasReplied: boolean; updatedLead?: Lead }> => {
+    if (!targetLead.threadId && !targetLead.email) {
+      if (options?.isManual) {
+        showToast('No email thread initialized yet for this lead.', 'info');
+      }
+      return { hasReplied: false };
     }
 
     try {
-      const res = await checkThreadForLeadReply(
-        undefined,
-        lead.threadId,
-        lead.email,
+      const res = await checkLeadForReplyAndSave(
+        targetLead,
         userEmail,
-        lead.lastEmailSentDate
+        spreadsheetId || undefined
       );
 
-      if (res.hasReplied) {
-        const updated: Lead = {
-          ...lead,
-          status: 'Replied',
-          notes: lead.notes ? `${lead.notes} | [Reply detected]` : 'Reply detected'
-        };
-        handleUpdateLead(updated);
-        showToast(`Reply detected from ${lead.name}! Sequence stopped.`, 'success');
+      if (res.hasReplied && res.updatedLead) {
+        const savedLead = res.updatedLead;
+        setLeads(prev => prev.map(l => l.leadId === savedLead.leadId ? savedLead : l));
+        setSelectedLead(prev => prev && prev.leadId === savedLead.leadId ? savedLead : prev);
+        showToast(`Reply detected from ${targetLead.name}! Sequence stopped.`, 'success');
+        return res;
       } else {
-        showToast(`No new reply from ${lead.name} yet.`, 'info');
+        if (options?.isManual && !options?.silent) {
+          showToast(`No new reply from ${targetLead.name} yet.`, 'info');
+        }
+        return { hasReplied: false };
       }
     } catch (err: any) {
-      showToast(`Reply check failed: ${err.message}`, 'error');
+      console.error(`Reply check failed for ${targetLead.name}:`, err);
+      if (options?.isManual) {
+        showToast(`Reply check failed: ${err.message}`, 'error');
+      }
+      return { hasReplied: false };
     }
+  }, [userEmail, spreadsheetId]);
+
+  // Check single lead for replies (manual button on lead detail modal)
+  const handleCheckSingleReply = async (lead: Lead) => {
+    const res = await checkLeadReply(lead, { isManual: true });
+    setLastCheckedTime(new Date());
+    return res;
   };
 
-  // Bulk check replies on all active leads
+  // Bulk check replies on all active leads (manual button on table)
   const handleCheckAllReplies = async () => {
     const leadsWithThreads = leads.filter(l => l.threadId && (l.status === 'Active' || l.status === 'Paused'));
     if (leadsWithThreads.length === 0) {
       showToast('No active leads with active email threads to check.', 'info');
+      setLastCheckedTime(new Date());
       return;
     }
 
     setIsCheckingReplies(true);
     let repliesFound = 0;
-    const today = getTodayDateString();
 
     try {
-      const updatedList = [...leads];
       for (const targetLead of leadsWithThreads) {
-        const replyCheck = await checkThreadForLeadReply(
-          undefined,
-          targetLead.threadId,
-          targetLead.email,
-          userEmail,
-          targetLead.lastEmailSentDate
-        );
-
-        if (replyCheck.hasReplied) {
+        const res = await checkLeadReply(targetLead, { isManual: false, silent: true });
+        if (res.hasReplied) {
           repliesFound++;
-          const updated: Lead = {
-            ...targetLead,
-            status: 'Replied',
-            notes: targetLead.notes ? `${targetLead.notes} | [Reply on ${today}]` : `Reply on ${today}`
-          };
-
-          const idx = updatedList.findIndex(l => l.leadId === targetLead.leadId);
-          if (idx !== -1) updatedList[idx] = updated;
-          await handleUpdateLead(updated);
         }
       }
 
-      setLeads(updatedList);
+      setLastCheckedTime(new Date());
       if (repliesFound > 0) {
         showToast(`Detected ${repliesFound} new replies! Leads moved to "Needs Manual Reply".`, 'success');
       } else {
@@ -808,6 +813,52 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
       setIsCheckingReplies(false);
     }
   };
+
+  // Timed background check: every 3 minutes, loop Active/Paused leads with threadId
+  const runBackgroundReplyCheck = useCallback(async () => {
+    // Skip the run if the tab is hidden or a previous run is still in progress
+    if (document.hidden || isBackgroundCheckingRef.current) {
+      return;
+    }
+
+    isBackgroundCheckingRef.current = true;
+    try {
+      const activeLeadsWithThreads = leadsRef.current.filter(
+        l => l.threadId && (l.status === 'Active' || l.status === 'Paused')
+      );
+
+      for (const targetLead of activeLeadsWithThreads) {
+        await checkLeadReply(targetLead, { isManual: false });
+      }
+    } catch (err) {
+      console.error('Background reply check error:', err);
+    } finally {
+      isBackgroundCheckingRef.current = false;
+      setLastCheckedTime(new Date());
+    }
+  }, [checkLeadReply]);
+
+  useEffect(() => {
+    // Run once on initial app load
+    runBackgroundReplyCheck();
+
+    // Run every 3 minutes
+    const intervalId = setInterval(runBackgroundReplyCheck, 3 * 60 * 1000);
+
+    // Run once immediately when the tab becomes visible again
+    const handleVisibilityChange = () => {
+      if (!document.hidden) {
+        runBackgroundReplyCheck();
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    // Clean up interval and listener on unmount
+    return () => {
+      clearInterval(intervalId);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [runBackgroundReplyCheck]);
 
   // Send single stage email (with confirmation dialog and campaign check)
   const handleInitiateSendNextStage = (lead: Lead) => {
@@ -1085,6 +1136,7 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
             onOpenImportLeads={() => setIsImportLeadsOpen(true)}
             onCheckReplies={handleCheckAllReplies}
             isCheckingReplies={isCheckingReplies}
+            lastCheckedTime={lastCheckedTime}
             onOpenScheduler={() => setIsSchedulerOpen(true)}
             dueCount={dueCount}
           />

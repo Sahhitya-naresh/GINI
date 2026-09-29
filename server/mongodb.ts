@@ -3,6 +3,10 @@ import fs from 'fs';
 import path from 'path';
 import dotenv from 'dotenv';
 dotenv.config({ override: true });
+import dns from 'dns';
+try {
+  dns.setServers(['8.8.8.8', '1.1.1.1']);
+} catch (_) {}
 
 export const DEFAULT_MONGODB_URI = 'mongodb+srv://sahhityanaresh_db_user:test12345678@cluster0.zebcge8.mongodb.net/?appName=Cluster0';
 

@@ -188,6 +188,20 @@ export const LeadDetailModal: React.FC<LeadDetailModalProps> = ({
     try {
       const data = await getOutlookThread(token, lead.threadId, userEmail, lead.email);
       setThreadMessages(data.messages);
+
+      // Trigger reply check right after thread loads if latest message is from lead and lead is Active or Paused
+      if (lead.status === 'Active' || lead.status === 'Paused') {
+        const msgs = data.messages || [];
+        if (msgs.length > 0) {
+          const sorted = [...msgs].sort(
+            (a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()
+          );
+          const latestMsg = sorted[0];
+          if (latestMsg && latestMsg.isFromLead) {
+            onCheckReply(lead);
+          }
+        }
+      }
     } catch (err: any) {
       console.error('Failed to load email thread:', err);
       setThreadError(err.message || 'Could not fetch conversation thread messages.');

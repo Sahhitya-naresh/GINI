@@ -682,11 +682,71 @@ app.post('/api/email/send-stage', async (req, res) => {
   }
 });
 
+interface InboundReply {
+  id: string;
+  leadEmail: string;
+  threadId: string;
+  from: string;
+  subject: string;
+  body: string;
+  receivedDateTime: string;
+}
+
+const inMemoryInboundReplies: InboundReply[] = [];
+
 app.get('/api/email/thread', async (req, res) => {
   try {
     const threadId = req.query.threadId as string;
     const leadEmail = req.query.leadEmail as string;
     const result = await getAppConversationThread(threadId, leadEmail);
+
+    // Also include any recorded inbound replies
+    const cleanEmail = (leadEmail || '').trim().toLowerCase();
+    let matchingInbound = inMemoryInboundReplies.filter(
+      r => (cleanEmail && r.leadEmail === cleanEmail) || (threadId && r.threadId === threadId)
+    );
+
+    const db = await getDb().catch(() => null);
+    if (db) {
+      try {
+        const query: any = {};
+        if (cleanEmail && threadId) {
+          query.$or = [{ leadEmail: cleanEmail }, { threadId }];
+        } else if (cleanEmail) {
+          query.leadEmail = cleanEmail;
+        } else if (threadId) {
+          query.threadId = threadId;
+        }
+        const dbReplies = await (db.collection('inbound_replies') as any).find(query).toArray();
+        for (const r of dbReplies) {
+          if (!matchingInbound.some(m => m.id === r.id)) {
+            matchingInbound.push(r);
+          }
+        }
+      } catch (_) {}
+    }
+
+    if (matchingInbound.length > 0) {
+      const messages = [...result.messages];
+      for (const inb of matchingInbound) {
+        if (!messages.some(m => m.id === inb.id)) {
+          messages.push({
+            id: inb.id,
+            threadId: inb.threadId || threadId || '',
+            from: inb.from || cleanEmail,
+            to: '',
+            date: inb.receivedDateTime,
+            subject: inb.subject,
+            snippet: inb.body,
+            bodyHtml: `<p>${inb.body}</p>`,
+            bodyText: inb.body,
+            isFromLead: true
+          });
+        }
+      }
+      return res.json({ success: true, messages, subject: result.subject || matchingInbound[0].subject });
+    }
+
     res.json({ success: true, ...result });
   } catch (err: any) {
     console.error('API /api/email/thread error:', err);
@@ -707,9 +767,81 @@ app.post('/api/email/check-reply', async (req, res) => {
       lastSentDate
     });
 
+    if (result.hasReplied) {
+      return res.json({ success: true, ...result });
+    }
+
+    // Check stored inbound replies
+    const cleanEmail = leadEmail.trim().toLowerCase();
+    let reply = inMemoryInboundReplies.find(
+      r => r.leadEmail === cleanEmail || (threadId && r.threadId === threadId)
+    );
+
+    if (!reply) {
+      const db = await getDb().catch(() => null);
+      if (db) {
+        try {
+          const query: any = { $or: [{ leadEmail: cleanEmail }] };
+          if (threadId) query.$or.push({ threadId });
+          const dbReply = await (db.collection('inbound_replies') as any).findOne(query);
+          if (dbReply) reply = dbReply;
+        } catch (_) {}
+      }
+    }
+
+    if (reply) {
+      return res.json({
+        success: true,
+        hasReplied: true,
+        reason: `Inbound reply detected from ${cleanEmail}`,
+        replyMessage: {
+          id: reply.id,
+          from: reply.from || cleanEmail,
+          subject: reply.subject,
+          receivedDateTime: reply.receivedDateTime,
+          bodyPreview: reply.body
+        }
+      });
+    }
+
     res.json({ success: true, ...result });
   } catch (err: any) {
     console.error('API /api/email/check-reply error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post('/api/email/inbound-reply', async (req, res) => {
+  try {
+    const { leadEmail, threadId, subject, body, from } = req.body;
+    if (!leadEmail && !threadId) {
+      return res.status(400).json({ success: false, error: 'leadEmail or threadId required' });
+    }
+    const cleanEmail = (leadEmail || '').trim().toLowerCase();
+    const replyDoc: InboundReply = {
+      id: `inbound-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+      leadEmail: cleanEmail,
+      threadId: threadId || '',
+      from: from || cleanEmail,
+      subject: subject || 'Re: Outreach Flow follow-up',
+      body: body || 'Thanks for reaching out! I would love to see a demo.',
+      receivedDateTime: new Date().toISOString()
+    };
+
+    inMemoryInboundReplies.push(replyDoc);
+
+    const db = await getDb().catch(() => null);
+    if (db) {
+      try {
+        await db.collection('inbound_replies').insertOne(replyDoc as any);
+      } catch (e) {
+        console.warn('Could not persist inbound reply to mongo:', e);
+      }
+    }
+
+    res.json({ success: true, reply: replyDoc });
+  } catch (err: any) {
+    console.error('API /api/email/inbound-reply error:', err);
     res.status(500).json({ success: false, error: err.message });
   }
 });

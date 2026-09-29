@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { Lead, StageTemplate, CampaignWorkflow } from '../types';
 import { formatDisplayDate, isLeadDueForNextSend, getTodayDateString } from '../utils/dateUtils';
 import { 
@@ -41,6 +41,7 @@ interface LeadsTableProps {
   initialCampaignFilter?: string;
   campaigns?: CampaignWorkflow[];
   onBulkAssignCampaign?: (leadIds: string[], campaignId: string) => Promise<void> | void;
+  lastCheckedTime?: Date | null;
 }
 
 export const LeadsTable: React.FC<LeadsTableProps> = ({
@@ -58,8 +59,19 @@ export const LeadsTable: React.FC<LeadsTableProps> = ({
   dueCount,
   initialCampaignFilter,
   campaigns = [],
-  onBulkAssignCampaign
+  onBulkAssignCampaign,
+  lastCheckedTime
 }) => {
+  const [currentTime, setCurrentTime] = useState(Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => setCurrentTime(Date.now()), 10000);
+    return () => clearInterval(timer);
+  }, []);
+
+  const lastCheckedText = lastCheckedTime
+    ? `Last checked: ${Math.max(0, Math.floor((currentTime - lastCheckedTime.getTime()) / 60000))} min ago`
+    : null;
+
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<'ALL' | Lead['status']>('ALL');
   const [stageFilter, setStageFilter] = useState<string>('ALL');
@@ -313,15 +325,23 @@ export const LeadsTable: React.FC<LeadsTableProps> = ({
             </select>
 
             {/* Check Replies button */}
-            <button
-              onClick={onCheckReplies}
-              disabled={isCheckingReplies}
-              className="flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-red-50 hover:text-red-700 rounded-lg transition-colors"
-              title="Check for any new replies"
-            >
-              <MessageSquareReply className={`w-3.5 h-3.5 text-red-600 ${isCheckingReplies ? 'animate-spin' : ''}`} />
-              <span className="hidden md:inline">{isCheckingReplies ? 'Checking...' : 'Check Replies'}</span>
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                id="btn-check-replies"
+                onClick={onCheckReplies}
+                disabled={isCheckingReplies}
+                className="flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-red-50 hover:text-red-700 rounded-lg transition-colors"
+                title="Check for any new replies"
+              >
+                <MessageSquareReply className={`w-3.5 h-3.5 text-red-600 ${isCheckingReplies ? 'animate-spin' : ''}`} />
+                <span className="hidden md:inline">{isCheckingReplies ? 'Checking...' : 'Check Replies'}</span>
+              </button>
+              {lastCheckedText && (
+                <span id="text-last-checked" className="text-[11px] text-slate-500 font-medium whitespace-nowrap">
+                  {lastCheckedText}
+                </span>
+              )}
+            </div>
 
             {/* Import Leads button */}
             <button

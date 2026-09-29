@@ -6,7 +6,13 @@ import { MongoClient as MongoClient2 } from "mongodb";
 import { MongoClient } from "mongodb";
 import fs from "fs";
 import path from "path";
-import "dotenv/config";
+import dotenv from "dotenv";
+import dns from "dns";
+dotenv.config({ override: true });
+try {
+  dns.setServers(["8.8.8.8", "1.1.1.1"]);
+} catch (_) {
+}
 var DEFAULT_MONGODB_URI = "mongodb+srv://sahhityanaresh_db_user:test12345678@cluster0.zebcge8.mongodb.net/?appName=Cluster0";
 var isMongoPackageLoaded = typeof MongoClient === "function";
 console.log(`[MongoDB Diagnostics] Step 1: Package "mongodb" module import check: ${isMongoPackageLoaded ? "SUCCESS (MongoClient constructor is loaded)" : "FAILED"}`);
@@ -273,8 +279,8 @@ async function autoSeedFromLocalData(db) {
               update: {
                 $set: {
                   ...s,
-                  provider: s.provider || "gmail"
-                  // Default email provider is Gmail
+                  provider: s.provider || "outlook"
+                  // Default email provider is Outlook
                 }
               },
               upsert: true
@@ -486,7 +492,11 @@ MONGODB_DB_NAME="${dbName}"
 async function listLeads(token, spreadsheetId) {
   const db = await getDb();
   const leads = await db.collection(COLLECTIONS.LEADS).find({}, { projection: { _id: 0 } }).toArray();
-  return leads;
+  return leads.map((l) => ({
+    ...l,
+    campaign: l.campaign && l.campaign.trim() ? l.campaign.trim() : "Default",
+    campaignId: l.campaignId || ""
+  }));
 }
 async function getNextLeadId() {
   const db = await getDb();
@@ -717,11 +727,46 @@ async function toggleCampaignActive(campaignId, isActive) {
   return updated;
 }
 async function loadLocalSenders() {
+  const serviceAccount = (process.env.MICROSOFT_GRAPH_SERVICE_ACCOUNT || "").trim();
+  const displayName = (process.env.MICROSOFT_GRAPH_DISPLAY_NAME || "Microsoft Graph Service Mailbox").trim();
   const db = await getDb();
-  const senders = await db.collection(COLLECTIONS.SENDERS).find({}, { projection: { _id: 0 } }).toArray();
+  let senders = await db.collection(COLLECTIONS.SENDERS).find({}, { projection: { _id: 0 } }).toArray();
+  if (senders.length === 0) {
+    const defaultSender = {
+      id: "sender-primary",
+      name: displayName,
+      email: serviceAccount || "service-account@domain.com",
+      avatarUrl: "",
+      status: "connected",
+      isPrimary: true,
+      dailySendLimit: 500,
+      sendsToday: 0,
+      provider: "outlook",
+      lastUsedAt: (/* @__PURE__ */ new Date()).toISOString()
+    };
+    await db.collection(COLLECTIONS.SENDERS).insertOne(defaultSender);
+    return [defaultSender];
+  }
+  if (serviceAccount) {
+    return senders.map((s, idx) => {
+      if (s.isPrimary || idx === 0) {
+        return {
+          ...s,
+          name: displayName || s.name,
+          email: serviceAccount,
+          provider: "outlook",
+          status: "connected"
+        };
+      }
+      return {
+        ...s,
+        provider: s.provider || "outlook"
+      };
+    });
+  }
   return senders.map((s) => ({
     ...s,
-    provider: s.provider || "gmail"
+    provider: s.provider || "outlook"
   }));
 }
 async function saveLocalSenders(senders) {
@@ -729,7 +774,7 @@ async function saveLocalSenders(senders) {
   const col = db.collection(COLLECTIONS.SENDERS);
   const normalized = senders.map((s) => ({
     ...s,
-    provider: s.provider || "gmail"
+    provider: s.provider || "outlook"
   }));
   if (normalized.length > 0) {
     const ops = normalized.map((s) => ({
@@ -815,6 +860,30 @@ async function recordTrackingEvent(event) {
     { $set: event },
     { upsert: true }
   );
+  try {
+    const leadsCol = db.collection(COLLECTIONS.LEADS);
+    const filterConditions = [];
+    if (event.leadId && event.leadId !== "TEST") {
+      filterConditions.push({ leadId: event.leadId });
+    }
+    if (event.email) {
+      filterConditions.push({ email: event.email });
+    }
+    if (filterConditions.length > 0) {
+      const updateDoc = {
+        $set: {
+          updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+          ...event.type === "open" ? { lastOpenedDate: event.timestamp } : { lastClickedDate: event.timestamp }
+        },
+        $inc: {
+          ...event.type === "open" ? { opensCount: 1 } : { clicksCount: 1 }
+        }
+      };
+      await leadsCol.updateOne({ $or: filterConditions }, updateDoc);
+    }
+  } catch (leadUpdateErr) {
+    console.warn("Could not update lead engagement counters on tracking event:", leadUpdateErr);
+  }
   return event;
 }
 async function clearAllTrackingEvents() {
@@ -1109,39 +1178,777 @@ function parseFileBuffer(buffer, filename, existingEmails = [], customMapping) {
   };
 }
 
+// server/msGraphAuth.ts
+function getGraphConfig() {
+  return {
+    tenantId: (process.env.MICROSOFT_GRAPH_TENANT_ID || "").trim(),
+    clientId: (process.env.MICROSOFT_GRAPH_CLIENT_ID || "").trim(),
+    clientSecret: (process.env.MICROSOFT_GRAPH_CLIENT_SECRET || "").trim(),
+    serviceAccount: (process.env.MICROSOFT_GRAPH_SERVICE_ACCOUNT || "").trim(),
+    displayName: (process.env.MICROSOFT_GRAPH_DISPLAY_NAME || "Outreach Flow").trim()
+  };
+}
+var cachedToken = null;
+var tokenFetchPromise = null;
+async function getAppAccessToken(forceRefresh = false) {
+  const now = Date.now();
+  if (!forceRefresh && cachedToken && cachedToken.expiresAt > now + 3e5) {
+    return cachedToken.accessToken;
+  }
+  if (tokenFetchPromise) {
+    return tokenFetchPromise;
+  }
+  tokenFetchPromise = (async () => {
+    try {
+      const config = getGraphConfig();
+      if (!config.tenantId) {
+        throw new Error("MICROSOFT_GRAPH_TENANT_ID environment variable is missing.");
+      }
+      if (!config.clientId) {
+        throw new Error("MICROSOFT_GRAPH_CLIENT_ID environment variable is missing.");
+      }
+      if (!config.clientSecret) {
+        throw new Error("MICROSOFT_GRAPH_CLIENT_SECRET environment variable is missing.");
+      }
+      const tokenEndpoint = `https://login.microsoftonline.com/${encodeURIComponent(config.tenantId)}/oauth2/v2.0/token`;
+      const params = new URLSearchParams();
+      params.append("grant_type", "client_credentials");
+      params.append("client_id", config.clientId);
+      params.append("client_secret", config.clientSecret);
+      params.append("scope", "https://graph.microsoft.com/.default");
+      const response = await fetch(tokenEndpoint, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded"
+        },
+        body: params.toString()
+      });
+      if (!response.ok) {
+        const errorText = await response.text();
+        let parsedError;
+        try {
+          parsedError = JSON.parse(errorText);
+        } catch {
+          parsedError = { error_description: errorText };
+        }
+        const errorMsg = parsedError.error_description || parsedError.error || `HTTP ${response.status} ${response.statusText}`;
+        throw new Error(`Microsoft Graph OAuth client credentials failed (${response.status}): ${errorMsg}`);
+      }
+      const data = await response.json();
+      const expiresInSec = typeof data.expires_in === "number" ? data.expires_in : 3599;
+      const accessToken = data.access_token;
+      if (!accessToken) {
+        throw new Error("No access_token returned by Microsoft identity platform.");
+      }
+      cachedToken = {
+        accessToken,
+        expiresAt: Date.now() + expiresInSec * 1e3
+      };
+      return accessToken;
+    } finally {
+      tokenFetchPromise = null;
+    }
+  })();
+  return tokenFetchPromise;
+}
+async function getAuthDiagnostics() {
+  const config = getGraphConfig();
+  const now = Date.now();
+  const configured = Boolean(
+    config.tenantId && config.clientId && config.clientSecret && config.serviceAccount
+  );
+  const tokenExpiresInSec = cachedToken && cachedToken.expiresAt > now ? Math.round((cachedToken.expiresAt - now) / 1e3) : 0;
+  return {
+    configured,
+    tenantId: config.tenantId ? `${config.tenantId.substring(0, 8)}...` : "",
+    clientId: config.clientId ? `${config.clientId.substring(0, 8)}...` : "",
+    hasClientSecret: Boolean(config.clientSecret),
+    serviceAccount: config.serviceAccount,
+    displayName: config.displayName,
+    hasCachedToken: Boolean(cachedToken && cachedToken.expiresAt > now),
+    tokenExpiresInSec
+  };
+}
+
+// src/data/defaultTemplates.ts
+var DEFAULT_STAGE_TEMPLATES = [
+  {
+    stage: 1,
+    name: "Introduction",
+    purpose: "Who we are, company name, and what we do",
+    defaultGapDays: 3,
+    subject: "Quick question regarding {{company}}",
+    bodyHtml: `<table role="presentation" width="100%" border="0" cellpadding="0" cellspacing="0" style="max-width: 600px; margin: 0 auto; background-color: #ffffff; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #1e293b; font-size: 15px; line-height: 1.5;">
+  <tr>
+    <td style="padding: 24px 28px;">
+      <p style="margin: 0 0 14px 0;">Hi {{first_name}},</p>
+      <p style="margin: 0 0 14px 0;">I noticed your work leading initiatives at {{company}}. I'm reaching out because we help growing teams resolve {{pain_point}} without hiring extra overhead or changing existing workflows.</p>
+      <p style="margin: 0 0 14px 0;">Are you open to a brief 5-minute sync later this week to see how this compares to your current setup?</p>
+      <p style="margin: 0 0 4px 0;">Best regards,</p>
+      <p style="margin: 0; font-weight: 600; color: #0f172a;">{{sender_name}}</p>
+    </td>
+  </tr>
+</table>`
+  },
+  {
+    stage: 2,
+    name: "Value Proposition",
+    purpose: "Why this email is worth reading",
+    defaultGapDays: 3,
+    subject: "Re: Quick question regarding {{company}}",
+    bodyHtml: `<table role="presentation" width="100%" border="0" cellpadding="0" cellspacing="0" style="max-width: 600px; margin: 0 auto; background-color: #ffffff; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #1e293b; font-size: 15px; line-height: 1.5;">
+  <tr>
+    <td style="padding: 24px 28px;">
+      <p style="margin: 0 0 14px 0;">Hi {{first_name}},</p>
+      <p style="margin: 0 0 14px 0;">Following up on my note earlier. When companies tackle {{pain_point}}, they usually face two friction points: slow turnaround cycles and fragmented execution.</p>
+      <p style="margin: 0 0 14px 0;">We created an automated framework that eliminates both within 14 days, saving teams roughly 12 hours every week per team member.</p>
+      <p style="margin: 0 0 14px 0;">Would Tuesday or Thursday morning work for a quick walkthrough?</p>
+      <p style="margin: 0 0 4px 0;">Cheers,</p>
+      <p style="margin: 0; font-weight: 600; color: #0f172a;">{{sender_name}}</p>
+    </td>
+  </tr>
+</table>`
+  },
+  {
+    stage: 3,
+    name: "Proof & Case Study",
+    purpose: "Case study / one-pager / deck, includes a hyperlink",
+    defaultGapDays: 3,
+    subject: "Re: Quick question regarding {{company}}",
+    bodyHtml: `<table role="presentation" width="100%" border="0" cellpadding="0" cellspacing="0" style="max-width: 600px; margin: 0 auto; background-color: #ffffff; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #1e293b; font-size: 15px; line-height: 1.5;">
+  <tr>
+    <td style="padding: 24px 28px;">
+      <p style="margin: 0 0 14px 0;">Hi {{first_name}},</p>
+      <p style="margin: 0 0 14px 0;">Rather than just talking features, here is how a team facing {{pain_point}} solved it in practice:</p>
+      <table role="presentation" width="100%" border="0" cellpadding="0" cellspacing="0" style="margin: 0 0 16px 0; background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px;">
+        <tr>
+          <td style="padding: 14px 18px;">
+            <p style="margin: 0 0 6px 0; font-weight: 600; color: #0f172a;">Customer Story: 3.4x faster resolution</p>
+            <p style="margin: 0 0 10px 0; color: #475569; font-size: 14px;">How Apex Systems automated their bottleneck in under 3 weeks.</p>
+            <a href="https://example.com/case-study" target="_blank" style="display: inline-block; color: #2563eb; text-decoration: underline; font-weight: 500; font-size: 14px;">View 1-Page Summary &rarr;</a>
+          </td>
+        </tr>
+      </table>
+      <p style="margin: 0 0 14px 0;">Would you find value in reviewing similar benchmarks for {{company}}?</p>
+      <p style="margin: 0 0 4px 0;">Best,</p>
+      <p style="margin: 0; font-weight: 600; color: #0f172a;">{{sender_name}}</p>
+    </td>
+  </tr>
+</table>`
+  },
+  {
+    stage: 4,
+    name: "Solution",
+    purpose: "Addresses the lead's specific pain point(s)",
+    defaultGapDays: 3,
+    subject: "Re: Quick question regarding {{company}}",
+    bodyHtml: `<table role="presentation" width="100%" border="0" cellpadding="0" cellspacing="0" style="max-width: 600px; margin: 0 auto; background-color: #ffffff; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #1e293b; font-size: 15px; line-height: 1.5;">
+  <tr>
+    <td style="padding: 24px 28px;">
+      <p style="margin: 0 0 14px 0;">Hi {{first_name}},</p>
+      <p style="margin: 0 0 14px 0;">Thinking specifically about {{company}} and {{pain_point}} \u2014 here is how our tailored solution targets this challenge directly:</p>
+      <p style="margin: 0 0 10px 0; padding-left: 10px; border-left: 3px solid #2563eb; color: #334155;">
+        <strong>Direct Remediation:</strong> Automates routine verification, flags anomalies before delivery, and synchronizes updates in real time.
+      </p>
+      <p style="margin: 0 0 14px 0;">It plugs right into what you already use with no engineering lift needed on your side.</p>
+      <p style="margin: 0 0 14px 0;">Does this align with your priorities this quarter?</p>
+      <p style="margin: 0 0 4px 0;">Warm regards,</p>
+      <p style="margin: 0; font-weight: 600; color: #0f172a;">{{sender_name}}</p>
+    </td>
+  </tr>
+</table>`
+  },
+  {
+    stage: 5,
+    name: "Pricing & Scope",
+    purpose: 'High-level, framed as "to be discussed"',
+    defaultGapDays: 3,
+    subject: "Re: Quick question regarding {{company}}",
+    bodyHtml: `<table role="presentation" width="100%" border="0" cellpadding="0" cellspacing="0" style="max-width: 600px; margin: 0 auto; background-color: #ffffff; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #1e293b; font-size: 15px; line-height: 1.5;">
+  <tr>
+    <td style="padding: 24px 28px;">
+      <p style="margin: 0 0 14px 0;">Hi {{first_name}},</p>
+      <p style="margin: 0 0 14px 0;">A common question at this stage is investment and structure. We keep our engagement model flexible and tied directly to measurable outcomes.</p>
+      <p style="margin: 0 0 14px 0;">Depending on the rollout scale for {{company}}, pricing is modular and can be shaped around your target ROI \u2014 to be discussed once we verify exact fit.</p>
+      <p style="margin: 0 0 14px 0;">Do you have 10 minutes next Wednesday to review numbers and options together?</p>
+      <p style="margin: 0 0 4px 0;">Best,</p>
+      <p style="margin: 0; font-weight: 600; color: #0f172a;">{{sender_name}}</p>
+    </td>
+  </tr>
+</table>`
+  },
+  {
+    stage: 6,
+    name: "Follow-up",
+    purpose: "Re-references stages 1\u20133, for leads who've gone quiet",
+    defaultGapDays: 3,
+    subject: "Re: Quick question regarding {{company}}",
+    bodyHtml: `<table role="presentation" width="100%" border="0" cellpadding="0" cellspacing="0" style="max-width: 600px; margin: 0 auto; background-color: #ffffff; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #1e293b; font-size: 15px; line-height: 1.5;">
+  <tr>
+    <td style="padding: 24px 28px;">
+      <p style="margin: 0 0 14px 0;">Hi {{first_name}},</p>
+      <p style="margin: 0 0 14px 0;">I know how packed schedules get. Circling back to my earlier notes on addressing {{pain_point}} at {{company}}.</p>
+      <p style="margin: 0 0 14px 0;">Between the workflow automation we discussed and the verified results in our case study, I'm confident we could free up substantial bandwidth for your team.</p>
+      <p style="margin: 0 0 14px 0;">If timing is tight right now, just let me know if next month is better.</p>
+      <p style="margin: 0 0 4px 0;">Thanks,</p>
+      <p style="margin: 0; font-weight: 600; color: #0f172a;">{{sender_name}}</p>
+    </td>
+  </tr>
+</table>`
+  },
+  {
+    stage: 7,
+    name: "Break-up",
+    purpose: "Polite close-out, door left open for future contact",
+    defaultGapDays: 3,
+    subject: "Re: Quick question regarding {{company}}",
+    bodyHtml: `<table role="presentation" width="100%" border="0" cellpadding="0" cellspacing="0" style="max-width: 600px; margin: 0 auto; background-color: #ffffff; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #1e293b; font-size: 15px; line-height: 1.5;">
+  <tr>
+    <td style="padding: 24px 28px;">
+      <p style="margin: 0 0 14px 0;">Hi {{first_name}},</p>
+      <p style="margin: 0 0 14px 0;">I haven't heard back, so I assume tackling {{pain_point}} isn't a priority for {{company}} right now \u2014 totally understandable.</p>
+      <p style="margin: 0 0 14px 0;">This will be my last email. If things change down the road or you'd ever like to reconnect, my door is always open.</p>
+      <p style="margin: 0 0 14px 0;">Wishing you and {{company}} continued success!</p>
+      <p style="margin: 0 0 4px 0;">All the best,</p>
+      <p style="margin: 0; font-weight: 600; color: #0f172a;">{{sender_name}}</p>
+    </td>
+  </tr>
+</table>`
+  }
+];
+function extractFirstName(fullName) {
+  if (!fullName) return "there";
+  const parts = fullName.trim().split(/\s+/);
+  return parts[0] || "there";
+}
+function renderEmailMergeTags(templateString, lead, senderName = "Our Team") {
+  const firstName = lead.firstName || extractFirstName(lead.name || "");
+  const lastName = lead.lastName || (lead.name ? lead.name.split(" ").slice(1).join(" ") : "");
+  const company = lead.company || "your company";
+  const painPoint = lead.painPoint || "workflow efficiency bottlenecks";
+  const name = lead.name || (firstName ? `${firstName} ${lastName}`.trim() : "there");
+  const jobTitle = lead.jobTitle || "team lead";
+  const industry = lead.industry || "your industry";
+  const linkedinUrl = lead.linkedinUrl || "";
+  const campaign = lead.campaign || "";
+  return templateString.replace(/\{\{\s*first_name\s*\}\}/gi, firstName).replace(/\{\{\s*last_name\s*\}\}/gi, lastName).replace(/\{\{\s*name\s*\}\}/gi, name).replace(/\{\{\s*company\s*\}\}/gi, company).replace(/\{\{\s*job_title\s*\}\}/gi, jobTitle).replace(/\{\{\s*industry\s*\}\}/gi, industry).replace(/\{\{\s*pain_point\s*\}\}/gi, painPoint).replace(/\{\{\s*linkedin_url\s*\}\}/gi, linkedinUrl).replace(/\{\{\s*campaign\s*\}\}/gi, campaign).replace(/\{\{\s*sender_name\s*\}\}/gi, senderName);
+}
+
+// server/urlHelper.ts
+function getPublicBaseUrl(req) {
+  const isVercel = !!(process.env.VERCEL || process.env.VERCEL_ENV);
+  const isProduction = process.env.NODE_ENV === "production" || isVercel;
+  const envAppUrl = process.env.APP_URL?.trim();
+  if (envAppUrl) {
+    let clean = envAppUrl.replace(/\/+$/, "");
+    if (!clean.startsWith("http://") && !clean.startsWith("https://")) {
+      clean = `https://${clean}`;
+    }
+    if (isProduction && clean.startsWith("http://")) {
+      clean = clean.replace(/^http:\/\//, "https://");
+    }
+    return clean;
+  }
+  const vercelProjectProd = process.env.VERCEL_PROJECT_PRODUCTION_URL?.trim();
+  if (vercelProjectProd) {
+    const clean = vercelProjectProd.replace(/\/+$/, "").replace(/^https?:\/\//, "");
+    return `https://${clean}`;
+  }
+  const vercelUrl = process.env.VERCEL_URL?.trim();
+  if (isVercel && vercelUrl) {
+    const clean = vercelUrl.replace(/\/+$/, "").replace(/^https?:\/\//, "");
+    return `https://${clean}`;
+  }
+  if (req) {
+    const forwardedHost = req.headers["x-forwarded-host"] || "";
+    const hostHeader = req.get("host") || "";
+    const host = forwardedHost.split(",")[0].trim() || hostHeader;
+    if (isVercel && (!host || host.includes("localhost") || host.includes("127.0.0.1"))) {
+      if (vercelProjectProd) {
+        return `https://${vercelProjectProd.replace(/\/+$/, "").replace(/^https?:\/\//, "")}`;
+      }
+      if (vercelUrl) {
+        return `https://${vercelUrl.replace(/\/+$/, "").replace(/^https?:\/\//, "")}`;
+      }
+    }
+    if (host) {
+      const forwardedProto = req.headers["x-forwarded-proto"] || "";
+      const isHttps = isProduction || forwardedProto === "https" || req.protocol === "https";
+      const proto = isHttps ? "https" : "http";
+      return `${proto}://${host}`.replace(/\/+$/, "");
+    }
+  }
+  if (isVercel || isProduction) {
+    if (vercelProjectProd) {
+      return `https://${vercelProjectProd.replace(/\/+$/, "").replace(/^https?:\/\//, "")}`;
+    }
+    if (vercelUrl) {
+      return `https://${vercelUrl.replace(/\/+$/, "").replace(/^https?:\/\//, "")}`;
+    }
+  }
+  return "http://localhost:3000";
+}
+
+// server/msGraphService.ts
+function wrapLinksAndEmbedTrackingPixel(htmlContent, lead, stage, baseUrl) {
+  const cleanBase = (baseUrl || getPublicBaseUrl()).replace(/\/+$/, "");
+  const campaign = encodeURIComponent(lead.campaign || "Default");
+  const leadId = encodeURIComponent(lead.leadId || "");
+  const leadEmail = encodeURIComponent(lead.email || "");
+  let modifiedHtml = htmlContent.replace(
+    /<a\s+([^>]*?)href\s*=\s*(["'])(https?:\/\/[^"'\s>]+)\2([^>]*)>/gi,
+    (_match, pre, quote, originalUrl, post) => {
+      if (originalUrl.includes("/api/track/click")) return _match;
+      const clickTrackUrl = `${cleanBase}/api/track/click?url=${encodeURIComponent(originalUrl)}&leadId=${leadId}&email=${leadEmail}&stage=${stage}&campaign=${campaign}`;
+      return `<a ${pre}href=${quote}${clickTrackUrl}${quote}${post}>`;
+    }
+  );
+  const openTrackUrl = `${cleanBase}/api/track/open?leadId=${leadId}&email=${leadEmail}&stage=${stage}&campaign=${campaign}&t=${Date.now()}`;
+  const pixelTag = `<img src="${openTrackUrl}" width="1" height="1" alt="" style="border:0;width:1px;height:1px;" />`;
+  if (modifiedHtml.includes("</body>")) {
+    modifiedHtml = modifiedHtml.replace("</body>", `${pixelTag}</body>`);
+  } else {
+    modifiedHtml += `
+${pixelTag}`;
+  }
+  return modifiedHtml;
+}
+async function sendAppEmail(params) {
+  const config = getGraphConfig();
+  if (!config.serviceAccount) {
+    throw new Error("MICROSOFT_GRAPH_SERVICE_ACCOUNT environment variable is not configured.");
+  }
+  const token = await getAppAccessToken();
+  const stage = params.stageNum || params.template.stage || 1;
+  const effectiveSenderName = params.senderDisplayName || config.displayName || "Outreach Flow";
+  const renderedSubject = renderEmailMergeTags(params.template.subject, params.lead, effectiveSenderName);
+  const renderedBody = renderEmailMergeTags(params.template.bodyHtml, params.lead, effectiveSenderName);
+  const finalHtmlBody = wrapLinksAndEmbedTrackingPixel(renderedBody, params.lead, stage, params.baseUrl);
+  const endpoint = `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(config.serviceAccount)}/sendMail`;
+  const emailMessage = {
+    message: {
+      subject: renderedSubject,
+      body: {
+        contentType: "HTML",
+        content: finalHtmlBody
+      },
+      toRecipients: [
+        {
+          emailAddress: {
+            address: params.lead.email.trim(),
+            name: params.lead.name || params.lead.firstName || params.lead.email.split("@")[0]
+          }
+        }
+      ],
+      from: {
+        emailAddress: {
+          address: config.serviceAccount,
+          name: effectiveSenderName
+        }
+      }
+    },
+    saveToSentItems: true
+  };
+  if (params.lead.threadId && !params.lead.threadId.startsWith("graph-conv-")) {
+    try {
+      const threadCheckUrl = `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(config.serviceAccount)}/messages?$filter=conversationId eq '${encodeURIComponent(params.lead.threadId)}'&$top=1&$orderby=sentDateTime desc&$select=id,internetMessageId,subject`;
+      const threadRes = await fetch(threadCheckUrl, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (threadRes.ok) {
+        const threadData = await threadRes.json();
+        const prevMsg = threadData.value?.[0];
+        if (prevMsg?.internetMessageId) {
+          emailMessage.message.internetMessageHeaders = [
+            { name: "In-Reply-To", value: prevMsg.internetMessageId },
+            { name: "References", value: prevMsg.internetMessageId }
+          ];
+        }
+      }
+    } catch (e) {
+      console.warn("[MS Graph] Could not fetch previous message in conversation for threading headers:", e);
+    }
+  }
+  const sendStartTime = new Date(Date.now() - 5e3);
+  const response = await fetch(endpoint, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(emailMessage)
+  });
+  if (!response.ok) {
+    const errorText = await response.text();
+    let parsedErr;
+    try {
+      parsedErr = JSON.parse(errorText);
+    } catch {
+      parsedErr = { error: { message: errorText } };
+    }
+    const msg = parsedErr.error?.message || `HTTP ${response.status} ${response.statusText}`;
+    throw new Error(`Microsoft Graph sendMail failed (${response.status}): ${msg}`);
+  }
+  const cleanLeadEmail = params.lead.email.trim().toLowerCase();
+  let realMessageId = null;
+  let realConversationId = null;
+  async function querySentItems(attempt = 1) {
+    try {
+      const sinceISO = sendStartTime.toISOString();
+      const queryUrl = `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(config.serviceAccount)}/mailFolders/sentitems/messages?$filter=sentDateTime ge ${encodeURIComponent(sinceISO)}&$orderby=sentDateTime desc&$top=5&$select=id,conversationId,subject,sentDateTime,toRecipients`;
+      const sentRes = await fetch(queryUrl, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (sentRes.ok) {
+        const sentData = await sentRes.json();
+        const sentMessages = sentData.value || [];
+        const exactMatch = sentMessages.find((msg) => {
+          const recs = msg.toRecipients || [];
+          const matchesTo = recs.some((r) => (r.emailAddress?.address || "").trim().toLowerCase() === cleanLeadEmail);
+          const cleanSubject = (msg.subject || "").trim().toLowerCase();
+          const cleanTarget = renderedSubject.trim().toLowerCase();
+          return matchesTo && (cleanSubject === cleanTarget || cleanSubject.includes(cleanTarget) || cleanTarget.includes(cleanSubject));
+        });
+        if (exactMatch && exactMatch.conversationId) {
+          realMessageId = exactMatch.id;
+          realConversationId = exactMatch.conversationId;
+          return;
+        }
+        const recipientMatch = sentMessages.find((msg) => {
+          const recs = msg.toRecipients || [];
+          return recs.some((r) => (r.emailAddress?.address || "").trim().toLowerCase() === cleanLeadEmail);
+        });
+        if (recipientMatch && recipientMatch.conversationId) {
+          realMessageId = recipientMatch.id;
+          realConversationId = recipientMatch.conversationId;
+          return;
+        }
+      }
+    } catch (err) {
+      console.warn(`[MS Graph] Error querying Sent Items (attempt ${attempt}):`, err);
+    }
+    if (attempt === 1) {
+      await new Promise((r) => setTimeout(r, 1500));
+      await querySentItems(2);
+    }
+  }
+  await querySentItems(1);
+  const existingRealThreadId = params.lead.threadId && !params.lead.threadId.startsWith("graph-conv-") ? params.lead.threadId : null;
+  let threadId = realConversationId || existingRealThreadId;
+  let messageId = realMessageId;
+  if (!threadId) {
+    console.warn(
+      `[MS Graph] Warning: Could not locate real conversationId in Sent Items for lead ${params.lead.email} ("${renderedSubject}"). Falling back to secondary sender-email reply matching.`
+    );
+    threadId = existingRealThreadId || `graph-conv-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
+  }
+  if (!messageId) {
+    messageId = `graph-msg-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
+  }
+  return {
+    success: true,
+    messageId,
+    threadId,
+    timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+    to: params.lead.email,
+    subject: renderedSubject,
+    statusCode: response.status
+  };
+}
+async function checkAppThreadForReply(params) {
+  const config = getGraphConfig();
+  if (!config.serviceAccount) {
+    return { hasReplied: false, reason: "Service account mailbox not configured" };
+  }
+  const cleanLeadEmail = (params.leadEmail || "").trim().toLowerCase();
+  if (!cleanLeadEmail) {
+    return { hasReplied: false, reason: "Missing lead email" };
+  }
+  const token = await getAppAccessToken();
+  const serviceAccount = config.serviceAccount;
+  if (params.threadId && !params.threadId.startsWith("graph-conv-")) {
+    try {
+      const url = `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(serviceAccount)}/messages?$filter=conversationId eq '${encodeURIComponent(params.threadId)}'&$top=25&$select=id,conversationId,subject,from,receivedDateTime,bodyPreview`;
+      const res = await fetch(url, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (res.ok) {
+        const data = await res.json();
+        const messages = data.value || [];
+        messages.sort((a, b) => new Date(b.receivedDateTime || 0).getTime() - new Date(a.receivedDateTime || 0).getTime());
+        for (const msg of messages) {
+          const senderEmail = (msg.from?.emailAddress?.address || "").toLowerCase().trim();
+          if (senderEmail === serviceAccount.toLowerCase()) {
+            continue;
+          }
+          if (senderEmail === cleanLeadEmail || senderEmail.includes(cleanLeadEmail) || cleanLeadEmail.includes(senderEmail)) {
+            if (params.lastSentDate) {
+              const msgDate = new Date(msg.receivedDateTime).getTime();
+              const sentDate = params.lastSentDate.includes("T") ? new Date(params.lastSentDate).getTime() : (/* @__PURE__ */ new Date(`${params.lastSentDate}T00:00:00Z`)).getTime();
+              if (!isNaN(sentDate) && !isNaN(msgDate) && msgDate < sentDate - 6e4) {
+                continue;
+              }
+            }
+            return {
+              hasReplied: true,
+              reason: `Reply received from ${cleanLeadEmail} in conversation ${params.threadId}`,
+              replyMessage: {
+                id: msg.id,
+                from: msg.from?.emailAddress?.address || cleanLeadEmail,
+                subject: msg.subject || "",
+                receivedDateTime: msg.receivedDateTime,
+                bodyPreview: msg.bodyPreview
+              }
+            };
+          }
+        }
+      }
+    } catch (err) {
+      console.warn("[MS Graph] Conversation reply check failed:", err);
+    }
+  }
+  try {
+    const url = `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(serviceAccount)}/messages?$filter=from/emailAddress/address eq '${encodeURIComponent(cleanLeadEmail)}'&$top=5&$select=id,conversationId,subject,from,receivedDateTime,bodyPreview&$orderby=receivedDateTime desc`;
+    const res = await fetch(url, {
+      headers: { Authorization: `Bearer ${token}` }
+    });
+    if (res.ok) {
+      const data = await res.json();
+      const messages = data.value || [];
+      for (const msg of messages) {
+        if (params.lastSentDate) {
+          const msgDate = new Date(msg.receivedDateTime).getTime();
+          const sentDate = new Date(params.lastSentDate).getTime();
+          if (msgDate < sentDate - 6e4) {
+            continue;
+          }
+        }
+        return {
+          hasReplied: true,
+          reason: `Reply message detected from prospect ${cleanLeadEmail}`,
+          replyMessage: {
+            id: msg.id,
+            from: msg.from?.emailAddress?.address || cleanLeadEmail,
+            subject: msg.subject || "",
+            receivedDateTime: msg.receivedDateTime,
+            bodyPreview: msg.bodyPreview
+          }
+        };
+      }
+    }
+  } catch (err) {
+    console.warn("[MS Graph] Direct sender reply check failed:", err);
+  }
+  return { hasReplied: false };
+}
+async function getAppConversationThread(threadId, leadEmail) {
+  const config = getGraphConfig();
+  if (!config.serviceAccount) {
+    return { messages: [], subject: "" };
+  }
+  const token = await getAppAccessToken();
+  const serviceAccount = config.serviceAccount;
+  const cleanLeadEmail = (leadEmail || "").trim().toLowerCase();
+  let rawMessages = [];
+  let threadSubject = "";
+  if (threadId && !threadId.startsWith("graph-conv-")) {
+    try {
+      const url = `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(serviceAccount)}/messages?$filter=conversationId eq '${encodeURIComponent(threadId)}'&$top=50&$select=id,conversationId,subject,from,toRecipients,receivedDateTime,sentDateTime,bodyPreview,body,internetMessageId`;
+      const res = await fetch(url, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (res.ok) {
+        const data = await res.json();
+        rawMessages = data.value || [];
+      } else {
+        console.warn(`[MS Graph] Failed to query conversation messages for ${threadId}: HTTP ${res.status}`);
+      }
+    } catch (err) {
+      console.warn("[MS Graph] Conversation messages query error:", err);
+    }
+  }
+  if (rawMessages.length === 0 && cleanLeadEmail) {
+    try {
+      const fromUrl = `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(serviceAccount)}/messages?$filter=from/emailAddress/address eq '${encodeURIComponent(cleanLeadEmail)}'&$top=20&$select=id,conversationId,subject,from,toRecipients,receivedDateTime,sentDateTime,bodyPreview,body,internetMessageId`;
+      const fromRes = await fetch(fromUrl, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (fromRes.ok) {
+        const fromData = await fromRes.json();
+        rawMessages = fromData.value || [];
+      }
+    } catch (err) {
+      console.warn("[MS Graph] Fallback messages query error:", err);
+    }
+  }
+  rawMessages.sort((a, b) => {
+    const timeA = new Date(a.receivedDateTime || a.sentDateTime || 0).getTime();
+    const timeB = new Date(b.receivedDateTime || b.sentDateTime || 0).getTime();
+    return timeA - timeB;
+  });
+  const parsedMessages = rawMessages.map((msg) => {
+    const fromAddress = (msg.from?.emailAddress?.address || "").trim();
+    const fromName = msg.from?.emailAddress?.name || fromAddress;
+    const fromFormatted = fromAddress ? fromName && fromName.toLowerCase() !== fromAddress.toLowerCase() ? `"${fromName}" <${fromAddress}>` : fromAddress : "";
+    const toRecipients = msg.toRecipients || [];
+    const toFormatted = toRecipients.map((r) => {
+      const addr = r.emailAddress?.address || "";
+      const name = r.emailAddress?.name || addr;
+      return addr ? name && name.toLowerCase() !== addr.toLowerCase() ? `"${name}" <${addr}>` : addr : "";
+    }).filter(Boolean).join(", ");
+    const subject = msg.subject || "";
+    if (!threadSubject && subject) threadSubject = subject;
+    const date = msg.receivedDateTime || msg.sentDateTime || (/* @__PURE__ */ new Date()).toISOString();
+    const cleanSender = fromAddress.toLowerCase();
+    const isServiceAccount = cleanSender === serviceAccount.toLowerCase();
+    const isFromLead = cleanLeadEmail ? cleanSender === cleanLeadEmail || !isServiceAccount : !isServiceAccount;
+    const bodyHtml = msg.body?.contentType === "html" ? msg.body?.content : void 0;
+    const bodyText = msg.body?.contentType === "text" ? msg.body?.content : msg.bodyPreview || "";
+    return {
+      id: msg.id,
+      threadId: msg.conversationId || threadId || "",
+      from: fromFormatted,
+      to: toFormatted,
+      date,
+      subject,
+      snippet: msg.bodyPreview || "",
+      bodyHtml,
+      bodyText,
+      isFromLead,
+      messageIdHeader: msg.internetMessageId || ""
+    };
+  });
+  return {
+    messages: parsedMessages,
+    subject: threadSubject || (threadId ? `Conversation ${threadId}` : "Email Thread")
+  };
+}
+function getServiceAccountProfile() {
+  const config = getGraphConfig();
+  const isConfigured = Boolean(
+    config.tenantId && config.clientId && config.clientSecret && config.serviceAccount
+  );
+  return {
+    serviceAccount: config.serviceAccount,
+    displayName: config.displayName || "Service Account Mailbox",
+    isConfigured,
+    provider: "outlook"
+  };
+}
+async function sendDirectTestEmail(to, customSubject, customBody) {
+  const config = getGraphConfig();
+  if (!config.serviceAccount) {
+    throw new Error("MICROSOFT_GRAPH_SERVICE_ACCOUNT environment variable is not configured.");
+  }
+  const token = await getAppAccessToken();
+  const subject = customSubject || `Outreach Flow Test: App-Only Microsoft Graph Service Account [${(/* @__PURE__ */ new Date()).toLocaleTimeString()}]`;
+  const bodyContent = customBody || `
+    <div style="font-family: sans-serif; line-height: 1.5; color: #1e293b;">
+      <h2 style="color: #2563eb;">Outreach Flow - Microsoft Graph Service Account Test</h2>
+      <p>This email confirms that application-only (client credentials) authentication and mailbox sending are working properly.</p>
+      <ul>
+        <li><strong>Sending Mailbox:</strong> ${config.serviceAccount}</li>
+        <li><strong>Display Name:</strong> ${config.displayName}</li>
+        <li><strong>Timestamp:</strong> ${(/* @__PURE__ */ new Date()).toISOString()}</li>
+      </ul>
+      <p style="color: #64748b; font-size: 13px;">Sent automatically via Microsoft Graph POST /users/{serviceAccount}/sendMail.</p>
+    </div>
+  `;
+  const endpoint = `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(config.serviceAccount)}/sendMail`;
+  const emailMessage = {
+    message: {
+      subject,
+      body: {
+        contentType: "HTML",
+        content: bodyContent
+      },
+      toRecipients: [
+        {
+          emailAddress: {
+            address: to.trim()
+          }
+        }
+      ],
+      from: {
+        emailAddress: {
+          address: config.serviceAccount,
+          name: config.displayName
+        }
+      }
+    },
+    saveToSentItems: true
+  };
+  const sendStartTime = new Date(Date.now() - 5e3);
+  const response = await fetch(endpoint, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(emailMessage)
+  });
+  if (!response.ok) {
+    const errorText = await response.text();
+    let parsed;
+    try {
+      parsed = JSON.parse(errorText);
+    } catch {
+      parsed = { error: { message: errorText } };
+    }
+    throw new Error(`Test email failed (${response.status}): ${parsed.error?.message || errorText}`);
+  }
+  let capturedMessageId = null;
+  let capturedConversationId = null;
+  try {
+    const queryUrl = `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(config.serviceAccount)}/mailFolders/sentitems/messages?$filter=sentDateTime ge ${encodeURIComponent(sendStartTime.toISOString())}&$orderby=sentDateTime desc&$top=3&$select=id,conversationId,subject,sentDateTime,toRecipients`;
+    const sentRes = await fetch(queryUrl, { headers: { Authorization: `Bearer ${token}` } });
+    if (sentRes.ok) {
+      const sentData = await sentRes.json();
+      const match = (sentData.value || []).find(
+        (m) => (m.toRecipients || []).some((r) => (r.emailAddress?.address || "").toLowerCase() === to.trim().toLowerCase())
+      );
+      if (match) {
+        capturedMessageId = match.id;
+        capturedConversationId = match.conversationId;
+      }
+    }
+  } catch (lookupErr) {
+    console.warn("[MS Graph] Direct test email SentItems lookup skipped:", lookupErr);
+  }
+  return {
+    success: true,
+    statusCode: response.status,
+    sentTo: to,
+    from: config.serviceAccount,
+    messageId: capturedMessageId || void 0,
+    conversationId: capturedConversationId || void 0,
+    timestamp: (/* @__PURE__ */ new Date()).toISOString()
+  };
+}
+
 // server/runnerBackend.ts
-async function checkLeadForReply(lead, token, userEmail) {
+async function checkLeadForReply(lead, _token, _userEmail, _sender) {
   if (lead.status === "Replied") {
     return { hasReplied: true, reason: "Status already marked Replied" };
   }
   if (lead.hasReplied === true || lead.hasUnreadReply === true || lead.lastReplyReceivedDate) {
     return { hasReplied: true, reason: "Incoming reply flag detected on lead record" };
   }
-  if (token && lead.threadId) {
-    try {
-      const res = await fetch(
-        `https://gmail.googleapis.com/gmail/v1/users/me/threads/${lead.threadId}?format=metadata`,
-        { headers: { Authorization: `Bearer ${token}` } }
-      );
-      if (res.ok) {
-        const data = await res.json();
-        const messages = data.messages || [];
-        const cleanLeadEmail = (lead.email || "").trim().toLowerCase();
-        const cleanUserEmail = (userEmail || "").trim().toLowerCase();
-        for (const msg of messages) {
-          const headers = msg.payload?.headers || [];
-          const fromHeader = (headers.find((h) => h.name?.toLowerCase() === "from")?.value || "").toLowerCase();
-          if (cleanLeadEmail && fromHeader.includes(cleanLeadEmail)) {
-            return { hasReplied: true, reason: `Lead response message detected in thread (${fromHeader})` };
-          }
-          if (cleanUserEmail && !fromHeader.includes(cleanUserEmail) && messages.length > 1) {
-            return { hasReplied: true, reason: `Counterpart reply detected in Gmail thread (${fromHeader})` };
-          }
-        }
-      }
-    } catch (err) {
-      console.warn(`Error checking Gmail thread for reply on lead ${lead.email}:`, err);
+  try {
+    const res = await checkAppThreadForReply({
+      leadEmail: lead.email,
+      threadId: lead.threadId,
+      lastSentDate: lead.lastEmailSentDate
+    });
+    if (res.hasReplied) {
+      const fromInfo = res.replyMessage?.from ? ` (${res.replyMessage.from})` : "";
+      return {
+        hasReplied: true,
+        reason: `Lead reply detected in Microsoft Graph service account mailbox${fromInfo}`
+      };
     }
+  } catch (err) {
+    console.warn(`Error checking thread for reply on lead ${lead.email} via Graph:`, err);
   }
   return { hasReplied: false };
 }
@@ -1209,7 +2016,7 @@ async function runDueCampaignsJob(targetCampaignId, token, spreadsheetId, userEm
     }
     const startNode = nodes.find((n) => n.data?.nodeType === "start" || n.type === "start" || n.type === "startNode");
     const campaignLeads = leads.filter((l) => {
-      if (l.status === "Paused" || l.status === "Completed" || l.status === "Broke Up") {
+      if (l.status === "Paused" || l.status === "Completed" || l.status === "Broke Up" || l.status === "Replied") {
         return false;
       }
       return l.campaignId === campaign.id || l.campaign === campaign.name;
@@ -1231,6 +2038,7 @@ async function runDueCampaignsJob(targetCampaignId, token, spreadsheetId, userEm
         }
         if (currentNode) {
           lead.campaignId = campaign.id;
+          lead.campaign = campaign.name;
           lead.currentNodeId = currentNode.id;
           lead.nodeEnteredDate = todayStr;
           await updateLead(lead, token, spreadsheetId);
@@ -1285,7 +2093,8 @@ async function runDueCampaignsJob(targetCampaignId, token, spreadsheetId, userEm
           continue;
         }
       }
-      const replyCheck = await checkLeadForReply(lead, token, userEmail);
+      const leadSender = senders.find((s) => s.email === lead.senderUsed || s.id === lead.senderUsed) || senders.find((s) => s.isPrimary) || senders[0];
+      const replyCheck = await checkLeadForReply(lead, token, userEmail, leadSender);
       if (replyCheck.hasReplied) {
         lead.status = "Replied";
         lead.notes = lead.notes ? `${lead.notes} | [Reply detected on ${todayStr}: ${replyCheck.reason}]` : `Reply detected on ${todayStr}: ${replyCheck.reason}`;
@@ -1381,6 +2190,21 @@ async function runDueCampaignsJob(targetCampaignId, token, spreadsheetId, userEm
         }
         const stageNum = currentNode.data?.templateStage || lead.currentStage + 1;
         const sendFromAccount = sender ? sender.email : currentNode.data?.senderEmail || userEmail || "Default Inbox";
+        const template = DEFAULT_STAGE_TEMPLATES.find((t) => t.stage === stageNum) || DEFAULT_STAGE_TEMPLATES[0];
+        const baseUrl = getPublicBaseUrl();
+        try {
+          const sendResult = await sendAppEmail({
+            lead,
+            template,
+            stageNum,
+            senderDisplayName: sender?.name,
+            baseUrl
+          });
+          lead.threadId = sendResult.threadId;
+        } catch (sendErr) {
+          logs.push(`Email dispatch to ${lead.name} failed via Graph: ${sendErr.message}. Skipping advance.`);
+          continue;
+        }
         if (sender) {
           sender.sendsToday = (sender.sendsToday || 0) + 1;
           sender.lastUsedAt = (/* @__PURE__ */ new Date()).toISOString();
@@ -1442,6 +2266,7 @@ async function runDueCampaignsJob(targetCampaignId, token, spreadsheetId, userEm
 
 // server/app.ts
 var app = express();
+app.set("trust proxy", true);
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ extended: true, limit: "50mb" }));
 var TRANSPARENT_GIF_1X1 = Buffer.from(
@@ -1607,7 +2432,11 @@ var handleOpenTracking = async (req, res) => {
       ip: req.ip || req.headers["x-forwarded-for"] || "",
       userAgent: req.headers["user-agent"] || ""
     };
-    recordTrackingEvent(newEvent).catch((err) => console.warn("Failed to record open event:", err));
+    try {
+      await recordTrackingEvent(newEvent);
+    } catch (err) {
+      console.error("Failed to record open event:", err);
+    }
   }
   res.set({
     "Content-Type": "image/gif",
@@ -1641,9 +2470,40 @@ app.get("/api/track/click", async (req, res) => {
       ip: req.ip || req.headers["x-forwarded-for"] || "",
       userAgent: req.headers["user-agent"] || ""
     };
-    recordTrackingEvent(newEvent).catch((err) => console.warn("Failed to record click event:", err));
+    try {
+      await recordTrackingEvent(newEvent);
+    } catch (err) {
+      console.error("Failed to record click event:", err);
+    }
   }
   res.redirect(302, targetUrl);
+});
+app.get("/api/track/debug", async (req, res) => {
+  try {
+    const leadId = (req.query.leadId || "").toString().trim();
+    if (!leadId) {
+      return res.status(400).json({ success: false, error: "leadId is required" });
+    }
+    const allEvents = await loadTrackingEvents();
+    const leadEvents = allEvents.filter(
+      (e) => e.leadId === leadId || e.email && e.email.toLowerCase() === leadId.toLowerCase()
+    );
+    leadEvents.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+    const latest20 = leadEvents.slice(0, 20).map((e) => ({
+      type: e.type,
+      timestamp: e.timestamp,
+      userAgent: e.userAgent || ""
+    }));
+    res.json({
+      success: true,
+      leadId,
+      totalEvents: leadEvents.length,
+      events: latest20
+    });
+  } catch (err) {
+    console.error("API /api/track/debug error:", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
 });
 app.get("/api/track/events", async (_req, res) => {
   try {
@@ -1896,10 +2756,8 @@ app.post("/api/emails/send", async (req, res) => {
     if (!to || !subject) {
       return res.status(400).json({ success: false, error: 'Recipient "to" and "subject" are required' });
     }
-    const host = req.get("host") || "localhost:3000";
-    const protocol = req.protocol || "http";
-    const baseUrl = `${protocol}://${host}`;
-    const trackingPixelHtml = `<img src="${baseUrl}/api/track/open?leadId=${encodeURIComponent(leadId || "")}&stage=${encodeURIComponent(stage || 1)}&campaign=${encodeURIComponent(campaign || "default")}" width="1" height="1" style="display:none;" alt="" />`;
+    const baseUrl = getPublicBaseUrl(req);
+    const trackingPixelHtml = `<img src="${baseUrl}/api/track/open?leadId=${encodeURIComponent(leadId || "")}&stage=${encodeURIComponent(stage || 1)}&campaign=${encodeURIComponent(campaign || "default")}" width="1" height="1" alt="" style="border:0;width:1px;height:1px;" />`;
     res.json({
       success: true,
       messageId: `msg-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`,
@@ -1913,6 +2771,188 @@ app.post("/api/emails/send", async (req, res) => {
     });
   } catch (err) {
     console.error("API /api/emails/send error:", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+app.get("/api/email/service-account", async (_req, res) => {
+  try {
+    const profile = getServiceAccountProfile();
+    const diagnostics = await getAuthDiagnostics();
+    res.json({ success: true, profile, diagnostics });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+app.post("/api/email/send-stage", async (req, res) => {
+  try {
+    const { lead, template, stageNum, customSenderName } = req.body;
+    if (!lead || !lead.email) {
+      return res.status(400).json({ success: false, error: "Lead with email is required" });
+    }
+    if (!template || !template.subject || !template.bodyHtml) {
+      return res.status(400).json({ success: false, error: "Stage template is required" });
+    }
+    const baseUrl = getPublicBaseUrl(req);
+    const result = await sendAppEmail({
+      lead,
+      template,
+      stageNum,
+      senderDisplayName: customSenderName,
+      baseUrl
+    });
+    res.json(result);
+  } catch (err) {
+    console.error("API /api/email/send-stage error:", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+var inMemoryInboundReplies = [];
+app.get("/api/email/thread", async (req, res) => {
+  try {
+    const threadId = req.query.threadId;
+    const leadEmail = req.query.leadEmail;
+    const result = await getAppConversationThread(threadId, leadEmail);
+    const cleanEmail = (leadEmail || "").trim().toLowerCase();
+    let matchingInbound = inMemoryInboundReplies.filter(
+      (r) => cleanEmail && r.leadEmail === cleanEmail || threadId && r.threadId === threadId
+    );
+    const db = await getDb().catch(() => null);
+    if (db) {
+      try {
+        const query = {};
+        if (cleanEmail && threadId) {
+          query.$or = [{ leadEmail: cleanEmail }, { threadId }];
+        } else if (cleanEmail) {
+          query.leadEmail = cleanEmail;
+        } else if (threadId) {
+          query.threadId = threadId;
+        }
+        const dbReplies = await db.collection("inbound_replies").find(query).toArray();
+        for (const r of dbReplies) {
+          if (!matchingInbound.some((m) => m.id === r.id)) {
+            matchingInbound.push(r);
+          }
+        }
+      } catch (_) {
+      }
+    }
+    if (matchingInbound.length > 0) {
+      const messages = [...result.messages];
+      for (const inb of matchingInbound) {
+        if (!messages.some((m) => m.id === inb.id)) {
+          messages.push({
+            id: inb.id,
+            threadId: inb.threadId || threadId || "",
+            from: inb.from || cleanEmail,
+            to: "",
+            date: inb.receivedDateTime,
+            subject: inb.subject,
+            snippet: inb.body,
+            bodyHtml: `<p>${inb.body}</p>`,
+            bodyText: inb.body,
+            isFromLead: true
+          });
+        }
+      }
+      return res.json({ success: true, messages, subject: result.subject || matchingInbound[0].subject });
+    }
+    res.json({ success: true, ...result });
+  } catch (err) {
+    console.error("API /api/email/thread error:", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+app.post("/api/email/check-reply", async (req, res) => {
+  try {
+    const { leadEmail, threadId, lastSentDate } = req.body;
+    if (!leadEmail) {
+      return res.status(400).json({ success: false, error: "leadEmail is required" });
+    }
+    const result = await checkAppThreadForReply({
+      leadEmail,
+      threadId,
+      lastSentDate
+    });
+    if (result.hasReplied) {
+      return res.json({ success: true, ...result });
+    }
+    const cleanEmail = leadEmail.trim().toLowerCase();
+    let reply = inMemoryInboundReplies.find(
+      (r) => r.leadEmail === cleanEmail || threadId && r.threadId === threadId
+    );
+    if (!reply) {
+      const db = await getDb().catch(() => null);
+      if (db) {
+        try {
+          const query = { $or: [{ leadEmail: cleanEmail }] };
+          if (threadId) query.$or.push({ threadId });
+          const dbReply = await db.collection("inbound_replies").findOne(query);
+          if (dbReply) reply = dbReply;
+        } catch (_) {
+        }
+      }
+    }
+    if (reply) {
+      return res.json({
+        success: true,
+        hasReplied: true,
+        reason: `Inbound reply detected from ${cleanEmail}`,
+        replyMessage: {
+          id: reply.id,
+          from: reply.from || cleanEmail,
+          subject: reply.subject,
+          receivedDateTime: reply.receivedDateTime,
+          bodyPreview: reply.body
+        }
+      });
+    }
+    res.json({ success: true, ...result });
+  } catch (err) {
+    console.error("API /api/email/check-reply error:", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+app.post("/api/email/inbound-reply", async (req, res) => {
+  try {
+    const { leadEmail, threadId, subject, body, from } = req.body;
+    if (!leadEmail && !threadId) {
+      return res.status(400).json({ success: false, error: "leadEmail or threadId required" });
+    }
+    const cleanEmail = (leadEmail || "").trim().toLowerCase();
+    const replyDoc = {
+      id: `inbound-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+      leadEmail: cleanEmail,
+      threadId: threadId || "",
+      from: from || cleanEmail,
+      subject: subject || "Re: Outreach Flow follow-up",
+      body: body || "Thanks for reaching out! I would love to see a demo.",
+      receivedDateTime: (/* @__PURE__ */ new Date()).toISOString()
+    };
+    inMemoryInboundReplies.push(replyDoc);
+    const db = await getDb().catch(() => null);
+    if (db) {
+      try {
+        await db.collection("inbound_replies").insertOne(replyDoc);
+      } catch (e) {
+        console.warn("Could not persist inbound reply to mongo:", e);
+      }
+    }
+    res.json({ success: true, reply: replyDoc });
+  } catch (err) {
+    console.error("API /api/email/inbound-reply error:", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+app.post("/api/email/test-send", async (req, res) => {
+  try {
+    const { to, subject, body } = req.body;
+    if (!to) {
+      return res.status(400).json({ success: false, error: 'Recipient "to" email address is required' });
+    }
+    const result = await sendDirectTestEmail(to, subject, body);
+    res.json(result);
+  } catch (err) {
+    console.error("API /api/email/test-send error:", err);
     res.status(500).json({ success: false, error: err.message });
   }
 });
