@@ -34,6 +34,7 @@ interface CampaignSchedulerModalProps {
   spreadsheetId: string;
   onRunCompleted: (updatedLeads: Lead[], logs: SendLogEntry[]) => void;
   onTasksCreated?: (newTasks: LeadManualTask[]) => void;
+  onToggleWorkflowActive?: (workflowId: string, isActive: boolean) => Promise<void>;
 }
 
 export const CampaignSchedulerModal: React.FC<CampaignSchedulerModalProps> = ({
@@ -48,7 +49,8 @@ export const CampaignSchedulerModal: React.FC<CampaignSchedulerModalProps> = ({
   userEmail,
   spreadsheetId,
   onRunCompleted,
-  onTasksCreated
+  onTasksCreated,
+  onToggleWorkflowActive
 }) => {
   if (!isOpen) return null;
 
@@ -59,6 +61,8 @@ export const CampaignSchedulerModal: React.FC<CampaignSchedulerModalProps> = ({
   const [selectedWorkflowId, setSelectedWorkflowId] = useState<string>('all');
   const [includeUnassigned, setIncludeUnassigned] = useState<boolean>(true);
   const [validationError, setValidationError] = useState<string | null>(null);
+  const [selectedLeadIds, setSelectedLeadIds] = useState<Set<string>>(new Set());
+  const [isActivatingWf, setIsActivatingWf] = useState(false);
 
   // Filter leads that are active and due for their next stage send (excluding inactive campaigns)
   const allDueLeads = useMemo(() => {
@@ -68,7 +72,8 @@ export const CampaignSchedulerModal: React.FC<CampaignSchedulerModalProps> = ({
         w.id === l.campaignId || 
         (w.name && l.campaign && w.name.toLowerCase() === l.campaign.toLowerCase())
       );
-      if (assignedWf && assignedWf.isActive === false) return false;
+      const isWfActive = Boolean(assignedWf?.isActive ?? (assignedWf as any)?.is_active ?? true);
+      if (assignedWf && !isWfActive) return false;
       return isLeadDueForNextSend(l.nextSendDate);
     });
   }, [leads, workflows]);
@@ -78,6 +83,32 @@ export const CampaignSchedulerModal: React.FC<CampaignSchedulerModalProps> = ({
     if (selectedWorkflowId === 'all') return null;
     return workflows.find(w => w.id === selectedWorkflowId) || null;
   }, [selectedWorkflowId, workflows]);
+
+  // Check if selected workflow is inactive
+  const isWorkflowInactive = selectedWorkflow ? !Boolean(selectedWorkflow.isActive ?? (selectedWorkflow as any).is_active ?? true) : false;
+
+  // Active leads assigned to selected workflow regardless of active flag
+  const inactiveLeadsInSelectedWorkflow = useMemo(() => {
+    if (!selectedWorkflow || !isWorkflowInactive) return [];
+    return leads.filter(l => {
+      if (l.status !== 'Active') return false;
+      const matchesId = l.campaignId === selectedWorkflow.id;
+      const matchesName = Boolean(l.campaign && selectedWorkflow.name && l.campaign.toLowerCase() === selectedWorkflow.name.toLowerCase());
+      return matchesId || matchesName;
+    });
+  }, [leads, selectedWorkflow, isWorkflowInactive]);
+
+  const handleActivateCurrentWorkflow = async () => {
+    if (!selectedWorkflow || !onToggleWorkflowActive) return;
+    setIsActivatingWf(true);
+    try {
+      await onToggleWorkflowActive(selectedWorkflow.id, true);
+    } catch (err: any) {
+      console.error('Failed to activate workflow:', err);
+    } finally {
+      setIsActivatingWf(false);
+    }
+  };
 
   // Compute due counts per workflow
   const dueCountsByWorkflow = useMemo(() => {
@@ -113,7 +144,21 @@ export const CampaignSchedulerModal: React.FC<CampaignSchedulerModalProps> = ({
     });
   }, [allDueLeads, selectedWorkflowId, selectedWorkflow, includeUnassigned]);
 
+  // Sync selected lead IDs with due leads
+  React.useEffect(() => {
+    setSelectedLeadIds(new Set(dueLeads.map(l => l.leadId || l.email)));
+  }, [dueLeads]);
+
+  const selectedDueLeads = useMemo(() => {
+    return dueLeads.filter(l => selectedLeadIds.has(l.leadId || l.email));
+  }, [dueLeads, selectedLeadIds]);
+
   const handleStartCampaignRun = async () => {
+    if (selectedDueLeads.length === 0) {
+      setValidationError('Please select at least one lead to run.');
+      return;
+    }
+
     setValidationError(null);
     setIsRunning(true);
     setExecutionLogs([]);
@@ -123,8 +168,8 @@ export const CampaignSchedulerModal: React.FC<CampaignSchedulerModalProps> = ({
     const newLogs: SendLogEntry[] = [];
     const today = getTodayDateString();
 
-    for (let i = 0; i < dueLeads.length; i++) {
-      const targetLead = dueLeads[i];
+    for (let i = 0; i < selectedDueLeads.length; i++) {
+      const targetLead = selectedDueLeads[i];
       setProgressIndex(i + 1);
 
       try {
@@ -495,11 +540,14 @@ export const CampaignSchedulerModal: React.FC<CampaignSchedulerModalProps> = ({
                   <option value="all">
                     All Workflows ({allDueLeads.length} leads due total)
                   </option>
-                  {workflows.map(wf => (
-                    <option key={wf.id} value={wf.id}>
-                      {wf.name} {wf.isDefault ? '• (Default)' : ''} — ({dueCountsByWorkflow[wf.id] || 0} due)
-                    </option>
-                  ))}
+                  {workflows.map(wf => {
+                    const isWfActive = Boolean(wf.isActive ?? (wf as any).is_active ?? true);
+                    return (
+                      <option key={wf.id} value={wf.id}>
+                        {wf.name} {wf.isDefault ? '• (Default)' : ''} {!isWfActive ? '• [Draft / Inactive]' : ''} — ({dueCountsByWorkflow[wf.id] || 0} due)
+                      </option>
+                    );
+                  })}
                 </select>
               </div>
 
@@ -526,6 +574,36 @@ export const CampaignSchedulerModal: React.FC<CampaignSchedulerModalProps> = ({
               </p>
             )}
           </div>
+
+          {/* Inactive Workflow Warning Banner */}
+          {isWorkflowInactive && selectedWorkflow && (
+            <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl flex items-center justify-between gap-3 text-xs text-amber-900">
+              <div className="flex items-start gap-2">
+                <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                <div>
+                  <span className="font-bold text-amber-800">
+                    Campaign "{selectedWorkflow.name}" is currently Inactive (Draft).
+                  </span>
+                  <p className="text-[11px] text-amber-700 mt-0.5">
+                    Automated runs are paused for inactive campaigns.
+                    {inactiveLeadsInSelectedWorkflow.length > 0 && (
+                      <span> <strong>{inactiveLeadsInSelectedWorkflow.length}</strong> active lead{inactiveLeadsInSelectedWorkflow.length === 1 ? '' : 's'} assigned to this campaign {inactiveLeadsInSelectedWorkflow.length === 1 ? 'is' : 'are'} waiting.</span>
+                    )}
+                  </p>
+                </div>
+              </div>
+              {onToggleWorkflowActive && (
+                <button
+                  type="button"
+                  onClick={handleActivateCurrentWorkflow}
+                  disabled={isActivatingWf}
+                  className="px-3 py-1.5 bg-amber-600 hover:bg-amber-700 active:bg-amber-800 text-white font-semibold rounded-lg text-xs shadow-xs shrink-0 cursor-pointer disabled:opacity-50"
+                >
+                  {isActivatingWf ? 'Activating...' : 'Activate Campaign Now'}
+                </button>
+              )}
+            </div>
+          )}
 
           {/* Due Leads Summary Box */}
           <div className="p-4 bg-red-50/70 border border-red-200 rounded-xl flex items-center justify-between">
@@ -559,31 +637,85 @@ export const CampaignSchedulerModal: React.FC<CampaignSchedulerModalProps> = ({
             </ol>
           </div>
 
-          {/* Due Leads Table Preview */}
+          {/* Due Leads Table Preview with Interactive Selection */}
           {!isRunning && executionLogs.length === 0 && (
             <div className="space-y-2">
-              <h4 className="text-xs font-bold text-slate-700 uppercase tracking-wider">Queued Due Leads:</h4>
+              <div className="flex items-center justify-between">
+                <h4 className="text-xs font-bold text-slate-700 uppercase tracking-wider">
+                  Queued Due Leads ({selectedDueLeads.length} of {dueLeads.length} selected):
+                </h4>
+                {dueLeads.length > 0 && (
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setSelectedLeadIds(new Set(dueLeads.map(l => l.leadId || l.email)))}
+                      className="text-[11px] text-red-600 hover:text-red-800 font-semibold cursor-pointer"
+                    >
+                      Select All
+                    </button>
+                    <span className="text-slate-300">|</span>
+                    <button
+                      type="button"
+                      onClick={() => setSelectedLeadIds(new Set())}
+                      className="text-[11px] text-slate-500 hover:text-slate-700 font-medium cursor-pointer"
+                    >
+                      Deselect All
+                    </button>
+                  </div>
+                )}
+              </div>
+
               {dueLeads.length === 0 ? (
                 <div className="p-6 text-center text-xs text-slate-500 bg-slate-50 rounded-lg border border-dashed">
-                  No active leads are currently due for sending today. Check back tomorrow or adjust next send dates in the leads table.
+                  {isWorkflowInactive ? (
+                    <div className="space-y-1">
+                      <p className="font-semibold text-slate-700">Campaign "{selectedWorkflow?.name}" is currently marked Inactive (Draft).</p>
+                      <p>Click "Activate Campaign Now" above to enable automated sending for its leads.</p>
+                    </div>
+                  ) : (
+                    <span>No active leads are currently due for sending today. Check back tomorrow or adjust next send dates in the leads table.</span>
+                  )}
                 </div>
               ) : (
-                <div className="max-h-48 overflow-y-auto border border-slate-200 rounded-lg divide-y divide-slate-100">
-                  {dueLeads.map((lead, idx) => (
-                    <div key={lead.leadId || `due-lead-${lead.email || ''}-${idx}`} className="p-2.5 flex items-center justify-between text-xs hover:bg-slate-50">
-                      <div>
-                        <strong className="text-slate-900">{lead.name}</strong>
-                        <span className="text-slate-500 ml-1">({lead.company})</span>
-                        <div className="text-[11px] text-slate-400">{lead.email}</div>
+                <div className="max-h-52 overflow-y-auto border border-slate-200 rounded-lg divide-y divide-slate-100">
+                  {dueLeads.map((lead, idx) => {
+                    const leadKey = lead.leadId || lead.email;
+                    const isChecked = selectedLeadIds.has(leadKey);
+                    return (
+                      <div 
+                        key={lead.leadId || `due-lead-${lead.email || ''}-${idx}`} 
+                        onClick={() => {
+                          const next = new Set(selectedLeadIds);
+                          if (next.has(leadKey)) next.delete(leadKey);
+                          else next.add(leadKey);
+                          setSelectedLeadIds(next);
+                        }}
+                        className={`p-2.5 flex items-center justify-between text-xs cursor-pointer transition-colors ${
+                          isChecked ? 'bg-red-50/40 hover:bg-red-50/70' : 'hover:bg-slate-50 opacity-60'
+                        }`}
+                      >
+                        <div className="flex items-center gap-2.5">
+                          <input
+                            type="checkbox"
+                            checked={isChecked}
+                            onChange={() => {}} // handled by parent div onClick
+                            className="rounded border-slate-300 text-red-600 focus:ring-red-500 cursor-pointer"
+                          />
+                          <div>
+                            <strong className="text-slate-900">{lead.name}</strong>
+                            <span className="text-slate-500 ml-1">({lead.company})</span>
+                            <div className="text-[11px] text-slate-400">{lead.email}</div>
+                          </div>
+                        </div>
+                        <div className="text-right">
+                          <span className="text-red-600 font-semibold">
+                            Stage {lead.currentStage} &rarr; {lead.currentStage + 1}
+                          </span>
+                          <div className="text-[11px] text-slate-400">Due: {formatDisplayDate(lead.nextSendDate)}</div>
+                        </div>
                       </div>
-                      <div className="text-right">
-                        <span className="text-red-600 font-semibold">
-                          Stage {lead.currentStage} &rarr; {lead.currentStage + 1}
-                        </span>
-                        <div className="text-[11px] text-slate-400">Due: {formatDisplayDate(lead.nextSendDate)}</div>
-                      </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
             </div>
@@ -595,16 +727,16 @@ export const CampaignSchedulerModal: React.FC<CampaignSchedulerModalProps> = ({
               <div className="flex items-center justify-between text-xs font-semibold">
                 <span className="text-red-700 flex items-center gap-1.5">
                   <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                  Processing due leads ({progressIndex} of {dueLeads.length})...
+                  Processing due leads ({progressIndex} of {selectedDueLeads.length})...
                 </span>
                 <span className="text-slate-600">
-                  {Math.round((progressIndex / Math.max(dueLeads.length, 1)) * 100)}%
+                  {Math.round((progressIndex / Math.max(selectedDueLeads.length, 1)) * 100)}%
                 </span>
               </div>
               <div className="w-full bg-slate-200 rounded-full h-2 overflow-hidden">
                 <div
                   className="bg-red-600 h-2 rounded-full transition-all duration-300"
-                  style={{ width: `${(progressIndex / Math.max(dueLeads.length, 1)) * 100}%` }}
+                  style={{ width: `${(progressIndex / Math.max(selectedDueLeads.length, 1)) * 100}%` }}
                 />
               </div>
             </div>
@@ -632,7 +764,7 @@ export const CampaignSchedulerModal: React.FC<CampaignSchedulerModalProps> = ({
           )}
 
           {/* Confirmation Checkbox */}
-          {!isRunning && dueLeads.length > 0 && executionLogs.length === 0 && (
+          {!isRunning && selectedDueLeads.length > 0 && executionLogs.length === 0 && (
             <div className="p-3 bg-amber-50/70 border border-amber-200 rounded-xl">
               <label className="flex items-start gap-2.5 cursor-pointer">
                 <input
@@ -642,7 +774,7 @@ export const CampaignSchedulerModal: React.FC<CampaignSchedulerModalProps> = ({
                   className="mt-0.5 rounded border-amber-300 text-red-600 focus:ring-red-500"
                 />
                 <span className="text-xs text-amber-900 leading-relaxed">
-                  I confirm dispatching stage emails and updating database records for these <strong>{dueLeads.length}</strong> leads through the connected service account.
+                  I confirm dispatching stage emails and updating database records for these <strong>{selectedDueLeads.length}</strong> selected leads through the connected service account.
                 </span>
               </label>
             </div>
@@ -663,11 +795,11 @@ export const CampaignSchedulerModal: React.FC<CampaignSchedulerModalProps> = ({
           {executionLogs.length === 0 && dueLeads.length > 0 && (
             <button
               onClick={handleStartCampaignRun}
-              disabled={isRunning || !isConfirmed}
-              className="flex items-center gap-2 px-5 py-2 text-xs font-semibold text-white bg-red-600 hover:bg-red-700 active:bg-red-800 disabled:opacity-50 rounded-lg shadow-xs shadow-red-500/20 transition-all"
+              disabled={isRunning || !isConfirmed || selectedDueLeads.length === 0}
+              className="flex items-center gap-2 px-5 py-2 text-xs font-semibold text-white bg-red-600 hover:bg-red-700 active:bg-red-800 disabled:opacity-50 rounded-lg shadow-xs shadow-red-500/20 transition-all cursor-pointer"
             >
               <Play className="w-3.5 h-3.5 fill-current" />
-              <span>Run Automated Campaign Check & Send ({dueLeads.length})</span>
+              <span>Run Automated Campaign Check & Send ({selectedDueLeads.length})</span>
             </button>
           )}
         </div>

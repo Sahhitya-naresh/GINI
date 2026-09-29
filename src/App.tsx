@@ -1261,6 +1261,7 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
         spreadsheetId={spreadsheetId}
         onRunCompleted={handleSchedulerCompleted}
         onTasksCreated={handleTasksCreated}
+        onToggleWorkflowActive={handleToggleWorkflowActive}
       />
 
       {/* Add Single Lead Modal */}
