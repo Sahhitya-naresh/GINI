@@ -219,6 +219,15 @@ export async function createLead(leadData: Partial<BackendLead>): Promise<Backen
     updatedAt: now
   };
 
+  if (!newLead.campaignId && newLead.campaign && newLead.campaign !== 'Default') {
+    const matchedCamp = await db.collection(COLLECTIONS.CAMPAIGNS).findOne({
+      name: { $regex: new RegExp(`^${newLead.campaign.trim()}$`, 'i') }
+    });
+    if (matchedCamp && (matchedCamp.id || (matchedCamp as any)._id)) {
+      newLead.campaignId = matchedCamp.id || String((matchedCamp as any)._id);
+    }
+  }
+
   await col.insertOne({ ...newLead } as any);
   return newLead;
 }
@@ -328,6 +337,15 @@ export async function batchCreateLeads(leadsData: Partial<BackendLead>[]): Promi
       senderUsed: item.senderUsed || '',
       updatedAt: now
     };
+
+    if (!leadDoc.campaignId && leadDoc.campaign && leadDoc.campaign !== 'Default') {
+      const matchedCamp = await db.collection(COLLECTIONS.CAMPAIGNS).findOne({
+        name: { $regex: new RegExp(`^${leadDoc.campaign.trim()}$`, 'i') }
+      });
+      if (matchedCamp && (matchedCamp.id || (matchedCamp as any)._id)) {
+        leadDoc.campaignId = matchedCamp.id || String((matchedCamp as any)._id);
+      }
+    }
 
     if (cleanEmail) {
       existingEmailMap.set(cleanEmail, targetLeadId);

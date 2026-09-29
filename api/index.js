@@ -548,6 +548,14 @@ async function createLead(leadData) {
     createdAt: now,
     updatedAt: now
   };
+  if (!newLead.campaignId && newLead.campaign && newLead.campaign !== "Default") {
+    const matchedCamp = await db.collection(COLLECTIONS.CAMPAIGNS).findOne({
+      name: { $regex: new RegExp(`^${newLead.campaign.trim()}$`, "i") }
+    });
+    if (matchedCamp && (matchedCamp.id || matchedCamp._id)) {
+      newLead.campaignId = matchedCamp.id || String(matchedCamp._id);
+    }
+  }
   await col.insertOne({ ...newLead });
   return newLead;
 }
@@ -642,6 +650,14 @@ async function batchCreateLeads(leadsData) {
       senderUsed: item.senderUsed || "",
       updatedAt: now
     };
+    if (!leadDoc.campaignId && leadDoc.campaign && leadDoc.campaign !== "Default") {
+      const matchedCamp = await db.collection(COLLECTIONS.CAMPAIGNS).findOne({
+        name: { $regex: new RegExp(`^${leadDoc.campaign.trim()}$`, "i") }
+      });
+      if (matchedCamp && (matchedCamp.id || matchedCamp._id)) {
+        leadDoc.campaignId = matchedCamp.id || String(matchedCamp._id);
+      }
+    }
     if (cleanEmail) {
       existingEmailMap.set(cleanEmail, targetLeadId);
     }
@@ -2928,35 +2944,37 @@ app.post("/api/email/check-reply", async (req, res) => {
     if (result.hasReplied) {
       return res.json({ success: true, ...result });
     }
-    const cleanEmail = leadEmail.trim().toLowerCase();
-    let reply = inMemoryInboundReplies.find(
-      (r) => r.leadEmail === cleanEmail || threadId && r.threadId === threadId
-    );
-    if (!reply) {
-      const db = await getDb().catch(() => null);
-      if (db) {
-        try {
-          const query = { $or: [{ leadEmail: cleanEmail }] };
-          if (threadId) query.$or.push({ threadId });
-          const dbReply = await db.collection("inbound_replies").findOne(query);
-          if (dbReply) reply = dbReply;
-        } catch (_) {
+    if (process.env.NODE_ENV !== "production") {
+      const cleanEmail = leadEmail.trim().toLowerCase();
+      let reply = inMemoryInboundReplies.find(
+        (r) => r.leadEmail === cleanEmail || threadId && r.threadId === threadId
+      );
+      if (!reply) {
+        const db = await getDb().catch(() => null);
+        if (db) {
+          try {
+            const query = { $or: [{ leadEmail: cleanEmail }] };
+            if (threadId) query.$or.push({ threadId });
+            const dbReply = await db.collection("inbound_replies").findOne(query);
+            if (dbReply) reply = dbReply;
+          } catch (_) {
+          }
         }
       }
-    }
-    if (reply) {
-      return res.json({
-        success: true,
-        hasReplied: true,
-        reason: `Inbound reply detected from ${cleanEmail}`,
-        replyMessage: {
-          id: reply.id,
-          from: reply.from || cleanEmail,
-          subject: reply.subject,
-          receivedDateTime: reply.receivedDateTime,
-          bodyPreview: reply.body
-        }
-      });
+      if (reply) {
+        return res.json({
+          success: true,
+          hasReplied: true,
+          reason: `Inbound reply detected from ${cleanEmail}`,
+          replyMessage: {
+            id: reply.id,
+            from: reply.from || cleanEmail,
+            subject: reply.subject,
+            receivedDateTime: reply.receivedDateTime,
+            bodyPreview: reply.body
+          }
+        });
+      }
     }
     res.json({ success: true, ...result });
   } catch (err) {
@@ -2966,6 +2984,19 @@ app.post("/api/email/check-reply", async (req, res) => {
 });
 app.post("/api/email/inbound-reply", async (req, res) => {
   try {
+    const cronSecret = process.env.CRON_SECRET || process.env.APP_SECRET;
+    const authHeader = req.headers.authorization || "";
+    const providedToken = authHeader.startsWith("Bearer ") ? authHeader.substring(7).trim() : (req.headers["x-cron-secret"] || "").trim();
+    const isLocalhost = req.ip === "127.0.0.1" || req.ip === "::1" || req.ip === "::ffff:127.0.0.1";
+    const isDev = process.env.NODE_ENV !== "production";
+    const isAuthorized = cronSecret && providedToken === cronSecret;
+    const isAllowedLocalDev = isDev && isLocalhost;
+    if (!isAuthorized && !isAllowedLocalDev) {
+      return res.status(403).json({
+        success: false,
+        error: "Forbidden: /api/email/inbound-reply requires CRON_SECRET authentication or local development environment."
+      });
+    }
     const { leadEmail, threadId, subject, body, from } = req.body;
     if (!leadEmail && !threadId) {
       return res.status(400).json({ success: false, error: "leadEmail or threadId required" });
