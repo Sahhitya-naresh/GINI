@@ -286,6 +286,10 @@ export async function autoSeedFromLocalData(db: Db): Promise<{ seeded: boolean; 
   const dataDir = path.join(process.cwd(), 'data_store');
   const trackingFile = path.join(process.cwd(), 'tracking-events.json');
 
+  // Note: Local data_store files (leads.json, campaigns.json, senders.json) are intentionally empty ([])
+  // to avoid silently reloading stale demo/test records when collections are cleared.
+  // They are only used for genuine first-time setup if populated with fresh data.
+
   // Leads: do not automatically re-seed sample leads if the collection is empty
   const leadsCol = db.collection(COLLECTIONS.LEADS);
 
