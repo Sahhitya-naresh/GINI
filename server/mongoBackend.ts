@@ -712,3 +712,105 @@ export async function getSystemStatsSummary() {
     }
   };
 }
+
+// ---------------------------------------------------------------------------
+// SHARED LEAD REPLY PROCESSING (Reused by Webhooks, Polling & Manual checks)
+// ---------------------------------------------------------------------------
+
+export interface ApplyReplyParams {
+  leadEmail?: string;
+  threadId?: string;
+  messageId?: string;
+  subject?: string;
+  body?: string;
+  from?: string;
+  receivedDateTime?: string;
+  source?: string;
+}
+
+export interface ApplyReplyResult {
+  success: boolean;
+  applied: boolean;
+  lead?: BackendLead;
+  reply?: any;
+  message?: string;
+}
+
+export async function applyLeadReply(params: ApplyReplyParams): Promise<ApplyReplyResult> {
+  const db = await getDb();
+  const leadsCol = db.collection<BackendLead>(COLLECTIONS.LEADS);
+
+  const cleanEmail = (params.leadEmail || params.from || '').trim().toLowerCase();
+  const cleanThreadId = (params.threadId || '').trim();
+
+  // Find lead by threadId or email
+  let matchedLead: BackendLead | null = null;
+  if (cleanThreadId && !cleanThreadId.startsWith('graph-conv-')) {
+    matchedLead = await leadsCol.findOne({ threadId: cleanThreadId }, { projection: { _id: 0 } });
+  }
+  if (!matchedLead && cleanEmail) {
+    matchedLead = await leadsCol.findOne(
+      { email: { $regex: new RegExp(`^${cleanEmail.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') } },
+      { projection: { _id: 0 } }
+    );
+  }
+
+  const replyId = params.messageId || `inbound-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+  const receivedAt = params.receivedDateTime || new Date().toISOString();
+  const replyDoc = {
+    id: replyId,
+    leadEmail: cleanEmail || matchedLead?.email || '',
+    leadId: matchedLead?.leadId,
+    threadId: cleanThreadId || matchedLead?.threadId || '',
+    from: params.from || cleanEmail,
+    subject: params.subject || 'Re: Outreach Flow follow-up',
+    body: params.body || '',
+    receivedDateTime: receivedAt,
+    source: params.source || 'Webhook'
+  };
+
+  try {
+    const repliesCol = db.collection(COLLECTIONS.INBOUND_REPLIES);
+    await repliesCol.updateOne(
+      { id: replyId },
+      { $set: replyDoc },
+      { upsert: true }
+    );
+  } catch (err) {
+    console.warn('[MongoDB] Could not persist inbound reply document:', err);
+  }
+
+  if (!matchedLead) {
+    return {
+      success: true,
+      applied: false,
+      reply: replyDoc,
+      message: `No lead matched email "${cleanEmail}" or thread "${cleanThreadId}". Inbound reply stored.`
+    };
+  }
+
+  const existingNotes = matchedLead.notes || '';
+  const noteTag = `[Reply detected${params.source ? ` via ${params.source}` : ''}]`;
+  const updatedNotes = existingNotes.includes(noteTag)
+    ? existingNotes
+    : (existingNotes ? `${existingNotes} | ${noteTag}` : noteTag);
+
+  const updateFields: Partial<BackendLead> = {
+    status: 'Replied',
+    hasReplied: true,
+    hasUnreadReply: true,
+    lastReplyReceivedDate: receivedAt,
+    notes: updatedNotes,
+    updatedAt: new Date().toISOString()
+  };
+
+  await leadsCol.updateOne({ leadId: matchedLead.leadId }, { $set: updateFields });
+
+  return {
+    success: true,
+    applied: true,
+    lead: { ...matchedLead, ...updateFields },
+    reply: replyDoc
+  };
+}
+

@@ -83,14 +83,20 @@ async function main() {
 
   // 4. Prospect replies to the email thread!
   console.log('\n--- PROSPECT SENDS LIVE INBOUND EMAIL REPLY ---');
-  const replyRes = await fetch('http://localhost:3000/api/email/inbound-reply', {
+  const replyRes = await fetch('http://localhost:3000/api/webhooks/graph', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      leadEmail: email,
-      threadId,
-      subject: 'Re: Quick question for SkyDefense Robotics',
-      body: 'Hi Sarah here, thanks for reaching out. We would love to see a demo of your automated platform this Thursday at 2pm.'
+      value: [
+        {
+          subscriptionId: 'sub-verify-1',
+          clientState: 'gini_graph_webhook_secret_key_2026',
+          leadEmail: email,
+          threadId,
+          subject: 'Re: Quick question for SkyDefense Robotics',
+          body: 'Hi Sarah here, thanks for reaching out. We would love to see a demo of your automated platform this Thursday at 2pm.'
+        }
+      ]
     })
   });
   const replyJson = await replyRes.json();

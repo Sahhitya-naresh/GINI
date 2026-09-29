@@ -21,6 +21,7 @@ import {
   recordTrackingEvent,
   clearAllTrackingEvents,
   getSystemStatsSummary,
+  applyLeadReply,
   TrackingEvent,
   BackendLead
 } from './mongoBackend.ts';
@@ -32,7 +33,12 @@ import {
   checkAppThreadForReply,
   getAppConversationThread,
   getServiceAccountProfile,
-  sendDirectTestEmail
+  sendDirectTestEmail,
+  getWebhookClientState,
+  verifyWebhookClientState,
+  createGraphWebhookSubscription,
+  renewExpiringGraphSubscriptions,
+  processGraphWebhookNotification
 } from './msGraphService.ts';
 import { getAuthDiagnostics } from './msGraphAuth.ts';
 import { getPublicBaseUrl } from './urlHelper.ts';
@@ -474,7 +480,7 @@ app.post('/api/track/clear', async (_req, res) => {
 
 // --- Leads CRUD Endpoints (MongoDB Single Source of Truth) ---
 
-app.all(['/api/leads/list', '/api/leads/local'], async (_req, res) => {
+app.all(['/api/leads', '/api/leads/list', '/api/leads/local'], async (_req, res) => {
   try {
     const leads = await listLeads();
     res.json({ success: true, count: leads.length, leads });
@@ -909,58 +915,93 @@ app.post('/api/email/check-reply', async (req, res) => {
   }
 });
 
-app.post('/api/email/inbound-reply', async (req, res) => {
+// ===========================================================================
+// MICROSOFT GRAPH CHANGE NOTIFICATIONS (WEBHOOKS) & RENEWAL CRON
+// ===========================================================================
+
+/**
+ * 1. Webhook Endpoint: /api/webhooks/graph
+ * - Validation Handshake: When Microsoft Graph registers/validates a subscription,
+ *   it sends ?validationToken=...; the endpoint returns it as plain text HTTP 200 within 10s.
+ * - Change Notifications: When inbound email arrives, Graph POSTs { value: [...] }.
+ * - Security Boundary: Validates clientState on every notification against MICROSOFT_GRAPH_CLIENT_STATE.
+ * - Shared Reply Logic: Calls shared applyLeadReply to update lead to Replied and record message.
+ */
+app.all('/api/webhooks/graph', async (req, res) => {
   try {
-    // Security Guard: Prevent unauthenticated third-party callers from spoofing replies.
-    // In production, genuine email replies are pulled from Microsoft Graph.
-    const cronSecret = process.env.CRON_SECRET || process.env.APP_SECRET;
-    const authHeader = req.headers.authorization || '';
-    const providedToken = authHeader.startsWith('Bearer ')
-      ? authHeader.substring(7).trim()
-      : ((req.headers['x-cron-secret'] as string) || '').trim();
-
-    const isLocalhost = req.ip === '127.0.0.1' || req.ip === '::1' || req.ip === '::ffff:127.0.0.1';
-    const isDev = process.env.NODE_ENV !== 'production';
-
-    const isAuthorized = cronSecret && providedToken === cronSecret;
-    const isAllowedLocalDev = isDev && isLocalhost;
-
-    if (!isAuthorized && !isAllowedLocalDev) {
-      return res.status(403).json({
-        success: false,
-        error: 'Forbidden: /api/email/inbound-reply requires CRON_SECRET authentication or local development environment.'
-      });
+    // 1. Subscription Validation Handshake
+    const validationToken = (req.query.validationToken as string) || (req.body?.validationToken as string);
+    if (validationToken) {
+      console.log('[Graph Webhook] Validation handshake received, returning token as plain text.');
+      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+      return res.status(200).send(validationToken);
     }
 
-    const { leadEmail, threadId, subject, body, from } = req.body;
-    if (!leadEmail && !threadId) {
-      return res.status(400).json({ success: false, error: 'leadEmail or threadId required' });
+    if (req.method !== 'POST') {
+      return res.status(405).json({ error: 'Method Not Allowed' });
     }
-    const cleanEmail = (leadEmail || '').trim().toLowerCase();
-    const replyDoc: InboundReply = {
-      id: `inbound-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
-      leadEmail: cleanEmail,
-      threadId: threadId || '',
-      from: from || cleanEmail,
-      subject: subject || 'Re: Outreach Flow follow-up',
-      body: body || 'Thanks for reaching out! I would love to see a demo.',
-      receivedDateTime: new Date().toISOString()
-    };
 
-    inMemoryInboundReplies.push(replyDoc);
+    // 2. Incoming Change Notification Validation
+    const notifications = req.body?.value;
+    if (!Array.isArray(notifications) || notifications.length === 0) {
+      return res.status(400).json({ error: 'Bad Request: Missing notification value array' });
+    }
 
-    const db = await getDb().catch(() => null);
-    if (db) {
-      try {
-        await db.collection('inbound_replies').insertOne(replyDoc as any);
-      } catch (e) {
-        console.warn('Could not persist inbound reply to mongo:', e);
+    const expectedSecret = getWebhookClientState();
+    const results = [];
+
+    // 3. Security Boundary: Validate clientState on EVERY incoming notification
+    for (const item of notifications) {
+      const providedClientState = item.clientState || '';
+      if (!verifyWebhookClientState(providedClientState, expectedSecret)) {
+        console.warn('[Graph Webhook] SECURITY REJECTION: Invalid or spoofed clientState:', providedClientState);
+        return res.status(401).json({ error: 'Unauthorized: clientState validation failed' });
       }
+
+      // 4. Shared reply processing logic
+      const result = await processGraphWebhookNotification(item);
+      results.push(result);
     }
 
-    res.json({ success: true, reply: replyDoc });
+    // Microsoft Graph requires HTTP 202 Accepted or 200 OK within 30 seconds
+    return res.status(202).json({ success: true, processed: results.length, results });
   } catch (err: any) {
-    console.error('API /api/email/inbound-reply error:', err);
+    console.error('[Graph Webhook] Processing error:', err);
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/**
+ * 2. Subscription Renewal Cron: /api/cron/renew-subscriptions
+ * - Runs once daily via Vercel Cron ("0 2 * * *").
+ * - Checks subscriptions expiring within 24 hours and extends them (max 4230 minutes).
+ * - Creates a fresh subscription if none exists.
+ */
+app.all('/api/cron/renew-subscriptions', async (req, res) => {
+  try {
+    console.log('[Cron] Running daily Microsoft Graph webhook subscription renewal...');
+    const renewed = await renewExpiringGraphSubscriptions();
+    res.json({
+      success: true,
+      timestamp: new Date().toISOString(),
+      subscriptions: renewed
+    });
+  } catch (err: any) {
+    console.error('[Cron] Subscription renewal error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/**
+ * 3. On-demand Subscription Management: /api/webhooks/graph/subscribe
+ * Allows admin/test script to inspect or trigger active subscription creation.
+ */
+app.post('/api/webhooks/graph/subscribe', async (req, res) => {
+  try {
+    const sub = await createGraphWebhookSubscription();
+    res.json({ success: true, subscription: sub });
+  } catch (err: any) {
+    console.error('API /api/webhooks/graph/subscribe error:', err);
     res.status(500).json({ success: false, error: err.message });
   }
 });

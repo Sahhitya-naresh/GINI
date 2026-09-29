@@ -11,6 +11,9 @@
 import { getAppAccessToken, getGraphConfig } from './msGraphAuth.ts';
 import { renderEmailMergeTags } from '../src/data/defaultTemplates.ts';
 import { getPublicBaseUrl } from './urlHelper.ts';
+import crypto from 'crypto';
+import { getDb, COLLECTIONS } from './mongodb.ts';
+import { applyLeadReply } from './mongoBackend.ts';
 
 export interface SendAppEmailParams {
   lead: {
@@ -646,3 +649,317 @@ export async function sendDirectTestEmail(to: string, customSubject?: string, cu
     timestamp: new Date().toISOString()
   };
 }
+
+// ---------------------------------------------------------------------------
+// MICROSOFT GRAPH WEBHOOKS (Change Notifications) & SUBSCRIPTIONS
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns the secret string used to validate incoming Graph change notifications.
+ * Microsoft Graph sends this value in the clientState field of each notification.
+ */
+export function getWebhookClientState(): string {
+  return (
+    process.env.MICROSOFT_GRAPH_CLIENT_STATE ||
+    process.env.GRAPH_WEBHOOK_CLIENT_STATE ||
+    'gini_graph_webhook_secret_key_2026'
+  ).trim();
+}
+
+/**
+ * Securely verifies whether a provided clientState matches the expected secret.
+ * Uses timingSafeEqual to protect against timing attacks.
+ */
+export function verifyWebhookClientState(provided: string, expected?: string): boolean {
+  const secret = expected || getWebhookClientState();
+  if (!provided || !secret) return false;
+  const bufProvided = Buffer.from(provided);
+  const bufSecret = Buffer.from(secret);
+  if (bufProvided.length !== bufSecret.length) return false;
+  return crypto.timingSafeEqual(bufProvided, bufSecret);
+}
+
+export interface GraphSubscriptionRecord {
+  id: string;
+  subscriptionId?: string;
+  resource: string;
+  changeType: string;
+  notificationUrl: string;
+  expirationDateTime: string;
+  clientState: string;
+  createdAt: string;
+  updatedAt: string;
+  isMock?: boolean;
+}
+
+/**
+ * Creates a new Microsoft Graph change notification subscription for the service account mailbox.
+ * Uses: POST https://graph.microsoft.com/v1.0/subscriptions
+ * Note: Maximum lifetime for messages subscription is 4230 minutes (~2.93 days).
+ */
+export async function createGraphWebhookSubscription(customBaseUrl?: string): Promise<GraphSubscriptionRecord> {
+  const config = getGraphConfig();
+  const clientState = getWebhookClientState();
+  const publicBase = (customBaseUrl || getPublicBaseUrl()).replace(/\/+$/, '');
+  const notificationUrl = `${publicBase}/api/webhooks/graph`;
+
+  // Maximum lifetime for mail subscriptions is 4230 minutes (~2.93 days)
+  const expirationDateTime = new Date(Date.now() + 4200 * 60 * 1000).toISOString();
+  const now = new Date().toISOString();
+
+  // If credentials are not configured, generate a persisted mock subscription for development
+  if (!config.tenantId || !config.clientId || !config.clientSecret || !config.serviceAccount) {
+    const mockSub: GraphSubscriptionRecord = {
+      id: `mock-sub-${Date.now()}`,
+      subscriptionId: `mock-sub-${Date.now()}`,
+      resource: `users/${config.serviceAccount || 'service@example.com'}/mailFolders('Inbox')/messages`,
+      changeType: 'created',
+      clientState,
+      notificationUrl,
+      expirationDateTime,
+      createdAt: now,
+      updatedAt: now,
+      isMock: true
+    };
+    const db = await getDb().catch(() => null);
+    if (db) {
+      await db.collection(COLLECTIONS.GRAPH_SUBSCRIPTIONS).updateOne(
+        { id: mockSub.id },
+        { $set: mockSub },
+        { upsert: true }
+      );
+    }
+    return mockSub;
+  }
+
+  const token = await getAppAccessToken();
+  const endpoint = 'https://graph.microsoft.com/v1.0/subscriptions';
+
+  const subPayload = {
+    changeType: 'created',
+    notificationUrl,
+    resource: `users/${encodeURIComponent(config.serviceAccount)}/mailFolders('Inbox')/messages`,
+    expirationDateTime,
+    clientState
+  };
+
+  const response = await fetch(endpoint, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify(subPayload)
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    let parsed: any;
+    try { parsed = JSON.parse(errorText); } catch { parsed = { error: { message: errorText } }; }
+    throw new Error(`Failed to create Microsoft Graph webhook subscription (${response.status}): ${parsed.error?.message || errorText}`);
+  }
+
+  const createdSub = await response.json();
+  const record: GraphSubscriptionRecord = {
+    id: createdSub.id,
+    subscriptionId: createdSub.id,
+    resource: createdSub.resource,
+    changeType: createdSub.changeType,
+    notificationUrl: createdSub.notificationUrl,
+    expirationDateTime: createdSub.expirationDateTime,
+    clientState,
+    createdAt: now,
+    updatedAt: now
+  };
+
+  const db = await getDb().catch(() => null);
+  if (db) {
+    await db.collection(COLLECTIONS.GRAPH_SUBSCRIPTIONS).updateOne(
+      { id: record.id },
+      { $set: record },
+      { upsert: true }
+    );
+  }
+
+  return record;
+}
+
+/**
+ * Renews Microsoft Graph subscriptions expiring within the next 24 hours.
+ * Called daily by Vercel Cron (schedule: "0 2 * * *").
+ */
+export async function renewExpiringGraphSubscriptions(customBaseUrl?: string): Promise<any[]> {
+  const config = getGraphConfig();
+  const hasCreds = Boolean(config.tenantId && config.clientId && config.clientSecret && config.serviceAccount);
+  const db = await getDb().catch(() => null);
+
+  const renewThresholdMs = 24 * 60 * 60 * 1000; // 24 hours
+  const now = Date.now();
+  const newExpiration = new Date(now + 4200 * 60 * 1000).toISOString();
+
+  let storedSubs: any[] = [];
+  if (db) {
+    storedSubs = await db.collection(COLLECTIONS.GRAPH_SUBSCRIPTIONS).find({}).toArray();
+  }
+
+  const renewedList: any[] = [];
+
+  if (hasCreds) {
+    try {
+      const token = await getAppAccessToken();
+      const listRes = await fetch('https://graph.microsoft.com/v1.0/subscriptions', {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+
+      if (listRes.ok) {
+        const listData = await listRes.json();
+        const liveSubs: any[] = listData.value || [];
+
+        for (const sub of liveSubs) {
+          const expTime = new Date(sub.expirationDateTime).getTime();
+          // If expiring within 24 hours, renew via PATCH
+          if (expTime - now < renewThresholdMs) {
+            const patchRes = await fetch(`https://graph.microsoft.com/v1.0/subscriptions/${encodeURIComponent(sub.id)}`, {
+              method: 'PATCH',
+              headers: {
+                Authorization: `Bearer ${token}`,
+                'Content-Type': 'application/json'
+              },
+              body: JSON.stringify({ expirationDateTime: newExpiration })
+            });
+
+            if (patchRes.ok) {
+              const updated = await patchRes.json();
+              renewedList.push({ ...updated, renewed: true });
+              if (db) {
+                await db.collection(COLLECTIONS.GRAPH_SUBSCRIPTIONS).updateOne(
+                  { id: sub.id },
+                  { $set: { ...updated, updatedAt: new Date().toISOString() } },
+                  { upsert: true }
+                );
+              }
+            } else {
+              console.warn(`[MS Graph] Failed to renew subscription ${sub.id}: HTTP ${patchRes.status}`);
+            }
+          } else {
+            renewedList.push({ ...sub, renewed: false, reason: 'Not yet nearing expiration' });
+          }
+        }
+
+        // If no active subscriptions exist on Graph, create a fresh one
+        if (liveSubs.length === 0) {
+          const fresh = await createGraphWebhookSubscription(customBaseUrl);
+          renewedList.push({ ...fresh, created: true });
+        }
+      }
+    } catch (err) {
+      console.warn('[MS Graph] Subscription renewal API call failed:', err);
+    }
+  } else {
+    // Development / mock fallback
+    for (const sub of storedSubs) {
+      const expTime = new Date(sub.expirationDateTime).getTime();
+      if (expTime - now < renewThresholdMs) {
+        const updated = { ...sub, expirationDateTime: newExpiration, updatedAt: new Date().toISOString() };
+        if (db) {
+          await db.collection(COLLECTIONS.GRAPH_SUBSCRIPTIONS).updateOne({ id: sub.id }, { $set: updated });
+        }
+        renewedList.push({ ...updated, renewed: true });
+      } else {
+        renewedList.push({ ...sub, renewed: false, reason: 'Not yet nearing expiration' });
+      }
+    }
+
+    if (storedSubs.length === 0) {
+      const fresh = await createGraphWebhookSubscription(customBaseUrl);
+      renewedList.push({ ...fresh, created: true });
+    }
+  }
+
+  return renewedList;
+}
+
+/**
+ * Fetches message metadata and preview from Microsoft Graph by message ID
+ */
+export async function fetchGraphMessageDetails(messageId: string) {
+  const config = getGraphConfig();
+  if (!config.serviceAccount) return null;
+
+  try {
+    const token = await getAppAccessToken();
+    const url = `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(config.serviceAccount)}/messages/${encodeURIComponent(messageId)}?$select=id,conversationId,subject,from,toRecipients,receivedDateTime,bodyPreview,body`;
+    const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+    if (res.ok) {
+      return await res.json();
+    }
+  } catch (err) {
+    console.warn('[MS Graph] Failed to fetch message details for', messageId, err);
+  }
+  return null;
+}
+
+/**
+ * Processes a single Microsoft Graph change notification object.
+ * Verifies clientState, retrieves message, and calls the shared applyLeadReply logic.
+ */
+export async function processGraphWebhookNotification(notification: any) {
+  const expectedSecret = getWebhookClientState();
+  if (!verifyWebhookClientState(notification.clientState, expectedSecret)) {
+    throw new Error('Unauthorized: clientState does not match expected secret.');
+  }
+
+  // Extract messageId from resourceData.id or parse from resource path
+  let messageId = notification.resourceData?.id;
+  if (!messageId && notification.resource) {
+    const parts = notification.resource.split('/');
+    messageId = parts[parts.length - 1];
+  }
+
+  let fromEmail = '';
+  let fromName = '';
+  let subject = notification.subject || '';
+  let bodyPreview = notification.bodyPreview || '';
+  let conversationId = notification.conversationId || '';
+  let receivedDateTime = notification.receivedDateTime || new Date().toISOString();
+
+  // If notification payload already carries details (e.g. testing fixtures or rich notification)
+  if (notification.leadEmail || notification.from) {
+    fromEmail = (notification.from || notification.leadEmail || '').trim().toLowerCase();
+    subject = notification.subject || subject;
+    bodyPreview = notification.body || notification.bodyPreview || bodyPreview;
+    conversationId = notification.threadId || notification.conversationId || conversationId;
+  } else if (messageId) {
+    // Fetch live message details from Microsoft Graph
+    const msg = await fetchGraphMessageDetails(messageId);
+    if (msg) {
+      fromEmail = (msg.from?.emailAddress?.address || '').trim().toLowerCase();
+      fromName = msg.from?.emailAddress?.name || '';
+      subject = msg.subject || '';
+      bodyPreview = msg.bodyPreview || (msg.body?.content ? msg.body.content.replace(/<[^>]+>/g, ' ') : '');
+      conversationId = msg.conversationId || '';
+      receivedDateTime = msg.receivedDateTime || receivedDateTime;
+    }
+  }
+
+  // Skip self-sent outbound emails from service account
+  const config = getGraphConfig();
+  if (config.serviceAccount && fromEmail.toLowerCase() === config.serviceAccount.toLowerCase()) {
+    return { skipped: true, reason: 'Outbound email sent by service account' };
+  }
+
+  // Call the shared reply function that updates MongoDB and stops sequence
+  const replyResult = await applyLeadReply({
+    leadEmail: fromEmail,
+    threadId: conversationId,
+    messageId: messageId || `graph-msg-${Date.now()}`,
+    subject,
+    body: bodyPreview,
+    from: fromName ? `${fromName} <${fromEmail}>` : fromEmail,
+    receivedDateTime,
+    source: 'Microsoft Graph Webhook'
+  });
+
+  return replyResult;
+}
+

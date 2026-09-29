@@ -22,7 +22,9 @@ var COLLECTIONS = {
   TASKS: "tasks",
   SENDERS: "senders",
   SETTINGS: "settings",
-  TRACKING_EVENTS: "trackingEvents"
+  TRACKING_EVENTS: "trackingEvents",
+  GRAPH_SUBSCRIPTIONS: "graph_subscriptions",
+  INBOUND_REPLIES: "inbound_replies"
 };
 var state = global.__mongoGlobalState || {
   client: null,
@@ -939,6 +941,71 @@ async function getSystemStatsSummary() {
     }
   };
 }
+async function applyLeadReply(params) {
+  const db = await getDb();
+  const leadsCol = db.collection(COLLECTIONS.LEADS);
+  const cleanEmail = (params.leadEmail || params.from || "").trim().toLowerCase();
+  const cleanThreadId = (params.threadId || "").trim();
+  let matchedLead = null;
+  if (cleanThreadId && !cleanThreadId.startsWith("graph-conv-")) {
+    matchedLead = await leadsCol.findOne({ threadId: cleanThreadId }, { projection: { _id: 0 } });
+  }
+  if (!matchedLead && cleanEmail) {
+    matchedLead = await leadsCol.findOne(
+      { email: { $regex: new RegExp(`^${cleanEmail.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i") } },
+      { projection: { _id: 0 } }
+    );
+  }
+  const replyId = params.messageId || `inbound-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+  const receivedAt = params.receivedDateTime || (/* @__PURE__ */ new Date()).toISOString();
+  const replyDoc = {
+    id: replyId,
+    leadEmail: cleanEmail || matchedLead?.email || "",
+    leadId: matchedLead?.leadId,
+    threadId: cleanThreadId || matchedLead?.threadId || "",
+    from: params.from || cleanEmail,
+    subject: params.subject || "Re: Outreach Flow follow-up",
+    body: params.body || "",
+    receivedDateTime: receivedAt,
+    source: params.source || "Webhook"
+  };
+  try {
+    const repliesCol = db.collection(COLLECTIONS.INBOUND_REPLIES);
+    await repliesCol.updateOne(
+      { id: replyId },
+      { $set: replyDoc },
+      { upsert: true }
+    );
+  } catch (err) {
+    console.warn("[MongoDB] Could not persist inbound reply document:", err);
+  }
+  if (!matchedLead) {
+    return {
+      success: true,
+      applied: false,
+      reply: replyDoc,
+      message: `No lead matched email "${cleanEmail}" or thread "${cleanThreadId}". Inbound reply stored.`
+    };
+  }
+  const existingNotes = matchedLead.notes || "";
+  const noteTag = `[Reply detected${params.source ? ` via ${params.source}` : ""}]`;
+  const updatedNotes = existingNotes.includes(noteTag) ? existingNotes : existingNotes ? `${existingNotes} | ${noteTag}` : noteTag;
+  const updateFields = {
+    status: "Replied",
+    hasReplied: true,
+    hasUnreadReply: true,
+    lastReplyReceivedDate: receivedAt,
+    notes: updatedNotes,
+    updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+  };
+  await leadsCol.updateOne({ leadId: matchedLead.leadId }, { $set: updateFields });
+  return {
+    success: true,
+    applied: true,
+    lead: { ...matchedLead, ...updateFields },
+    reply: replyDoc
+  };
+}
 
 // server/importBackend.ts
 import * as XLSX from "xlsx";
@@ -1483,6 +1550,7 @@ function getPublicBaseUrl(req) {
 }
 
 // server/msGraphService.ts
+import crypto from "crypto";
 function wrapLinksAndEmbedTrackingPixel(htmlContent, lead, stage, baseUrl) {
   const cleanBase = (baseUrl || getPublicBaseUrl()).replace(/\/+$/, "");
   const campaign = encodeURIComponent(lead.campaign || "Default");
@@ -1917,6 +1985,236 @@ async function sendDirectTestEmail(to, customSubject, customBody) {
     conversationId: capturedConversationId || void 0,
     timestamp: (/* @__PURE__ */ new Date()).toISOString()
   };
+}
+function getWebhookClientState() {
+  return (process.env.MICROSOFT_GRAPH_CLIENT_STATE || process.env.GRAPH_WEBHOOK_CLIENT_STATE || "gini_graph_webhook_secret_key_2026").trim();
+}
+function verifyWebhookClientState(provided, expected) {
+  const secret = expected || getWebhookClientState();
+  if (!provided || !secret) return false;
+  const bufProvided = Buffer.from(provided);
+  const bufSecret = Buffer.from(secret);
+  if (bufProvided.length !== bufSecret.length) return false;
+  return crypto.timingSafeEqual(bufProvided, bufSecret);
+}
+async function createGraphWebhookSubscription(customBaseUrl) {
+  const config = getGraphConfig();
+  const clientState = getWebhookClientState();
+  const publicBase = (customBaseUrl || getPublicBaseUrl()).replace(/\/+$/, "");
+  const notificationUrl = `${publicBase}/api/webhooks/graph`;
+  const expirationDateTime = new Date(Date.now() + 4200 * 60 * 1e3).toISOString();
+  const now = (/* @__PURE__ */ new Date()).toISOString();
+  if (!config.tenantId || !config.clientId || !config.clientSecret || !config.serviceAccount) {
+    const mockSub = {
+      id: `mock-sub-${Date.now()}`,
+      subscriptionId: `mock-sub-${Date.now()}`,
+      resource: `users/${config.serviceAccount || "service@example.com"}/mailFolders('Inbox')/messages`,
+      changeType: "created",
+      clientState,
+      notificationUrl,
+      expirationDateTime,
+      createdAt: now,
+      updatedAt: now,
+      isMock: true
+    };
+    const db2 = await getDb().catch(() => null);
+    if (db2) {
+      await db2.collection(COLLECTIONS.GRAPH_SUBSCRIPTIONS).updateOne(
+        { id: mockSub.id },
+        { $set: mockSub },
+        { upsert: true }
+      );
+    }
+    return mockSub;
+  }
+  const token = await getAppAccessToken();
+  const endpoint = "https://graph.microsoft.com/v1.0/subscriptions";
+  const subPayload = {
+    changeType: "created",
+    notificationUrl,
+    resource: `users/${encodeURIComponent(config.serviceAccount)}/mailFolders('Inbox')/messages`,
+    expirationDateTime,
+    clientState
+  };
+  const response = await fetch(endpoint, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(subPayload)
+  });
+  if (!response.ok) {
+    const errorText = await response.text();
+    let parsed;
+    try {
+      parsed = JSON.parse(errorText);
+    } catch {
+      parsed = { error: { message: errorText } };
+    }
+    throw new Error(`Failed to create Microsoft Graph webhook subscription (${response.status}): ${parsed.error?.message || errorText}`);
+  }
+  const createdSub = await response.json();
+  const record = {
+    id: createdSub.id,
+    subscriptionId: createdSub.id,
+    resource: createdSub.resource,
+    changeType: createdSub.changeType,
+    notificationUrl: createdSub.notificationUrl,
+    expirationDateTime: createdSub.expirationDateTime,
+    clientState,
+    createdAt: now,
+    updatedAt: now
+  };
+  const db = await getDb().catch(() => null);
+  if (db) {
+    await db.collection(COLLECTIONS.GRAPH_SUBSCRIPTIONS).updateOne(
+      { id: record.id },
+      { $set: record },
+      { upsert: true }
+    );
+  }
+  return record;
+}
+async function renewExpiringGraphSubscriptions(customBaseUrl) {
+  const config = getGraphConfig();
+  const hasCreds = Boolean(config.tenantId && config.clientId && config.clientSecret && config.serviceAccount);
+  const db = await getDb().catch(() => null);
+  const renewThresholdMs = 24 * 60 * 60 * 1e3;
+  const now = Date.now();
+  const newExpiration = new Date(now + 4200 * 60 * 1e3).toISOString();
+  let storedSubs = [];
+  if (db) {
+    storedSubs = await db.collection(COLLECTIONS.GRAPH_SUBSCRIPTIONS).find({}).toArray();
+  }
+  const renewedList = [];
+  if (hasCreds) {
+    try {
+      const token = await getAppAccessToken();
+      const listRes = await fetch("https://graph.microsoft.com/v1.0/subscriptions", {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (listRes.ok) {
+        const listData = await listRes.json();
+        const liveSubs = listData.value || [];
+        for (const sub of liveSubs) {
+          const expTime = new Date(sub.expirationDateTime).getTime();
+          if (expTime - now < renewThresholdMs) {
+            const patchRes = await fetch(`https://graph.microsoft.com/v1.0/subscriptions/${encodeURIComponent(sub.id)}`, {
+              method: "PATCH",
+              headers: {
+                Authorization: `Bearer ${token}`,
+                "Content-Type": "application/json"
+              },
+              body: JSON.stringify({ expirationDateTime: newExpiration })
+            });
+            if (patchRes.ok) {
+              const updated = await patchRes.json();
+              renewedList.push({ ...updated, renewed: true });
+              if (db) {
+                await db.collection(COLLECTIONS.GRAPH_SUBSCRIPTIONS).updateOne(
+                  { id: sub.id },
+                  { $set: { ...updated, updatedAt: (/* @__PURE__ */ new Date()).toISOString() } },
+                  { upsert: true }
+                );
+              }
+            } else {
+              console.warn(`[MS Graph] Failed to renew subscription ${sub.id}: HTTP ${patchRes.status}`);
+            }
+          } else {
+            renewedList.push({ ...sub, renewed: false, reason: "Not yet nearing expiration" });
+          }
+        }
+        if (liveSubs.length === 0) {
+          const fresh = await createGraphWebhookSubscription(customBaseUrl);
+          renewedList.push({ ...fresh, created: true });
+        }
+      }
+    } catch (err) {
+      console.warn("[MS Graph] Subscription renewal API call failed:", err);
+    }
+  } else {
+    for (const sub of storedSubs) {
+      const expTime = new Date(sub.expirationDateTime).getTime();
+      if (expTime - now < renewThresholdMs) {
+        const updated = { ...sub, expirationDateTime: newExpiration, updatedAt: (/* @__PURE__ */ new Date()).toISOString() };
+        if (db) {
+          await db.collection(COLLECTIONS.GRAPH_SUBSCRIPTIONS).updateOne({ id: sub.id }, { $set: updated });
+        }
+        renewedList.push({ ...updated, renewed: true });
+      } else {
+        renewedList.push({ ...sub, renewed: false, reason: "Not yet nearing expiration" });
+      }
+    }
+    if (storedSubs.length === 0) {
+      const fresh = await createGraphWebhookSubscription(customBaseUrl);
+      renewedList.push({ ...fresh, created: true });
+    }
+  }
+  return renewedList;
+}
+async function fetchGraphMessageDetails(messageId) {
+  const config = getGraphConfig();
+  if (!config.serviceAccount) return null;
+  try {
+    const token = await getAppAccessToken();
+    const url = `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(config.serviceAccount)}/messages/${encodeURIComponent(messageId)}?$select=id,conversationId,subject,from,toRecipients,receivedDateTime,bodyPreview,body`;
+    const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+    if (res.ok) {
+      return await res.json();
+    }
+  } catch (err) {
+    console.warn("[MS Graph] Failed to fetch message details for", messageId, err);
+  }
+  return null;
+}
+async function processGraphWebhookNotification(notification) {
+  const expectedSecret = getWebhookClientState();
+  if (!verifyWebhookClientState(notification.clientState, expectedSecret)) {
+    throw new Error("Unauthorized: clientState does not match expected secret.");
+  }
+  let messageId = notification.resourceData?.id;
+  if (!messageId && notification.resource) {
+    const parts = notification.resource.split("/");
+    messageId = parts[parts.length - 1];
+  }
+  let fromEmail = "";
+  let fromName = "";
+  let subject = notification.subject || "";
+  let bodyPreview = notification.bodyPreview || "";
+  let conversationId = notification.conversationId || "";
+  let receivedDateTime = notification.receivedDateTime || (/* @__PURE__ */ new Date()).toISOString();
+  if (notification.leadEmail || notification.from) {
+    fromEmail = (notification.from || notification.leadEmail || "").trim().toLowerCase();
+    subject = notification.subject || subject;
+    bodyPreview = notification.body || notification.bodyPreview || bodyPreview;
+    conversationId = notification.threadId || notification.conversationId || conversationId;
+  } else if (messageId) {
+    const msg = await fetchGraphMessageDetails(messageId);
+    if (msg) {
+      fromEmail = (msg.from?.emailAddress?.address || "").trim().toLowerCase();
+      fromName = msg.from?.emailAddress?.name || "";
+      subject = msg.subject || "";
+      bodyPreview = msg.bodyPreview || (msg.body?.content ? msg.body.content.replace(/<[^>]+>/g, " ") : "");
+      conversationId = msg.conversationId || "";
+      receivedDateTime = msg.receivedDateTime || receivedDateTime;
+    }
+  }
+  const config = getGraphConfig();
+  if (config.serviceAccount && fromEmail.toLowerCase() === config.serviceAccount.toLowerCase()) {
+    return { skipped: true, reason: "Outbound email sent by service account" };
+  }
+  const replyResult = await applyLeadReply({
+    leadEmail: fromEmail,
+    threadId: conversationId,
+    messageId: messageId || `graph-msg-${Date.now()}`,
+    subject,
+    body: bodyPreview,
+    from: fromName ? `${fromName} <${fromEmail}>` : fromEmail,
+    receivedDateTime,
+    source: "Microsoft Graph Webhook"
+  });
+  return replyResult;
 }
 
 // server/runnerBackend.ts
@@ -2618,7 +2916,7 @@ app.post("/api/track/clear", async (_req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 });
-app.all(["/api/leads/list", "/api/leads/local"], async (_req, res) => {
+app.all(["/api/leads", "/api/leads/list", "/api/leads/local"], async (_req, res) => {
   try {
     const leads = await listLeads();
     res.json({ success: true, count: leads.length, leads });
@@ -2982,47 +3280,58 @@ app.post("/api/email/check-reply", async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 });
-app.post("/api/email/inbound-reply", async (req, res) => {
+app.all("/api/webhooks/graph", async (req, res) => {
   try {
-    const cronSecret = process.env.CRON_SECRET || process.env.APP_SECRET;
-    const authHeader = req.headers.authorization || "";
-    const providedToken = authHeader.startsWith("Bearer ") ? authHeader.substring(7).trim() : (req.headers["x-cron-secret"] || "").trim();
-    const isLocalhost = req.ip === "127.0.0.1" || req.ip === "::1" || req.ip === "::ffff:127.0.0.1";
-    const isDev = process.env.NODE_ENV !== "production";
-    const isAuthorized = cronSecret && providedToken === cronSecret;
-    const isAllowedLocalDev = isDev && isLocalhost;
-    if (!isAuthorized && !isAllowedLocalDev) {
-      return res.status(403).json({
-        success: false,
-        error: "Forbidden: /api/email/inbound-reply requires CRON_SECRET authentication or local development environment."
-      });
+    const validationToken = req.query.validationToken || req.body?.validationToken;
+    if (validationToken) {
+      console.log("[Graph Webhook] Validation handshake received, returning token as plain text.");
+      res.setHeader("Content-Type", "text/plain; charset=utf-8");
+      return res.status(200).send(validationToken);
     }
-    const { leadEmail, threadId, subject, body, from } = req.body;
-    if (!leadEmail && !threadId) {
-      return res.status(400).json({ success: false, error: "leadEmail or threadId required" });
+    if (req.method !== "POST") {
+      return res.status(405).json({ error: "Method Not Allowed" });
     }
-    const cleanEmail = (leadEmail || "").trim().toLowerCase();
-    const replyDoc = {
-      id: `inbound-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
-      leadEmail: cleanEmail,
-      threadId: threadId || "",
-      from: from || cleanEmail,
-      subject: subject || "Re: Outreach Flow follow-up",
-      body: body || "Thanks for reaching out! I would love to see a demo.",
-      receivedDateTime: (/* @__PURE__ */ new Date()).toISOString()
-    };
-    inMemoryInboundReplies.push(replyDoc);
-    const db = await getDb().catch(() => null);
-    if (db) {
-      try {
-        await db.collection("inbound_replies").insertOne(replyDoc);
-      } catch (e) {
-        console.warn("Could not persist inbound reply to mongo:", e);
+    const notifications = req.body?.value;
+    if (!Array.isArray(notifications) || notifications.length === 0) {
+      return res.status(400).json({ error: "Bad Request: Missing notification value array" });
+    }
+    const expectedSecret = getWebhookClientState();
+    const results = [];
+    for (const item of notifications) {
+      const providedClientState = item.clientState || "";
+      if (!verifyWebhookClientState(providedClientState, expectedSecret)) {
+        console.warn("[Graph Webhook] SECURITY REJECTION: Invalid or spoofed clientState:", providedClientState);
+        return res.status(401).json({ error: "Unauthorized: clientState validation failed" });
       }
+      const result = await processGraphWebhookNotification(item);
+      results.push(result);
     }
-    res.json({ success: true, reply: replyDoc });
+    return res.status(202).json({ success: true, processed: results.length, results });
   } catch (err) {
-    console.error("API /api/email/inbound-reply error:", err);
+    console.error("[Graph Webhook] Processing error:", err);
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+app.all("/api/cron/renew-subscriptions", async (req, res) => {
+  try {
+    console.log("[Cron] Running daily Microsoft Graph webhook subscription renewal...");
+    const renewed = await renewExpiringGraphSubscriptions();
+    res.json({
+      success: true,
+      timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+      subscriptions: renewed
+    });
+  } catch (err) {
+    console.error("[Cron] Subscription renewal error:", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+app.post("/api/webhooks/graph/subscribe", async (req, res) => {
+  try {
+    const sub = await createGraphWebhookSubscription();
+    res.json({ success: true, subscription: sub });
+  } catch (err) {
+    console.error("API /api/webhooks/graph/subscribe error:", err);
     res.status(500).json({ success: false, error: err.message });
   }
 });

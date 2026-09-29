@@ -55,14 +55,20 @@ async function main() {
 
   // 3. Prospect replies to the email!
   console.log('\n--- PROSPECT SENDS EMAIL REPLY ---');
-  const replyRes = await fetch('http://localhost:3000/api/email/inbound-reply', {
+  const replyRes = await fetch('http://localhost:3000/api/webhooks/graph', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      leadEmail: 'auto.reply.tester@example.com',
-      threadId: 'conv-auto-reply-test-888',
-      subject: 'Re: Outreach Flow Demo',
-      body: 'Hi, I received your message. We would love to see a live demo this week!'
+      value: [
+        {
+          subscriptionId: 'sub-test-flow',
+          clientState: 'gini_graph_webhook_secret_key_2026',
+          leadEmail: 'auto.reply.tester@example.com',
+          threadId: 'conv-auto-reply-test-888',
+          subject: 'Re: Outreach Flow Demo',
+          body: 'Hi, I received your message. We would love to see a live demo this week!'
+        }
+      ]
     })
   });
   const replyData = await replyRes.json();

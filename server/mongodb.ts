@@ -20,7 +20,9 @@ export const COLLECTIONS = {
   TASKS: 'tasks',
   SENDERS: 'senders',
   SETTINGS: 'settings',
-  TRACKING_EVENTS: 'trackingEvents'
+  TRACKING_EVENTS: 'trackingEvents',
+  GRAPH_SUBSCRIPTIONS: 'graph_subscriptions',
+  INBOUND_REPLIES: 'inbound_replies'
 } as const;
 
 export interface MongoStatusInfo {
