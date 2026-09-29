@@ -240,7 +240,7 @@ export default function App() {
   const [userEmail, setUserEmail] = useState<string>('');
 
   // App core state
-  const [leads, setLeads] = useState<Lead[]>(INITIAL_FALLBACK_LEADS);
+  const [leads, setLeads] = useState<Lead[]>([]);
   const [templates, setTemplates] = useState<StageTemplate[]>(loadSavedTemplates());
   const [settings, setSettings] = useState<AppSettings>(loadSettings());
   const [spreadsheetId, setSpreadsheetId] = useState<string>('');
@@ -599,6 +599,9 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
         setLeads(backendLeads);
         showToast(`Synced ${backendLeads.length} leads from MongoDB!`, 'success');
       } else {
+        setLeads([]);
+        setSelectedLead(null);
+        setTrackingEvents([]);
         showToast('MongoDB connected. No leads found.', 'info');
       }
     } catch (err: any) {

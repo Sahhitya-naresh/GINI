@@ -211,29 +211,6 @@ async function autoSeedFromLocalData(db) {
   const dataDir = path.join(process.cwd(), "data_store");
   const trackingFile = path.join(process.cwd(), "tracking-events.json");
   const leadsCol = db.collection(COLLECTIONS.LEADS);
-  const existingLeadsCount = await leadsCol.countDocuments();
-  if (existingLeadsCount === 0) {
-    const leadsFile = path.join(dataDir, "leads.json");
-    if (fs.existsSync(leadsFile)) {
-      try {
-        const raw = JSON.parse(fs.readFileSync(leadsFile, "utf-8"));
-        if (Array.isArray(raw) && raw.length > 0) {
-          const ops = raw.map((l) => ({
-            updateOne: {
-              filter: { leadId: l.leadId },
-              update: { $set: { ...l, updatedAt: (/* @__PURE__ */ new Date()).toISOString() } },
-              upsert: true
-            }
-          }));
-          await leadsCol.bulkWrite(ops);
-          result.leads = raw.length;
-          console.log(`[MongoDB] Auto-seeded ${raw.length} leads from data_store/leads.json`);
-        }
-      } catch (e) {
-        console.warn("[MongoDB] Failed to parse leads.json for seeding:", e.message);
-      }
-    }
-  }
   const campaignsCol = db.collection(COLLECTIONS.CAMPAIGNS);
   const existingCampaignsCount = await campaignsCol.countDocuments();
   if (existingCampaignsCount === 0) {
