@@ -213,6 +213,37 @@ app.post('/api/mongodb/migrate', async (_req, res) => {
   }
 });
 
+// Helper to detect if open/click request originated from within our own app (e.g., viewing thread in app)
+function isInternalAppRequest(req: express.Request): boolean {
+  const referer = (req.headers['referer'] || req.headers['referrer'] || '').toString().toLowerCase();
+  const origin = (req.headers['origin'] || '').toString().toLowerCase();
+  const source = referer || origin;
+  if (!source) return false;
+
+  const host = (req.headers['host'] || '').toString().toLowerCase();
+  const xForwardedHost = (req.headers['x-forwarded-host'] || '').toString().toLowerCase();
+
+  if (host && (source.includes(host) || source.startsWith(`http://${host}`) || source.startsWith(`https://${host}`))) {
+    return true;
+  }
+  if (xForwardedHost && source.includes(xForwardedHost)) {
+    return true;
+  }
+  if (process.env.APP_URL) {
+    try {
+      const appUrlHost = new URL(process.env.APP_URL).host.toLowerCase();
+      if (appUrlHost && source.includes(appUrlHost)) {
+        return true;
+      }
+    } catch (_) {}
+  }
+  if (source.includes('localhost') || source.includes('127.0.0.1')) {
+    return true;
+  }
+
+  return false;
+}
+
 // --- Open Tracking Pixel Endpoint ---
 
 const handleOpenTracking = async (req: express.Request, res: express.Response) => {
@@ -221,7 +252,10 @@ const handleOpenTracking = async (req: express.Request, res: express.Response) =
   const stage = parseInt((req.query.stage || req.params.stage || '1').toString(), 10) || 1;
   const campaign = (req.query.campaign || 'default').toString();
 
-  if (leadId || email) {
+  // Don't record an event when the request's Referer or Origin header matches our own app
+  const isInternal = isInternalAppRequest(req);
+
+  if (!isInternal && (leadId || email)) {
     const newEvent: TrackingEvent = {
       id: `open-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
       type: 'open',
@@ -265,7 +299,10 @@ app.get('/api/track/click', async (req, res) => {
   const stage = parseInt((req.query.stage || '1').toString(), 10) || 1;
   const campaign = (req.query.campaign || 'default').toString();
 
-  if (leadId || email) {
+  // Don't record click event when triggered internally from within our app
+  const isInternal = isInternalAppRequest(req);
+
+  if (!isInternal && (leadId || email)) {
     const newEvent: TrackingEvent = {
       id: `click-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
       type: 'click',
@@ -287,6 +324,56 @@ app.get('/api/track/click', async (req, res) => {
   }
 
   res.redirect(302, targetUrl);
+});
+
+// --- Reset Tracking for a Lead Endpoint ---
+
+app.post('/api/track/reset-lead', async (req, res) => {
+  try {
+    const { leadId, email } = req.body;
+    if (!leadId && !email) {
+      return res.status(400).json({ success: false, error: 'leadId or email is required' });
+    }
+
+    const cleanEmail = (email || '').toString().trim().toLowerCase();
+    const cleanLeadId = (leadId || '').toString().trim();
+
+    const db = await getDb();
+    const eventsCol = db.collection(COLLECTIONS.TRACKING_EVENTS);
+    const leadsCol = db.collection<BackendLead>(COLLECTIONS.LEADS);
+
+    const filter: any[] = [];
+    if (cleanLeadId) {
+      filter.push({ leadId: cleanLeadId });
+    }
+    if (cleanEmail) {
+      filter.push({ email: cleanEmail });
+    }
+
+    // Delete tracking events for this lead
+    await eventsCol.deleteMany({ $or: filter });
+
+    // Reset engagement counters on the lead document in MongoDB
+    await leadsCol.updateMany(
+      { $or: filter },
+      {
+        $set: {
+          opensCount: 0,
+          clicksCount: 0,
+          firstOpenedDate: '',
+          lastOpenedDate: '',
+          firstClickedDate: '',
+          lastClickedDate: '',
+          updatedAt: new Date().toISOString()
+        }
+      }
+    );
+
+    res.json({ success: true, message: 'Tracking reset successfully for lead' });
+  } catch (err: any) {
+    console.error('API /api/track/reset-lead error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
 });
 
 // --- Debug Tracking Endpoint ---

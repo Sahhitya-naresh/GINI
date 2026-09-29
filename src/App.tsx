@@ -46,6 +46,7 @@ import { AddLeadModal } from './components/AddLeadModal';
 import { ImportLeadsModal } from './components/ImportLeadsModal';
 import { SettingsModal } from './components/SettingsModal';
 import { ConfirmationModal } from './components/ConfirmationModal';
+import { ReplyAlertModal } from './components/ReplyAlertModal';
 import { WorkflowCanvas } from './components/workflow/WorkflowCanvas';
 import { ManualTasksDashboard } from './components/ManualTasksDashboard';
 
@@ -265,6 +266,7 @@ export default function App() {
   const [isImportLeadsOpen, setIsImportLeadsOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isBannerDismissed, setIsBannerDismissed] = useState(false);
+  const [replyAlertLeads, setReplyAlertLeads] = useState<Lead[]>([]);
 
   // Workflow Builder & Senders State
   const [workflows, setWorkflows] = useState<CampaignWorkflow[]>(() => {
@@ -827,8 +829,20 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
         l => l.threadId && (l.status === 'Active' || l.status === 'Paused')
       );
 
+      const newlyReplied: Lead[] = [];
       for (const targetLead of activeLeadsWithThreads) {
-        await checkLeadReply(targetLead, { isManual: false });
+        const res = await checkLeadReply(targetLead, { isManual: false });
+        if (res.hasReplied && res.updatedLead) {
+          newlyReplied.push(res.updatedLead);
+        }
+      }
+
+      if (newlyReplied.length > 0) {
+        setReplyAlertLeads(prev => {
+          const existingIds = new Set(prev.map(l => l.leadId || l.email));
+          const fresh = newlyReplied.filter(l => !existingIds.has(l.leadId || l.email));
+          return fresh.length > 0 ? [...prev, ...fresh] : prev;
+        });
       }
     } catch (err) {
       console.error('Background reply check error:', err);
@@ -1343,6 +1357,18 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
         confirmText="Send Email via Outlook"
         onConfirm={confirmDialog.onConfirm}
         onCancel={() => setConfirmDialog(prev => ({ ...prev, isOpen: false }))}
+      />
+
+      {/* Background Reply Alert Notification Modal */}
+      <ReplyAlertModal
+        isOpen={replyAlertLeads.length > 0}
+        leads={replyAlertLeads}
+        onClose={() => setReplyAlertLeads([])}
+        onOpenLead={(targetLead) => {
+          setSelectedLead(targetLead);
+          setIsLeadDetailOpen(true);
+          setReplyAlertLeads([]);
+        }}
       />
     </div>
   );

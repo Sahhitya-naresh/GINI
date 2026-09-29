@@ -54,6 +54,23 @@ export async function recordTrackingEvent(payload: {
 }
 
 /**
+ * Resets tracking metrics and clears tracking events for a specific lead
+ */
+export async function resetLeadTracking(leadId: string, email?: string): Promise<boolean> {
+  try {
+    const res = await fetch('/api/track/reset-lead', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ leadId, email })
+    });
+    return res.ok;
+  } catch (e) {
+    console.warn('Failed to reset lead tracking:', e);
+    return false;
+  }
+}
+
+/**
  * Merges server-side tracking stats into a list of leads
  */
 export function mergeTrackingWithLeads(

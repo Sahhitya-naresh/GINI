@@ -20,12 +20,14 @@ import {
   Trash2,
   AlertTriangle,
   Info,
-  Sparkles
+  Sparkles,
+  RotateCcw
 } from 'lucide-react';
 import { Lead, StageTemplate, EmailThreadMessage, CampaignWorkflow } from '../types';
 import { getOutlookThread } from '../services/outlookService';
 import { formatDisplayDate, formatDisplayTimestamp } from '../utils/dateUtils';
-import { recordTrackingEvent } from '../services/trackingService';
+import { recordTrackingEvent, resetLeadTracking } from '../services/trackingService';
+import { sanitizeEmailHtml } from '../utils/emailSanitizer';
 
 interface LeadDetailModalProps {
   lead: Lead | null;
@@ -68,6 +70,31 @@ export const LeadDetailModal: React.FC<LeadDetailModalProps> = ({
   const [showDebugLog, setShowDebugLog] = useState(false);
   const [debugEvents, setDebugEvents] = useState<Array<{ type: string; timestamp: string; userAgent: string }>>([]);
   const [isLoadingDebug, setIsLoadingDebug] = useState(false);
+  const [isConfirmingResetTracking, setIsConfirmingResetTracking] = useState(false);
+  const [isResettingTracking, setIsResettingTracking] = useState(false);
+
+  const handleResetTrackingConfirm = async () => {
+    if (!lead) return;
+    setIsResettingTracking(true);
+    try {
+      await resetLeadTracking(lead.leadId, lead.email);
+      onUpdateLead({
+        ...lead,
+        opensCount: 0,
+        clicksCount: 0,
+        lastOpenedDate: '',
+        lastClickedDate: '',
+        firstOpenedDate: '',
+        firstClickedDate: ''
+      });
+      setDebugEvents([]);
+      setIsConfirmingResetTracking(false);
+    } catch (e) {
+      console.error('Failed to reset lead tracking:', e);
+    } finally {
+      setIsResettingTracking(false);
+    }
+  };
 
   const fetchDebugEvents = async () => {
     if (!lead?.leadId) return;
@@ -466,11 +493,44 @@ export const LeadDetailModal: React.FC<LeadDetailModalProps> = ({
                   <Eye className="w-3.5 h-3.5 text-red-600" />
                   <span>Email Engagement Tracking</span>
                 </h3>
-                <span className="text-[10px] text-slate-400 font-medium flex items-center gap-1" title="Public deployment required for external email clients">
-                  <Info className="w-3 h-3 text-slate-400" />
-                  <span>Requires Public URL</span>
-                </span>
+                <button
+                  type="button"
+                  id="btn-reset-lead-tracking"
+                  onClick={() => setIsConfirmingResetTracking(true)}
+                  className="text-[10px] text-slate-500 hover:text-red-600 hover:bg-red-50 px-2 py-0.5 rounded border border-slate-200 transition-colors flex items-center gap-1 font-medium"
+                  title="Reset tracking counters and history for this lead"
+                >
+                  <RotateCcw className="w-3 h-3 text-slate-400" />
+                  <span>Reset tracking</span>
+                </button>
               </div>
+
+              {isConfirmingResetTracking && (
+                <div id="confirm-reset-tracking-box" className="p-3 bg-red-50 border border-red-200 rounded-lg text-xs space-y-2 animate-in fade-in duration-150">
+                  <p className="font-semibold text-red-950">Reset tracking metrics for {lead.name}?</p>
+                  <p className="text-[11px] text-red-800">
+                    This will delete all recorded email open/click events and reset the counters to 0 for this lead.
+                  </p>
+                  <div className="flex items-center gap-2 pt-1">
+                    <button
+                      type="button"
+                      id="btn-confirm-reset-tracking"
+                      onClick={handleResetTrackingConfirm}
+                      disabled={isResettingTracking}
+                      className="px-2.5 py-1 bg-red-600 hover:bg-red-700 text-white rounded font-medium text-xs transition-colors disabled:opacity-50"
+                    >
+                      {isResettingTracking ? 'Resetting...' : 'Yes, reset tracking'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setIsConfirmingResetTracking(false)}
+                      className="px-2.5 py-1 bg-white border border-slate-200 text-slate-700 rounded font-medium text-xs hover:bg-slate-50 transition-colors"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              )}
               
               <div className="grid grid-cols-2 gap-2">
                 <div className="p-2.5 bg-white rounded-lg border border-slate-100 shadow-2xs">
@@ -759,7 +819,7 @@ export const LeadDetailModal: React.FC<LeadDetailModalProps> = ({
                         {msg.bodyHtml ? (
                           <div 
                             className="email-rendered-body max-h-80 overflow-y-auto"
-                            dangerouslySetInnerHTML={{ __html: msg.bodyHtml }}
+                            dangerouslySetInnerHTML={{ __html: sanitizeEmailHtml(msg.bodyHtml) }}
                           />
                         ) : (
                           <p className="whitespace-pre-wrap">{msg.bodyText || msg.snippet}</p>
