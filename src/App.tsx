@@ -460,29 +460,100 @@ export default function App() {
     showToast('Sender accounts configuration updated!', 'success');
   };
 
-  const handleToggleManualTask = (taskId: string) => {
-    setManualTasks(prev => {
-      const updated = prev.map(t => {
-        if (t.id === taskId) {
-          return {
-            ...t,
-            isCompleted: !t.isCompleted,
-            completedAt: !t.isCompleted ? new Date().toISOString() : undefined
-          };
-        }
-        return t;
-      });
-      saveManualTasks(updated);
-      return updated;
+  const handleToggleManualTask = async (taskId: string) => {
+    const targetTask = manualTasks.find(t => t.id === taskId);
+    if (!targetTask) return;
+
+    const willBeCompleted = !targetTask.isCompleted;
+
+    // 1. Update task in local state and localStorage
+    const updatedTasks = manualTasks.map(t => {
+      if (t.id === taskId) {
+        return {
+          ...t,
+          isCompleted: willBeCompleted,
+          completedAt: willBeCompleted ? new Date().toISOString() : undefined
+        };
+      }
+      return t;
     });
+    setManualTasks(updatedTasks);
+    saveManualTasks(updatedTasks);
+
+    // 2. Persist task status to backend MongoDB
+    try {
+      await fetch('/api/tasks/update', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          taskId,
+          updates: {
+            isCompleted: willBeCompleted,
+            completedAt: willBeCompleted ? new Date().toISOString() : undefined
+          }
+        })
+      });
+    } catch (err) {
+      console.warn('Backend task update warning:', err);
+    }
+
+    // 3. When completing the task, advance the lead to the next downstream node in the workflow!
+    if (willBeCompleted) {
+      const targetLead = leads.find(l =>
+        (targetTask.leadId && l.leadId === targetTask.leadId) ||
+        (targetTask.leadEmail && l.email && l.email.toLowerCase() === targetTask.leadEmail.toLowerCase())
+      );
+
+      const assignedWorkflow = workflows.find(w =>
+        w.id === targetTask.campaignId ||
+        (targetLead && (w.id === targetLead.campaignId || (w.name && targetLead.campaign && w.name.toLowerCase() === targetLead.campaign.toLowerCase())))
+      );
+
+      if (targetLead && assignedWorkflow) {
+        const outgoingEdge = assignedWorkflow.edges?.find(e => e.source === targetTask.nodeId);
+        if (outgoingEdge) {
+          const nextNode = assignedWorkflow.nodes?.find(n => n.id === outgoingEdge.target);
+          if (nextNode) {
+            const today = getTodayDateString();
+            const updatedLead: Lead = {
+              ...targetLead,
+              currentNodeId: nextNode.id,
+              nodeEnteredDate: today,
+              nextSendDate: today, // Immediately due for next node send/processing
+              status: 'Active'
+            };
+
+            await handleUpdateLead(updatedLead);
+            showToast(`Task completed! Lead "${targetLead.name}" moved to "${nextNode.data?.label || nextNode.id}".`, 'success');
+            return;
+          }
+        }
+      }
+
+      showToast(`Task "${targetTask.title}" marked completed!`, 'success');
+    } else {
+      showToast(`Task "${targetTask.title}" marked as pending.`, 'info');
+    }
   };
 
-  const handleTasksCreated = (newTasks: LeadManualTask[]) => {
+  const handleTasksCreated = async (newTasks: LeadManualTask[]) => {
     setManualTasks(prev => {
-      const updated = [...newTasks, ...prev];
+      const existingIds = new Set(prev.map(t => t.id));
+      const fresh = newTasks.filter(t => !existingIds.has(t.id));
+      const updated = [...fresh, ...prev];
       saveManualTasks(updated);
       return updated;
     });
+
+    try {
+      await fetch('/api/tasks', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tasks: newTasks })
+      });
+    } catch (err) {
+      console.warn('Backend tasks save warning:', err);
+    }
   };
 
   // Toast / Feedback
@@ -603,6 +674,20 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
         setSelectedLead(null);
         setTrackingEvents([]);
         showToast('MongoDB connected. No leads found.', 'info');
+      }
+
+      // Sync manual tasks from MongoDB backend
+      try {
+        const taskRes = await fetch('/api/tasks');
+        if (taskRes.ok) {
+          const taskData = await taskRes.json();
+          if (Array.isArray(taskData.tasks)) {
+            setManualTasks(taskData.tasks);
+            saveManualTasks(taskData.tasks);
+          }
+        }
+      } catch (tErr) {
+        console.warn('Could not sync tasks from backend:', tErr);
       }
     } catch (err: any) {
       console.error('Failed to sync leads:', err);
@@ -1041,12 +1126,28 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
     const campaignName = chosen ? chosen.name : 'Default';
     const finalCampaignId = chosen ? chosen.id : '';
 
+    let firstNodeId = '';
+    if (chosen) {
+      const nodes = (chosen as any).workflow_graph?.nodes || chosen.nodes || [];
+      const edges = (chosen as any).workflow_graph?.edges || chosen.edges || [];
+      const startNode = nodes.find((n: any) => n.data?.nodeType === 'start' || n.type === 'start' || n.type === 'startNode');
+      if (startNode) {
+        const firstEdge = edges.find((e: any) => e.source === startNode.id);
+        firstNodeId = firstEdge ? firstEdge.target : startNode.id;
+      } else if (nodes.length > 0) {
+        firstNodeId = nodes[0].id;
+      }
+    }
+
+    const today = getTodayDateString();
     const updatedLeads = leads.map(l => {
       if (leadIds.includes(l.leadId)) {
         return {
           ...l,
           campaign: campaignName,
-          campaignId: finalCampaignId
+          campaignId: finalCampaignId,
+          currentNodeId: firstNodeId || l.currentNodeId,
+          nodeEnteredDate: firstNodeId ? today : l.nodeEnteredDate
         };
       }
       return l;
@@ -1252,6 +1353,7 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
         isOpen={isSchedulerOpen}
         onClose={() => setIsSchedulerOpen(false)}
         leads={leads}
+        tasks={manualTasks}
         templates={templates}
         settings={settings}
         workflows={workflows}

@@ -195,13 +195,13 @@ export const ManualTasksDashboard: React.FC<ManualTasksDashboardProps> = ({
                 <div className="flex items-start gap-3.5 flex-1 min-w-0">
                   <button
                     onClick={() => onToggleTask(task.id)}
-                    className="mt-0.5 text-slate-400 hover:text-red-600 transition-colors shrink-0"
-                    title={task.isCompleted ? 'Mark as incomplete' : 'Mark as complete'}
+                    className="mt-0.5 text-slate-400 hover:text-emerald-600 transition-colors shrink-0"
+                    title={task.isCompleted ? 'Mark as incomplete' : 'Complete task & advance lead to next stage'}
                   >
                     {task.isCompleted ? (
                       <CheckSquare className="w-5 h-5 text-emerald-600 fill-emerald-100" />
                     ) : (
-                      <Square className="w-5 h-5 text-slate-400 hover:text-slate-600" />
+                      <Square className="w-5 h-5 text-slate-400 hover:text-emerald-600" />
                     )}
                   </button>
 
@@ -262,9 +262,9 @@ export const ManualTasksDashboard: React.FC<ManualTasksDashboardProps> = ({
                         {task.dueDate}
                       </span>
                     </div>
-                    {task.isCompleted && task.completedAt && (
+                    {task.isCompleted && (
                       <span className="text-[10px] text-emerald-600 font-semibold block">
-                        Completed
+                        Completed &bull; Lead Advanced
                       </span>
                     )}
                   </div>

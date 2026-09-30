@@ -85,6 +85,22 @@ export const AddLeadModal: React.FC<AddLeadModalProps> = ({
     const campaignName = chosenCampaign ? chosenCampaign.name : 'Default';
     const campaignId = chosenCampaign ? chosenCampaign.id : '';
 
+    // Find first actionable node of chosen campaign
+    let firstNodeId: string | undefined = undefined;
+    if (chosenCampaign) {
+      const nodes = (chosenCampaign as any).workflow_graph?.nodes || chosenCampaign.nodes || [];
+      const edges = (chosenCampaign as any).workflow_graph?.edges || chosenCampaign.edges || [];
+      const startNode = nodes.find((n: any) => n.data?.nodeType === 'start' || n.type === 'start' || n.type === 'startNode');
+      if (startNode) {
+        const firstEdge = edges.find((e: any) => e.source === startNode.id);
+        firstNodeId = firstEdge ? firstEdge.target : startNode.id;
+      } else if (nodes.length > 0) {
+        firstNodeId = nodes[0].id;
+      }
+    }
+
+    const todayStr = new Date().toISOString().split('T')[0];
+
     const newLead: Lead = {
       leadId: leadId.trim() || `LEAD-${Date.now()}`,
       name: name.trim(),
@@ -98,6 +114,8 @@ export const AddLeadModal: React.FC<AddLeadModalProps> = ({
       lastEmailSentDate: '',
       nextSendDate,
       threadId: '',
+      currentNodeId: firstNodeId,
+      nodeEnteredDate: firstNodeId ? todayStr : undefined,
       notes: notes.trim()
     };
 

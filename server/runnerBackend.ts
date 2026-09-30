@@ -27,6 +27,7 @@ export interface RunnerManualTask {
   id: string;
   leadId: string;
   leadName: string;
+  leadEmail?: string;
   leadCompany: string;
   campaignId: string;
   nodeId: string;
@@ -325,28 +326,59 @@ export async function runDueCampaignsJob(
       // STEP 4: MANUAL TASK NODE
       // --------------------------------------------------------------------
       if (rawNodeType === 'manual_task' || rawNodeType === 'manualTask') {
-        tasksCreated++;
-        logs.push(`Generated Manual Task for ${lead.name}: "${currentNode.data?.label || currentNode.data?.taskTitle || 'Manual Review / Call'}"`);
-
-        // Create task in system
         const localTasks = await loadLocalTasks();
-        const newTask: RunnerManualTask = {
-          id: `task-${Date.now()}-${lead.leadId}`,
-          leadId: lead.leadId,
-          leadName: lead.name,
-          leadCompany: lead.company,
-          campaignId: campaign.id,
-          nodeId: currentNode.id,
-          title: currentNode.data?.taskTitle || currentNode.data?.label || 'Manual Task',
-          instruction: currentNode.data?.taskDescription || 'Review lead profile and follow up',
-          type: currentNode.data?.taskType || 'call',
-          createdAt: new Date().toISOString(),
-          isCompleted: false
-        };
-        localTasks.push(newTask);
-        await saveLocalTasks(localTasks);
+        const existingTask = localTasks.find((t: any) =>
+          (t.leadId === lead.leadId || (t.leadEmail && lead.email && t.leadEmail.toLowerCase() === lead.email.toLowerCase())) &&
+          t.nodeId === currentNode.id
+        );
 
-        // Advance downstream if connected
+        if (!existingTask) {
+          tasksCreated++;
+          const firstName = lead.firstName || lead.name?.split(' ')[0] || lead.name || 'prospect';
+          const rawTitle = currentNode.data?.taskTitle || currentNode.data?.label || 'Call {{first_name}}';
+          const rawDesc = currentNode.data?.taskDescription || 'Direct outreach call regarding {{pain_point}}';
+          const title = rawTitle
+            .replace(/\{\{first_name\}\}/gi, firstName)
+            .replace(/\{\{name\}\}/gi, lead.name || '')
+            .replace(/\{\{company\}\}/gi, lead.company || '')
+            .replace(/\{\{pain_point\}\}/gi, lead.painPoint || '');
+          const instruction = rawDesc
+            .replace(/\{\{first_name\}\}/gi, firstName)
+            .replace(/\{\{name\}\}/gi, lead.name || '')
+            .replace(/\{\{company\}\}/gi, lead.company || '')
+            .replace(/\{\{pain_point\}\}/gi, lead.painPoint || '');
+
+          const newTask: RunnerManualTask = {
+            id: `task-${Date.now()}-${lead.leadId}`,
+            leadId: lead.leadId,
+            leadName: lead.name,
+            leadEmail: lead.email,
+            leadCompany: lead.company,
+            campaignId: campaign.id,
+            nodeId: currentNode.id,
+            title,
+            instruction,
+            type: currentNode.data?.taskType || 'call',
+            createdAt: new Date().toISOString(),
+            isCompleted: false
+          };
+          localTasks.push(newTask);
+          await saveLocalTasks(localTasks);
+
+          lead.currentNodeId = currentNode.id;
+          lead.nodeEnteredDate = todayStr;
+          await updateLead(lead, token, spreadsheetId);
+
+          logs.push(`Generated Manual Task for ${lead.name}: "${title}". Sequence paused until completed in Tasks tab.`);
+          continue; // HALT: Do not send email
+        }
+
+        if (!existingTask.isCompleted) {
+          logs.push(`Waiting for manual task completion: "${existingTask.title}" for ${lead.name}. Sequence paused.`);
+          continue; // HALT: Do not send email
+        }
+
+        // If task is completed: advance downstream!
         const outgoingEdge = edges.find((e: any) => e.source === currentNode.id);
         if (outgoingEdge) {
           const nextNode = nodes.find((n: any) => n.id === outgoingEdge.target);
@@ -354,10 +386,15 @@ export async function runDueCampaignsJob(
             lead.currentNodeId = nextNode.id;
             lead.nodeEnteredDate = todayStr;
             advancedCount++;
+            logs.push(`Manual Task "${existingTask.title}" completed. Advanced ${lead.name} to "${nextNode.data?.label || nextNode.id}".`);
+            await updateLead(lead, token, spreadsheetId);
+            currentNode = nextNode;
+            rawNodeType = currentNode.data?.nodeType || currentNode.type || '';
+            if (rawNodeType.endsWith('Node')) {
+              rawNodeType = rawNodeType.replace('Node', '');
+            }
           }
         }
-        await updateLead(lead, token, spreadsheetId);
-        continue;
       }
 
       // --------------------------------------------------------------------

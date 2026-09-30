@@ -388,6 +388,20 @@ export const ImportLeadsModal: React.FC<ImportLeadsModalProps> = ({
       const nextNum = maxIdNum + 1 + i;
       const leadId = `LEAD-${nextNum}`;
 
+      const matchedCampaign = campaigns.find(w => w.id === c.campaignId || (c.campaign && w.name.toLowerCase() === c.campaign.toLowerCase()));
+      let firstNodeId: string | undefined = undefined;
+      if (matchedCampaign) {
+        const nodes = (matchedCampaign as any).workflow_graph?.nodes || matchedCampaign.nodes || [];
+        const edges = (matchedCampaign as any).workflow_graph?.edges || matchedCampaign.edges || [];
+        const startNode = nodes.find((n: any) => n.data?.nodeType === 'start' || n.type === 'start' || n.type === 'startNode');
+        if (startNode) {
+          const firstEdge = edges.find((e: any) => e.source === startNode.id);
+          firstNodeId = firstEdge ? firstEdge.target : startNode.id;
+        } else if (nodes.length > 0) {
+          firstNodeId = nodes[0].id;
+        }
+      }
+
       return {
         leadId,
         name: c.name,
@@ -407,6 +421,8 @@ export const ImportLeadsModal: React.FC<ImportLeadsModalProps> = ({
         lastEmailSentDate: '',
         nextSendDate: today, // Next send date = today
         threadId: '',
+        currentNodeId: firstNodeId,
+        nodeEnteredDate: firstNodeId ? today : undefined,
         opensCount: 0,
         clicksCount: 0
       };

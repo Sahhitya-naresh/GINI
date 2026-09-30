@@ -2424,24 +2424,43 @@ async function runDueCampaignsJob(targetCampaignId, token, spreadsheetId, userEm
         continue;
       }
       if (rawNodeType === "manual_task" || rawNodeType === "manualTask") {
-        tasksCreated++;
-        logs.push(`Generated Manual Task for ${lead.name}: "${currentNode.data?.label || currentNode.data?.taskTitle || "Manual Review / Call"}"`);
         const localTasks = await loadLocalTasks();
-        const newTask = {
-          id: `task-${Date.now()}-${lead.leadId}`,
-          leadId: lead.leadId,
-          leadName: lead.name,
-          leadCompany: lead.company,
-          campaignId: campaign.id,
-          nodeId: currentNode.id,
-          title: currentNode.data?.taskTitle || currentNode.data?.label || "Manual Task",
-          instruction: currentNode.data?.taskDescription || "Review lead profile and follow up",
-          type: currentNode.data?.taskType || "call",
-          createdAt: (/* @__PURE__ */ new Date()).toISOString(),
-          isCompleted: false
-        };
-        localTasks.push(newTask);
-        await saveLocalTasks(localTasks);
+        const existingTask = localTasks.find(
+          (t) => (t.leadId === lead.leadId || t.leadEmail && lead.email && t.leadEmail.toLowerCase() === lead.email.toLowerCase()) && t.nodeId === currentNode.id
+        );
+        if (!existingTask) {
+          tasksCreated++;
+          const firstName = lead.firstName || lead.name?.split(" ")[0] || lead.name || "prospect";
+          const rawTitle = currentNode.data?.taskTitle || currentNode.data?.label || "Call {{first_name}}";
+          const rawDesc = currentNode.data?.taskDescription || "Direct outreach call regarding {{pain_point}}";
+          const title = rawTitle.replace(/\{\{first_name\}\}/gi, firstName).replace(/\{\{name\}\}/gi, lead.name || "").replace(/\{\{company\}\}/gi, lead.company || "").replace(/\{\{pain_point\}\}/gi, lead.painPoint || "");
+          const instruction = rawDesc.replace(/\{\{first_name\}\}/gi, firstName).replace(/\{\{name\}\}/gi, lead.name || "").replace(/\{\{company\}\}/gi, lead.company || "").replace(/\{\{pain_point\}\}/gi, lead.painPoint || "");
+          const newTask = {
+            id: `task-${Date.now()}-${lead.leadId}`,
+            leadId: lead.leadId,
+            leadName: lead.name,
+            leadEmail: lead.email,
+            leadCompany: lead.company,
+            campaignId: campaign.id,
+            nodeId: currentNode.id,
+            title,
+            instruction,
+            type: currentNode.data?.taskType || "call",
+            createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+            isCompleted: false
+          };
+          localTasks.push(newTask);
+          await saveLocalTasks(localTasks);
+          lead.currentNodeId = currentNode.id;
+          lead.nodeEnteredDate = todayStr;
+          await updateLead(lead, token, spreadsheetId);
+          logs.push(`Generated Manual Task for ${lead.name}: "${title}". Sequence paused until completed in Tasks tab.`);
+          continue;
+        }
+        if (!existingTask.isCompleted) {
+          logs.push(`Waiting for manual task completion: "${existingTask.title}" for ${lead.name}. Sequence paused.`);
+          continue;
+        }
         const outgoingEdge2 = edges.find((e) => e.source === currentNode.id);
         if (outgoingEdge2) {
           const nextNode = nodes.find((n) => n.id === outgoingEdge2.target);
@@ -2449,10 +2468,15 @@ async function runDueCampaignsJob(targetCampaignId, token, spreadsheetId, userEm
             lead.currentNodeId = nextNode.id;
             lead.nodeEnteredDate = todayStr;
             advancedCount++;
+            logs.push(`Manual Task "${existingTask.title}" completed. Advanced ${lead.name} to "${nextNode.data?.label || nextNode.id}".`);
+            await updateLead(lead, token, spreadsheetId);
+            currentNode = nextNode;
+            rawNodeType = currentNode.data?.nodeType || currentNode.type || "";
+            if (rawNodeType.endsWith("Node")) {
+              rawNodeType = rawNodeType.replace("Node", "");
+            }
           }
         }
-        await updateLead(lead, token, spreadsheetId);
-        continue;
       }
       if (rawNodeType === "email") {
         const senderId = startNode?.data?.senderId || currentNode.data?.senderId || currentNode.data?.senderEmail || "sender-primary";
