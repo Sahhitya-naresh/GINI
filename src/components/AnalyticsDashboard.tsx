@@ -28,6 +28,7 @@ import {
   Target,
   ArrowUpRight,
   Sparkles,
+  RefreshCw,
   CheckCircle2,
   Users,
   ExternalLink,
@@ -43,7 +44,7 @@ interface AnalyticsDashboardProps {
   leads: Lead[];
   templates: StageTemplate[];
   trackingEvents?: TrackingEvent[];
-  onRefresh?: () => void;
+  onRefresh?: () => Promise<void> | void;
   onNavigateToLeads?: (campaignName?: string) => void;
 }
 
@@ -62,6 +63,17 @@ export const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({
   const [campaignSearchQuery, setCampaignSearchQuery] = useState<string>('');
   const [dateRange, setDateRange] = useState<'all' | '7d' | '30d' | '90d'>('all');
   const [campaignSortField, setCampaignSortField] = useState<'replyRate' | 'openRate' | 'total' | 'replied'>('replyRate');
+  const [isRefreshing, setIsRefreshing] = useState(false);
+
+  const handleRefreshClick = async () => {
+    if (!onRefresh || isRefreshing) return;
+    setIsRefreshing(true);
+    try {
+      await onRefresh();
+    } finally {
+      setIsRefreshing(false);
+    }
+  };
 
   // Discover all unique campaigns from leads
   const availableCampaigns = useMemo(() => {
@@ -479,27 +491,21 @@ export const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({
           {/* Quick Refresh action */}
           {onRefresh && (
             <button
-              onClick={onRefresh}
-              className="text-xs text-red-600 hover:text-red-800 font-semibold flex items-center gap-1 px-2.5 py-1 rounded-lg hover:bg-red-50 border border-transparent hover:border-red-200 transition-colors"
-              title="Sync latest tracking counts from server"
+              id="refresh-analytics-metrics-btn"
+              type="button"
+              onClick={handleRefreshClick}
+              disabled={isRefreshing}
+              className={`text-xs font-semibold flex items-center gap-1.5 px-3 py-1.5 rounded-lg border transition-all ${
+                isRefreshing
+                  ? 'bg-slate-100 text-slate-400 border-slate-200 cursor-not-allowed'
+                  : 'text-red-700 bg-red-50/70 hover:bg-red-100/80 border-red-200 hover:border-red-300 shadow-2xs active:scale-98'
+              }`}
+              title="Sync latest leads and tracking metrics from MongoDB"
             >
-              <Sparkles className="w-3.5 h-3.5 text-red-600" />
-              <span>Refresh Metrics</span>
+              <RefreshCw className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin text-slate-400' : 'text-red-600'}`} />
+              <span>{isRefreshing ? 'Refreshing Metrics...' : 'Refresh Metrics'}</span>
             </button>
           )}
-        </div>
-
-        {/* Caveat Banner for Open Tracking */}
-        <div className="p-3 bg-amber-50/80 border border-amber-200/80 rounded-xl flex items-start gap-2.5 text-xs text-amber-900">
-          <Info className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
-          <div className="text-amber-800 text-[11px] leading-relaxed space-y-1">
-            <p>
-              <strong className="font-semibold text-amber-900">Tracking requires a public deployment:</strong> In the AI Studio development sandbox, external email clients (e.g. Gmail image proxy, Apple Mail) cannot reach tracking endpoints due to authentication/cookie checks. Deploy publicly to Cloud Run to capture live external opens and clicks.
-            </p>
-            <p className="text-amber-700 text-[10.5px]">
-              <strong>Notice on Privacy Proxies:</strong> In production, open counts leverage a 1×1 transparent pixel. Systems like Apple Mail Privacy Protection prefetch images registering proxy opens, while click events and direct replies are 100% verified.
-            </p>
-          </div>
         </div>
       </div>
 

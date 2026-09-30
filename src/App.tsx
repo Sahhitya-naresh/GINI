@@ -837,7 +837,7 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
 }
 
   // 2. Sync Leads & Metrics with MongoDB Backend
-  const syncData = useCallback(async () => {
+  const syncData = useCallback(async (options?: { silent?: boolean; customToast?: string }) => {
     setIsSyncing(true);
     try {
       const rawBackendLeads = await fetchLeadsFromBackend();
@@ -881,12 +881,16 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
           });
         }
 
-        showToast(`Synced ${finalLeads.length} leads from MongoDB!`, 'success');
+        if (!options?.silent) {
+          showToast(options?.customToast || `Synced ${finalLeads.length} leads from MongoDB!`, 'success');
+        }
       } else {
         setLeads([]);
         setSelectedLead(null);
         setTrackingEvents([]);
-        showToast('MongoDB connected. No leads found.', 'info');
+        if (!options?.silent) {
+          showToast('MongoDB connected. No leads found.', 'info');
+        }
       }
 
       // Sync manual tasks from MongoDB backend
@@ -913,6 +917,10 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
   // Initial load from MongoDB backend
   useEffect(() => {
     syncData();
+  }, [syncData]);
+
+  const handleRefreshAnalytics = useCallback(async () => {
+    await syncData({ customToast: 'Analytics metrics and tracking data refreshed successfully!' });
   }, [syncData]);
 
   // Template changes
@@ -1595,7 +1603,7 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
             leads={leads}
             templates={templates}
             trackingEvents={trackingEvents}
-            onRefresh={syncTrackingMetrics}
+            onRefresh={handleRefreshAnalytics}
             onNavigateToLeads={(campaignName) => {
               if (campaignName) {
                 setLeadsCampaignFilter(campaignName);

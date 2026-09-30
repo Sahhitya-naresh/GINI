@@ -639,13 +639,6 @@ export const LeadDetailModal: React.FC<LeadDetailModalProps> = ({
                   </div>
                 )}
               </div>
-
-              <div className="p-2 bg-amber-50/70 border border-amber-200/70 rounded-lg flex items-start gap-1.5 text-[10.5px] text-amber-800 mt-2">
-                <Info className="w-3.5 h-3.5 text-amber-600 shrink-0 mt-0.5" />
-                <p>
-                  <strong>Tracking requires a public deployment:</strong> In the AI Studio sandbox, external email clients cannot load tracking pixels or redirects due to auth/cookie barriers. Deploy publicly to Cloud Run for live recipient tracking.
-                </p>
-              </div>
             </div>
 
             {/* Timing & Scheduling Card */}

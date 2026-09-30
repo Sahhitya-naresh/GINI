@@ -451,7 +451,7 @@ export const LeadsTable: React.FC<LeadsTableProps> = ({
                     <span>Engagement</span>
                     <span
                       className="cursor-help text-slate-400 hover:text-slate-600 transition-colors"
-                      title="Tracking requires a public deployment to receive external opens/clicks (sandbox requires auth/cookie check)."
+                      title="Live recipient engagement metrics for email opens and link clicks."
                     >
                       <Info className="w-3 h-3 text-slate-400" />
                     </span>
