@@ -235,6 +235,20 @@ const INITIAL_FALLBACK_LEADS: Lead[] = [
   }
 ];
 
+const loadDismissedReplyAlerts = (): Set<string> => {
+  try {
+    const raw = sessionStorage.getItem('outreach_dismissed_reply_alerts');
+    if (raw) return new Set(JSON.parse(raw));
+  } catch (_) {}
+  return new Set();
+};
+
+const saveDismissedReplyAlerts = (keys: Set<string>) => {
+  try {
+    sessionStorage.setItem('outreach_dismissed_reply_alerts', JSON.stringify([...keys]));
+  } catch (_) {}
+};
+
 export default function App() {
   // Service account mailbox state
   const [userEmail, setUserEmail] = useState<string>('');
@@ -267,6 +281,42 @@ export default function App() {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isBannerDismissed, setIsBannerDismissed] = useState(false);
   const [replyAlertLeads, setReplyAlertLeads] = useState<Lead[]>([]);
+  const dismissedReplyAlertsRef = useRef<Set<string>>(loadDismissedReplyAlerts());
+
+  const handleDismissReplyAlerts = useCallback((leadsToDismiss: Lead[]) => {
+    if (leadsToDismiss.length === 0) return;
+
+    for (const l of leadsToDismiss) {
+      if (l.leadId) dismissedReplyAlertsRef.current.add(l.leadId);
+      if (l.email) dismissedReplyAlertsRef.current.add(l.email.toLowerCase());
+    }
+    saveDismissedReplyAlerts(dismissedReplyAlertsRef.current);
+
+    const dismissIds = new Set(leadsToDismiss.map(l => l.leadId || l.email?.toLowerCase()));
+    setLeads(prev => prev.map(l =>
+      (dismissIds.has(l.leadId) || (l.email && dismissIds.has(l.email.toLowerCase())))
+        ? { ...l, hasUnreadReply: false }
+        : l
+    ));
+
+    for (const l of leadsToDismiss) {
+      fetch('/api/leads/mark-reply-read', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ leadId: l.leadId, email: l.email })
+      }).catch(() => {});
+    }
+
+    setReplyAlertLeads([]);
+  }, []);
+
+  const handleSelectLead = useCallback((lead: Lead) => {
+    setSelectedLead(lead);
+    setIsLeadDetailOpen(true);
+    if ((lead as any).hasUnreadReply) {
+      handleDismissReplyAlerts([lead]);
+    }
+  }, [handleDismissReplyAlerts]);
 
   // Workflow Builder & Senders State
   const [workflows, setWorkflows] = useState<CampaignWorkflow[]>(() => {
@@ -814,12 +864,14 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
           return match || prev;
         });
 
-        // Trigger ReplyAlertModal popup for any leads with newly detected or unread replies
+        // Trigger ReplyAlertModal popup for any leads with newly detected or unread replies that haven't been dismissed
         const newlyReplied = finalLeads.filter(b =>
           b.status === 'Replied' && (
             Boolean((b as any).hasUnreadReply) ||
-            !leadsRef.current.some(prev => prev.leadId === b.leadId && prev.status === 'Replied')
-          )
+            (leadsRef.current.length > 0 && !leadsRef.current.some(prev => prev.leadId === b.leadId && prev.status === 'Replied'))
+          ) &&
+          !dismissedReplyAlertsRef.current.has(b.leadId) &&
+          (!b.email || !dismissedReplyAlertsRef.current.has(b.email.toLowerCase()))
         );
         if (newlyReplied.length > 0) {
           setReplyAlertLeads(prev => {
@@ -1003,6 +1055,11 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
           body: JSON.stringify({ leadId: lead.leadId, email: lead.email })
         }).catch(() => {});
 
+        // Clean up from dismissed reply alerts set as well
+        if (lead.leadId) dismissedReplyAlertsRef.current.delete(lead.leadId);
+        if (lead.email) dismissedReplyAlertsRef.current.delete(lead.email.toLowerCase());
+        saveDismissedReplyAlerts(dismissedReplyAlertsRef.current);
+
         showToast(`Lead ${lead.name} deleted successfully!`, 'success');
       }
     } catch (e: any) {
@@ -1061,11 +1118,17 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
         setLeads(prev => prev.map(l => l.leadId === savedLead.leadId ? savedLead : l));
         setSelectedLead(prev => prev && prev.leadId === savedLead.leadId ? savedLead : prev);
 
-        // Trigger ReplyAlertModal popup for this newly detected reply
-        setReplyAlertLeads(prev => {
-          const exists = prev.some(l => l.leadId === savedLead.leadId || (savedLead.email && l.email?.toLowerCase() === savedLead.email.toLowerCase()));
-          return exists ? prev : [...prev, savedLead];
-        });
+        // Trigger ReplyAlertModal popup for this newly detected reply if not dismissed
+        const isDismissed =
+          dismissedReplyAlertsRef.current.has(savedLead.leadId) ||
+          (Boolean(savedLead.email) && dismissedReplyAlertsRef.current.has(savedLead.email.toLowerCase()));
+
+        if (!isDismissed) {
+          setReplyAlertLeads(prev => {
+            const exists = prev.some(l => l.leadId === savedLead.leadId || (savedLead.email && l.email?.toLowerCase() === savedLead.email.toLowerCase()));
+            return exists ? prev : [...prev, savedLead];
+          });
+        }
 
         showToast(`Reply detected from ${targetLead.name}! Sequence stopped.`, 'success');
         return res;
@@ -1146,11 +1209,17 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
       }
 
       if (newlyReplied.length > 0) {
-        setReplyAlertLeads(prev => {
-          const existingIds = new Set(prev.map(l => l.leadId || l.email?.toLowerCase()));
-          const fresh = newlyReplied.filter(l => !existingIds.has(l.leadId || l.email?.toLowerCase()));
-          return fresh.length > 0 ? [...prev, ...fresh] : prev;
-        });
+        const freshToAlert = newlyReplied.filter(l =>
+          !dismissedReplyAlertsRef.current.has(l.leadId) &&
+          (!l.email || !dismissedReplyAlertsRef.current.has(l.email.toLowerCase()))
+        );
+        if (freshToAlert.length > 0) {
+          setReplyAlertLeads(prev => {
+            const existingIds = new Set(prev.map(l => l.leadId || l.email?.toLowerCase()));
+            const fresh = freshToAlert.filter(l => !existingIds.has(l.leadId || l.email?.toLowerCase()));
+            return fresh.length > 0 ? [...prev, ...fresh] : prev;
+          });
+        }
       }
     } catch (err) {
       console.error('Background reply check error:', err);
@@ -1463,10 +1532,7 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
             campaigns={workflows}
             onBulkAssignCampaign={handleBulkAssignCampaign}
             initialCampaignFilter={leadsCampaignFilter}
-            onSelectLead={(lead) => {
-              setSelectedLead(lead);
-              setIsLeadDetailOpen(true);
-            }}
+            onSelectLead={handleSelectLead}
             onTogglePause={handleTogglePause}
             onSendNextStage={handleInitiateSendNextStage}
             onDeleteLead={handleDeleteLead}
@@ -1483,10 +1549,7 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
         {currentTab === 'replied' && (
           <NeedsManualReplyView
             leads={leads}
-            onSelectLead={(lead) => {
-              setSelectedLead(lead);
-              setIsLeadDetailOpen(true);
-            }}
+            onSelectLead={handleSelectLead}
             onUpdateStatus={handleUpdateLeadStatus}
           />
         )}
@@ -1512,10 +1575,7 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
           <ManualTasksDashboard
             tasks={manualTasks}
             onToggleTask={handleToggleManualTask}
-            onSelectLead={(lead) => {
-              setSelectedLead(lead);
-              setIsLeadDetailOpen(true);
-            }}
+            onSelectLead={handleSelectLead}
             leads={leads}
           />
         )}
@@ -1689,11 +1749,11 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
       <ReplyAlertModal
         isOpen={replyAlertLeads.length > 0}
         leads={replyAlertLeads}
-        onClose={() => setReplyAlertLeads([])}
+        onClose={() => handleDismissReplyAlerts(replyAlertLeads)}
         onOpenLead={(targetLead) => {
           setSelectedLead(targetLead);
           setIsLeadDetailOpen(true);
-          setReplyAlertLeads([]);
+          handleDismissReplyAlerts([targetLead, ...replyAlertLeads]);
         }}
       />
     </div>

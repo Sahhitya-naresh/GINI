@@ -3061,6 +3061,26 @@ app.post("/api/leads/update", async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 });
+app.post("/api/leads/mark-reply-read", async (req, res) => {
+  try {
+    const { leadId, email } = req.body;
+    const db = await getDb();
+    const filters = [];
+    if (leadId) filters.push({ leadId: leadId.trim() });
+    if (email) filters.push({ email: { $regex: `^${email.trim()}$`, $options: "i" } });
+    if (filters.length === 0) {
+      return res.status(400).json({ success: false, error: "leadId or email is required" });
+    }
+    await db.collection(COLLECTIONS.LEADS).updateMany(
+      { $or: filters },
+      { $set: { hasUnreadReply: false, updatedAt: (/* @__PURE__ */ new Date()).toISOString() } }
+    );
+    res.json({ success: true, message: "Marked reply as read" });
+  } catch (err) {
+    console.error("API /api/leads/mark-reply-read error:", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
 app.post("/api/leads/batch", async (req, res) => {
   try {
     const leadsData = req.body.leads;
