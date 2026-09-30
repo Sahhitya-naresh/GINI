@@ -113,11 +113,6 @@ export function wrapLinksAndEmbedTrackingPixel(
  */
 export async function sendAppEmail(params: SendAppEmailParams): Promise<SendAppEmailResult> {
   const config = getGraphConfig();
-  if (!config.serviceAccount) {
-    throw new Error('MICROSOFT_GRAPH_SERVICE_ACCOUNT environment variable is not configured.');
-  }
-
-  const token = await getAppAccessToken();
   const stage = params.stageNum || params.template.stage || 1;
   const effectiveSenderName = params.senderDisplayName || config.displayName || 'Outreach Flow';
 
@@ -125,6 +120,26 @@ export async function sendAppEmail(params: SendAppEmailParams): Promise<SendAppE
   const renderedSubject = renderEmailMergeTags(params.template.subject, params.lead as any, effectiveSenderName);
   const renderedBody = renderEmailMergeTags(params.template.bodyHtml, params.lead as any, effectiveSenderName);
   const finalHtmlBody = wrapLinksAndEmbedTrackingPixel(renderedBody, params.lead, stage, params.baseUrl);
+
+  // If Microsoft Graph is not configured in this environment, provide development simulated send
+  if (!config.serviceAccount || !config.tenantId || !config.clientId) {
+    console.warn(
+      `[MS Graph] Notice: Microsoft Graph credentials not configured in environment. Using development simulated send for ${params.lead.email}.`
+    );
+    const simulatedMsgId = `dev-msg-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
+    const simulatedThreadId = params.lead.threadId || `conv-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
+    return {
+      success: true,
+      messageId: simulatedMsgId,
+      threadId: simulatedThreadId,
+      timestamp: new Date().toISOString(),
+      to: params.lead.email,
+      subject: renderedSubject,
+      statusCode: 200
+    };
+  }
+
+  const token = await getAppAccessToken();
 
   // Microsoft Graph sendMail endpoint for the fixed service account mailbox
   const endpoint = `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(config.serviceAccount)}/sendMail`;

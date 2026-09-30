@@ -13,14 +13,15 @@ import {
   Search, 
   Filter, 
   ExternalLink,
-  ChevronRight
+  ChevronRight,
+  Loader2
 } from 'lucide-react';
 import { LeadManualTask, Lead } from '../types';
 import { getTodayDateString } from '../utils/dateUtils';
 
 interface ManualTasksDashboardProps {
   tasks: LeadManualTask[];
-  onToggleTask: (taskId: string) => void;
+  onToggleTask: (taskId: string) => void | Promise<void>;
   onSelectLead: (lead: Lead) => void;
   leads: Lead[];
 }
@@ -34,6 +35,7 @@ export const ManualTasksDashboard: React.FC<ManualTasksDashboardProps> = ({
   const [filterStatus, setFilterStatus] = useState<'all' | 'pending' | 'completed'>('pending');
   const [priorityFilter, setPriorityFilter] = useState<'all' | 'high' | 'medium' | 'low'>('all');
   const [searchQuery, setSearchQuery] = useState('');
+  const [togglingTaskId, setTogglingTaskId] = useState<string | null>(null);
 
   const today = getTodayDateString();
 
@@ -194,11 +196,28 @@ export const ManualTasksDashboard: React.FC<ManualTasksDashboardProps> = ({
                 {/* Checkbox & Details */}
                 <div className="flex items-start gap-3.5 flex-1 min-w-0">
                   <button
-                    onClick={() => onToggleTask(task.id)}
-                    className="mt-0.5 text-slate-400 hover:text-emerald-600 transition-colors shrink-0"
-                    title={task.isCompleted ? 'Mark as incomplete' : 'Complete task & advance lead to next stage'}
+                    disabled={togglingTaskId === task.id}
+                    onClick={async () => {
+                      if (togglingTaskId) return;
+                      setTogglingTaskId(task.id);
+                      try {
+                        await onToggleTask(task.id);
+                      } finally {
+                        setTogglingTaskId(null);
+                      }
+                    }}
+                    className={`mt-0.5 transition-colors shrink-0 ${
+                      togglingTaskId === task.id ? 'opacity-70 cursor-wait' : 'text-slate-400 hover:text-emerald-600'
+                    }`}
+                    title={
+                      task.isCompleted
+                        ? 'Mark as incomplete'
+                        : 'Complete task & dispatch email / advance workflow'
+                    }
                   >
-                    {task.isCompleted ? (
+                    {togglingTaskId === task.id ? (
+                      <Loader2 className="w-5 h-5 text-emerald-600 animate-spin" />
+                    ) : task.isCompleted ? (
                       <CheckSquare className="w-5 h-5 text-emerald-600 fill-emerald-100" />
                     ) : (
                       <Square className="w-5 h-5 text-slate-400 hover:text-emerald-600" />

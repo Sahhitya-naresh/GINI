@@ -515,11 +515,137 @@ export default function App() {
           const nextNode = assignedWorkflow.nodes?.find(n => n.id === outgoingEdge.target);
           if (nextNode) {
             const today = getTodayDateString();
+            const nodeType = (nextNode.data?.nodeType || nextNode.type || '').replace('Node', '');
+
+            // CASE 1: Wait Node (e.g. Task -> Wait -> Email)
+            if (nodeType === 'wait') {
+              const waitDuration = nextNode.data?.waitDuration ?? nextNode.data?.waitDays ?? 1;
+              const scheduledDate = addBusinessDays(today, waitDuration);
+              const updatedLead: Lead = {
+                ...targetLead,
+                currentNodeId: nextNode.id,
+                nodeEnteredDate: today,
+                nextSendDate: scheduledDate,
+                status: 'Active'
+              };
+              await handleUpdateLead(updatedLead);
+              showToast(`Task completed! Lead "${targetLead.name}" moved to "${nextNode.data?.label || 'Wait'}" (scheduled for ${scheduledDate}).`, 'success');
+              return;
+            }
+
+            // CASE 2: Another Manual Task Node (e.g. Task 1 -> Task 2)
+            if (nodeType === 'manual_task' || nodeType === 'manualTask') {
+              const updatedLead: Lead = {
+                ...targetLead,
+                currentNodeId: nextNode.id,
+                nodeEnteredDate: today,
+                nextSendDate: today,
+                status: 'Active'
+              };
+              await handleUpdateLead(updatedLead);
+              showToast(`Task completed! Lead "${targetLead.name}" moved to next task "${nextNode.data?.label || nextNode.id}".`, 'success');
+              return;
+            }
+
+            // CASE 3: Direct Email Node without Delay (e.g. Task -> Email)
+            if (nodeType === 'email') {
+              // Resolve sender account
+              const startNode = assignedWorkflow.nodes?.find(n => n.type === 'startNode' || n.data?.nodeType === 'start');
+              const senderId = startNode?.data?.senderId || nextNode.data?.senderId || 'sender-primary';
+              const senderObj = senders.find(s => s.id === senderId || s.email === senderId) || senders.find(s => s.isPrimary) || senders[0];
+              const effectiveSenderName = senderObj?.name || settings.senderName;
+
+              // Resolve stage template & custom body/subject if configured
+              const nextStageNum = nextNode.data?.templateStage || (targetLead.currentStage ? targetLead.currentStage + 1 : 1);
+              let stageTemplate = templates.find(t => t.stage === nextStageNum) || templates[0];
+              if (nextNode.data?.useCustomTemplate && nextNode.data?.customSubject) {
+                stageTemplate = {
+                  stage: nextStageNum,
+                  name: nextNode.data.label || `Stage ${nextStageNum}`,
+                  purpose: 'Campaign workflow step',
+                  defaultGapDays: 3,
+                  subject: nextNode.data.customSubject,
+                  bodyHtml: (nextNode.data.customBody || '').replace(/\n/g, '<br/>')
+                };
+              }
+
+              // Check downstream from this email node to schedule future stage or completion
+              const emailOutgoingEdge = assignedWorkflow.edges?.find(e => e.source === nextNode.id);
+              const downstreamNode = emailOutgoingEdge ? assignedWorkflow.nodes?.find(n => n.id === emailOutgoingEdge.target) : null;
+              
+              let nextNodeId: string | undefined = undefined;
+              let nextSendDate = '';
+
+              if (downstreamNode) {
+                const downstreamType = (downstreamNode.data?.nodeType || downstreamNode.type || '').replace('Node', '');
+                if (downstreamType === 'wait') {
+                  const waitDuration = downstreamNode.data?.waitDuration ?? downstreamNode.data?.waitDays ?? 1;
+                  nextNodeId = downstreamNode.id;
+                  nextSendDate = addBusinessDays(today, waitDuration);
+                } else {
+                  nextNodeId = downstreamNode.id;
+                  const gapDays = settings.stageGapDays[nextStageNum] || stageTemplate.defaultGapDays || 3;
+                  nextSendDate = addBusinessDays(today, gapDays);
+                }
+              } else {
+                const workflowEmailNodes = assignedWorkflow.nodes?.filter(n => (n.data?.nodeType || n.type || '').includes('email')) || [];
+                const maxStages = workflowEmailNodes.length > 0 ? workflowEmailNodes.length : 7;
+                const gapDays = settings.stageGapDays[nextStageNum] || stageTemplate.defaultGapDays || 3;
+                nextSendDate = nextStageNum < maxStages ? addBusinessDays(today, gapDays) : '';
+              }
+
+              try {
+                showToast(`Task completed! Dispatching Stage ${nextStageNum} email to ${targetLead.name}...`, 'info');
+                const sendResult = await sendStageEmail(
+                  null,
+                  targetLead,
+                  stageTemplate,
+                  userEmail,
+                  effectiveSenderName,
+                  undefined,
+                  senderObj?.provider || 'outlook'
+                );
+
+                const isCompleted = !downstreamNode && nextStageNum >= (assignedWorkflow.nodes?.filter(n => (n.data?.nodeType || n.type || '').includes('email')).length || 1);
+
+                const updatedLead: Lead = {
+                  ...targetLead,
+                  currentStage: nextStageNum,
+                  currentNodeId: nextNodeId,
+                  campaignId: assignedWorkflow.id,
+                  campaign: assignedWorkflow.name || targetLead.campaign,
+                  senderUsed: senderObj?.email || userEmail,
+                  nodeEnteredDate: today,
+                  threadId: sendResult.threadId || targetLead.threadId,
+                  lastEmailSentDate: today,
+                  nextSendDate: nextSendDate,
+                  status: isCompleted ? 'Completed' : 'Active'
+                };
+
+                await handleUpdateLead(updatedLead);
+                showToast(`Task completed & Stage ${nextStageNum} email sent to "${targetLead.name}" (${targetLead.email})!`, 'success');
+                return;
+              } catch (sendErr: any) {
+                console.error('Failed to send stage email on task completion:', sendErr);
+                const updatedLead: Lead = {
+                  ...targetLead,
+                  currentNodeId: nextNode.id,
+                  nodeEnteredDate: today,
+                  nextSendDate: today,
+                  status: 'Active'
+                };
+                await handleUpdateLead(updatedLead);
+                showToast(`Task completed, but email failed: ${sendErr?.message || sendErr}`, 'error');
+                return;
+              }
+            }
+
+            // DEFAULT: Advance to node
             const updatedLead: Lead = {
               ...targetLead,
               currentNodeId: nextNode.id,
               nodeEnteredDate: today,
-              nextSendDate: today, // Immediately due for next node send/processing
+              nextSendDate: today,
               status: 'Active'
             };
 

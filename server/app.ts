@@ -17,6 +17,7 @@ import {
   loadLocalTasks,
   saveLocalTasks,
   updateLocalTask,
+  deleteLocalTask,
   loadTrackingEvents,
   recordTrackingEvent,
   clearAllTrackingEvents,
@@ -699,6 +700,19 @@ app.post('/api/tasks/update', async (req, res) => {
     const { taskId, updates } = req.body;
     const task = await updateLocalTask(taskId, updates);
     res.json({ success: true, task });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post('/api/tasks/delete', async (req, res) => {
+  try {
+    const { taskId } = req.body;
+    if (!taskId) {
+      return res.status(400).json({ success: false, error: 'Missing taskId' });
+    }
+    const deleted = await deleteLocalTask(taskId);
+    res.json({ success: true, deleted });
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });
   }

@@ -274,6 +274,14 @@ export async function deleteLead(leadId: string): Promise<boolean> {
   const db = await getDb();
   const col = db.collection(COLLECTIONS.LEADS);
   const result = await col.deleteOne({ leadId: leadId.trim() });
+  try {
+    await db.collection(COLLECTIONS.TASKS).deleteMany({ 
+      $or: [
+        { leadId: leadId.trim() },
+        { id: `task-${leadId.trim()}` }
+      ]
+    });
+  } catch (_) {}
   return result.deletedCount > 0;
 }
 
@@ -547,6 +555,13 @@ export async function updateLocalTask(taskId: string, updates: Partial<BackendTa
   await col.updateOne({ id: taskId }, { $set: updates });
   const updated = await col.findOne({ id: taskId }, { projection: { _id: 0 } });
   return updated;
+}
+
+export async function deleteLocalTask(taskId: string): Promise<boolean> {
+  const db = await getDb();
+  const col = db.collection<BackendTask>(COLLECTIONS.TASKS);
+  const result = await col.deleteOne({ id: taskId });
+  return result.deletedCount > 0;
 }
 
 // ---------------------------------------------------------------------------
