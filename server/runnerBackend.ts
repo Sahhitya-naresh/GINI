@@ -490,12 +490,16 @@ export async function runDueCampaignsJob(
             );
           } else {
             lead.status = 'Completed';
+            lead.nextSendDate = '';
+            lead.currentNodeId = undefined;
             logs.push(
               `Dispatched Email Stage ${stageNum} to ${lead.name} (${lead.email}). End of sequence reached; marked "Completed".`
             );
           }
         } else {
           lead.status = 'Completed';
+          lead.nextSendDate = '';
+          lead.currentNodeId = undefined;
           logs.push(
             `Dispatched Email Stage ${stageNum} to ${lead.name} (${lead.email}). End of sequence reached; marked "Completed".`
           );

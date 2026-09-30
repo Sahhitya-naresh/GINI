@@ -561,17 +561,18 @@ export const CampaignSchedulerModal: React.FC<CampaignSchedulerModalProps> = ({
           senderObj.sendsToday = (senderObj.sendsToday || 0) + 1;
         }
 
-        const newNextSendDate = nextStageNum < maxWorkflowStages ? addBusinessDays(today, gapDays) : '';
-
         // Find next downstream node in the workflow graph
         const outgoingEdge = assignedWorkflow?.edges?.find(e => e.source === (currentNode?.id || ''));
         const nextDownstream = outgoingEdge ? assignedWorkflow?.nodes?.find(n => n.id === outgoingEdge.target) : null;
         const nextNodeId = nextDownstream ? nextDownstream.id : (assignedWorkflow ? `node-email-${nextStageNum}` : undefined);
 
+        const isCompleted = !nextDownstream && nextStageNum >= maxWorkflowStages;
+        const newNextSendDate = isCompleted ? '' : (nextStageNum < maxWorkflowStages ? addBusinessDays(today, gapDays) : '');
+
         const updatedLead: Lead = {
           ...targetLead,
           currentStage: nextStageNum,
-          currentNodeId: nextNodeId,
+          currentNodeId: isCompleted ? undefined : nextNodeId,
           campaignId: assignedWorkflow?.id,
           campaign: assignedWorkflow?.name || targetLead.campaign,
           senderUsed: senderObj?.email || userEmail,
@@ -579,7 +580,7 @@ export const CampaignSchedulerModal: React.FC<CampaignSchedulerModalProps> = ({
           threadId: sendResult.threadId,
           lastEmailSentDate: today,
           nextSendDate: newNextSendDate,
-          status: 'Active'
+          status: isCompleted ? 'Completed' : 'Active'
         };
 
         // If next downstream node is a manual task, create it immediately!

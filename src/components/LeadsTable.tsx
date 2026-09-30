@@ -192,13 +192,29 @@ export const LeadsTable: React.FC<LeadsTableProps> = ({
       case 'Broke Up':
         return <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold bg-slate-100 text-slate-600 border border-slate-200">Broke Up</span>;
       case 'Completed':
-        return <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold bg-slate-100 text-slate-700 border border-slate-200">Completed</span>;
+        return <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">Completed</span>;
       default:
         return <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-slate-100 text-slate-700">{status}</span>;
     }
   };
 
-  const renderStageBadge = (stage: number) => {
+  const renderStageBadge = (stage: number, status?: Lead['status']) => {
+    if (status === 'Completed') {
+      return (
+        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">
+          <CheckCircle2 className="w-3 h-3 text-emerald-600" />
+          <span>Stage {stage}: Completed</span>
+        </span>
+      );
+    }
+    if (status === 'Replied') {
+      return (
+        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-semibold bg-purple-50 text-purple-700 border border-purple-200">
+          <CheckCircle2 className="w-3 h-3 text-purple-600" />
+          <span>Stage {stage}: Replied</span>
+        </span>
+      );
+    }
     if (stage === 0) {
       return (
         <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-medium bg-slate-100 text-slate-600 border border-slate-200">
@@ -473,7 +489,13 @@ export const LeadsTable: React.FC<LeadsTableProps> = ({
                 filteredLeads.map((lead, idx) => {
                   const isDue = lead.status === 'Active' && isLeadDueForNextSend(lead.nextSendDate);
                   const isReplied = lead.status === 'Replied';
+                  const isCompleted = lead.status === 'Completed';
+
+                  const assignedCampaign = campaigns.find(w => w.id === lead.campaignId || (lead.campaign && w.name.toLowerCase() === lead.campaign.toLowerCase()));
+                  const emailNodes = assignedCampaign ? (assignedCampaign.nodes || (assignedCampaign as any).workflow_graph?.nodes || []).filter((n: any) => n.type === 'emailNode' || n.data?.nodeType === 'email') : [];
+                  const maxStages = assignedCampaign && emailNodes.length > 0 ? emailNodes.length : (assignedCampaign ? 0 : 7);
                   const nextStageNum = lead.currentStage + 1;
+                  const hasMoreStages = nextStageNum <= maxStages && !isCompleted && !isReplied && lead.status !== 'Broke Up';
 
                   return (
                     <tr
@@ -540,8 +562,8 @@ export const LeadsTable: React.FC<LeadsTableProps> = ({
 
                       {/* Current Stage */}
                       <td className="py-3.5 px-4">
-                        {renderStageBadge(lead.currentStage)}
-                        {lead.currentNodeId && (
+                        {renderStageBadge(lead.currentStage, lead.status)}
+                        {lead.currentNodeId && lead.status !== 'Completed' && lead.status !== 'Replied' && (
                           <div className="text-[10px] font-mono text-slate-500 mt-1 flex items-center gap-1">
                             <span className="w-1.5 h-1.5 rounded-full bg-red-500 shrink-0"></span>
                             <span className="truncate max-w-[100px]" title={`Current Workflow Node: ${lead.currentNodeId}`}>
@@ -643,7 +665,7 @@ export const LeadsTable: React.FC<LeadsTableProps> = ({
                           </button>
 
                           {/* Trigger Next Stage Send Button */}
-                          {nextStageNum <= 7 && lead.status !== 'Replied' && lead.status !== 'Broke Up' && (
+                          {hasMoreStages && (
                             <button
                               onClick={() => onSendNextStage(lead)}
                               disabled={lead.status === 'Paused'}

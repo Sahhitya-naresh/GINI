@@ -1292,22 +1292,42 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
   };
 
   const startSendConfirmation = (lead: Lead) => {
-    const nextStageNum = lead.currentStage + 1;
-    if (nextStageNum > 7) {
-      showToast('Lead has already completed all 7 stages.', 'info');
+    if (lead.status === 'Completed') {
+      showToast(`Campaign sequence is already completed for ${lead.name}.`, 'info');
+      return;
+    }
+    if (lead.status === 'Replied') {
+      showToast(`Sequence is stopped because ${lead.name} replied.`, 'info');
+      return;
+    }
+    if (lead.status === 'Broke Up') {
+      showToast(`Sequence is closed for ${lead.name} (Broke Up).`, 'info');
       return;
     }
 
     // Resolve campaign template and sender
     const campaign = workflows.find(w => w.id === lead.campaignId || (lead.campaign && w.name.toLowerCase() === lead.campaign.toLowerCase()));
+    const nodes = (campaign as any)?.workflow_graph?.nodes || (campaign as any)?.nodes || [];
+    const emailNodes = nodes.filter((n: any) => n.data?.nodeType === 'email' || n.type === 'email' || n.type === 'emailNode');
+    const maxStages = campaign && emailNodes.length > 0 ? emailNodes.length : (campaign ? 0 : 7);
+
+    const nextStageNum = lead.currentStage + 1;
+    if (nextStageNum > maxStages) {
+      showToast(`Lead ${lead.name} has already completed all ${maxStages} stage${maxStages > 1 ? 's' : ''} for this campaign.`, 'info');
+      return;
+    }
+
     let template = templates.find(t => t.stage === nextStageNum) || templates[0];
     let customSenderName = settings.senderName;
 
     if (campaign) {
-      const nodes = (campaign as any).workflow_graph?.nodes || (campaign as any).nodes || [];
       const startNode = nodes.find((n: any) => n.data?.nodeType === 'start' || n.type === 'start' || n.type === 'startNode');
-      const emailNodes = nodes.filter((n: any) => n.data?.nodeType === 'email' || n.type === 'email' || n.type === 'emailNode');
-      const emailNode = emailNodes.find((n: any) => n.data?.templateStage === nextStageNum) || emailNodes[0];
+      const emailNode = emailNodes.find((n: any) => n.data?.templateStage === nextStageNum) || emailNodes[nextStageNum - 1];
+
+      if (!emailNode && emailNodes.length > 0) {
+        showToast(`Campaign "${campaign.name}" does not have Stage ${nextStageNum} configured. Sequence is complete.`, 'info');
+        return;
+      }
 
       if (emailNode?.data) {
         if (emailNode.data.useCustomTemplate && emailNode.data.customSubject) {
@@ -1392,9 +1412,16 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
         customSenderName || settings.senderName
       );
 
+      const campaign = workflows.find(w => w.id === lead.campaignId || (lead.campaign && w.name.toLowerCase() === lead.campaign.toLowerCase()));
+      const nodes = (campaign as any)?.workflow_graph?.nodes || (campaign as any)?.nodes || [];
+      const emailNodes = nodes.filter((n: any) => n.data?.nodeType === 'email' || n.type === 'email' || n.type === 'emailNode');
+      const maxStages = campaign && emailNodes.length > 0 ? emailNodes.length : (campaign ? 0 : 7);
+
+      const isFinished = stageNum >= maxStages;
       const today = getTodayDateString();
       const gapDays = settings.stageGapDays[stageNum] || template.defaultGapDays || 3;
-      const nextDate = stageNum < 7 ? addBusinessDays(today, gapDays) : '';
+      const nextDate = isFinished ? '' : addBusinessDays(today, gapDays);
+      const finalStatus: Lead['status'] = isFinished ? 'Completed' : 'Active';
 
       const updatedLead: Lead = {
         ...lead,
@@ -1402,11 +1429,16 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
         threadId: result.threadId,
         lastEmailSentDate: today,
         nextSendDate: nextDate,
-        status: 'Active'
+        status: finalStatus,
+        currentNodeId: isFinished ? undefined : lead.currentNodeId
       };
 
       await handleUpdateLead(updatedLead);
-      showToast(`Stage ${stageNum} sent to ${lead.name} via Outlook!`, 'success');
+      if (isFinished) {
+        showToast(`Stage ${stageNum} sent to ${lead.name}! Campaign sequence is now completed.`, 'success');
+      } else {
+        showToast(`Stage ${stageNum} sent to ${lead.name} via Outlook!`, 'success');
+      }
 
     } catch (err: any) {
       console.error('Send failed:', err);

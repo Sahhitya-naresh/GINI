@@ -2627,12 +2627,16 @@ async function runDueCampaignsJob(targetCampaignId, token, spreadsheetId, userEm
             );
           } else {
             lead.status = "Completed";
+            lead.nextSendDate = "";
+            lead.currentNodeId = void 0;
             logs.push(
               `Dispatched Email Stage ${stageNum} to ${lead.name} (${lead.email}). End of sequence reached; marked "Completed".`
             );
           }
         } else {
           lead.status = "Completed";
+          lead.nextSendDate = "";
+          lead.currentNodeId = void 0;
           logs.push(
             `Dispatched Email Stage ${stageNum} to ${lead.name} (${lead.email}). End of sequence reached; marked "Completed".`
           );

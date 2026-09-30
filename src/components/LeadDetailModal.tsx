@@ -272,13 +272,18 @@ export const LeadDetailModal: React.FC<LeadDetailModalProps> = ({
       case 'Broke Up':
         return <span className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-slate-100 text-slate-700 border border-slate-200">Broke Up</span>;
       case 'Completed':
-        return <span className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-slate-100 text-slate-700 border border-slate-200">Completed</span>;
+        return <span className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-emerald-100 text-emerald-800 border border-emerald-200">Completed</span>;
       default:
         return <span className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-slate-100 text-slate-700">{lead.status}</span>;
     }
   };
 
+  const assignedCampaign = campaigns.find(c => c.id === lead.campaignId || (lead.campaign && c.name.toLowerCase() === lead.campaign.toLowerCase()));
+  const emailNodes = assignedCampaign ? (assignedCampaign.nodes || (assignedCampaign as any).workflow_graph?.nodes || []).filter((n: any) => n.type === 'emailNode' || n.data?.nodeType === 'email') : [];
+  const maxWorkflowStages = assignedCampaign && emailNodes.length > 0 ? emailNodes.length : (assignedCampaign ? 0 : 7);
   const nextStageNum = lead.currentStage + 1;
+  const isSequenceFinished = lead.status === 'Completed' || lead.status === 'Replied' || lead.status === 'Broke Up' || (maxWorkflowStages > 0 && lead.currentStage >= maxWorkflowStages);
+  const hasMoreStages = nextStageNum <= maxWorkflowStages && !isSequenceFinished && lead.status !== 'Paused';
   const nextTemplate = templates.find(t => t.stage === nextStageNum);
 
   return (
@@ -411,20 +416,29 @@ export const LeadDetailModal: React.FC<LeadDetailModalProps> = ({
               </div>
 
               {/* Next Stage Send Action */}
-              {nextStageNum <= 7 && lead.status !== 'Replied' && lead.status !== 'Broke Up' && (
+              {hasMoreStages && (
                 <button
                   onClick={() => onSendNextStage(lead)}
                   disabled={lead.status === 'Paused'}
                   className="w-full flex items-center justify-center gap-2 py-2.5 px-4 text-xs sm:text-sm font-semibold text-white bg-red-600 hover:bg-red-700 active:bg-red-800 disabled:opacity-50 rounded-lg shadow-xs shadow-red-500/20 transition-colors"
                 >
                   <Send className="w-4 h-4" />
-                  <span>Send Stage {nextStageNum} ({nextTemplate?.name}) Now</span>
+                  <span>Send Stage {nextStageNum} ({nextTemplate?.name || `Stage ${nextStageNum}`}) Now</span>
                 </button>
               )}
 
+              {lead.status === 'Completed' && (
+                <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-lg text-xs text-emerald-950 flex items-start gap-2">
+                  <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+                  <div>
+                    <strong className="font-semibold">Campaign Completed:</strong> All sequence stages and actions for this campaign are finished. No further emails will be sent.
+                  </div>
+                </div>
+              )}
+
               {lead.status === 'Replied' && (
-                <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-xs text-red-950 flex items-start gap-2">
-                  <CheckCircle2 className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
+                <div className="p-3 bg-purple-50 border border-purple-200 rounded-lg text-xs text-purple-950 flex items-start gap-2">
+                  <CheckCircle2 className="w-4 h-4 text-purple-600 shrink-0 mt-0.5" />
                   <div>
                     <strong className="font-semibold">Automated sequence stopped:</strong> A reply was detected from {lead.name}. Please follow up manually in Outlook.
                   </div>
@@ -754,19 +768,29 @@ export const LeadDetailModal: React.FC<LeadDetailModalProps> = ({
             </div>
 
             {/* Thread Content */}
-            {!lead.threadId ? (
+            {!lead.threadId && !isSequenceFinished ? (
               <div className="p-8 text-center bg-slate-50 rounded-xl border border-dashed border-slate-300">
                 <Mail className="w-8 h-8 text-slate-400 mx-auto mb-2" />
                 <h4 className="text-sm font-semibold text-slate-800">No Sent Emails in Thread Yet</h4>
                 <p className="text-xs text-slate-500 max-w-sm mx-auto mt-1 mb-4">
                   Stage 1 has not been dispatched to {lead.name} yet. When sent, a new email thread will be initialized and tracked here automatically.
                 </p>
-                <button
-                  onClick={() => onSendNextStage(lead)}
-                  className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg text-xs font-semibold shadow-xs shadow-red-500/20"
-                >
-                  Send Stage 1 Email Now
-                </button>
+                {hasMoreStages && (
+                  <button
+                    onClick={() => onSendNextStage(lead)}
+                    className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg text-xs font-semibold shadow-xs shadow-red-500/20"
+                  >
+                    Send Stage 1 Email Now
+                  </button>
+                )}
+              </div>
+            ) : !lead.threadId && isSequenceFinished ? (
+              <div className="p-8 text-center bg-slate-50 rounded-xl border border-dashed border-slate-300">
+                <CheckCircle2 className="w-8 h-8 text-emerald-500 mx-auto mb-2" />
+                <h4 className="text-sm font-semibold text-slate-800">Campaign Finished</h4>
+                <p className="text-xs text-slate-500 max-w-sm mx-auto mt-1">
+                  This campaign sequence is marked {lead.status}. No additional automated emails are scheduled.
+                </p>
               </div>
             ) : isLoadingThread ? (
               <div className="p-12 text-center">
