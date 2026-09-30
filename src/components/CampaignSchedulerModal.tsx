@@ -335,8 +335,8 @@ export const CampaignSchedulerModal: React.FC<CampaignSchedulerModalProps> = ({
         // Step 2.08: Check if current node is a Manual Task node
         if (isTaskNode(currentNode)) {
           const existingTask = currentTasksList.find(t =>
-            (t.leadId === targetLead.leadId || (t.leadEmail && targetLead.email && t.leadEmail.toLowerCase() === targetLead.email.toLowerCase())) &&
-            t.nodeId === currentNode.id
+            t.nodeId === currentNode.id &&
+            (t.leadId === targetLead.leadId || (!t.leadId && t.leadEmail && targetLead.email && t.leadEmail.toLowerCase() === targetLead.email.toLowerCase()))
           );
 
           if (!existingTask) {

@@ -308,6 +308,27 @@ export default function App() {
     return () => { isCancelled = true; };
   }, []);
 
+  // Automatically load manual tasks from backend on startup to keep localStorage in sync
+  useEffect(() => {
+    let isCancelled = false;
+    async function loadTasks() {
+      try {
+        const res = await fetch('/api/tasks');
+        if (res.ok) {
+          const data = await res.json();
+          if (!isCancelled && Array.isArray(data.tasks)) {
+            setManualTasks(data.tasks);
+            saveManualTasks(data.tasks);
+          }
+        }
+      } catch (err) {
+        console.warn('Backend tasks fetch error:', err);
+      }
+    }
+    loadTasks();
+    return () => { isCancelled = true; };
+  }, []);
+
   // Sync authenticated user email with primary sender without deleting other accounts
   useEffect(() => {
     if (!userEmail) return;
@@ -890,6 +911,31 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
   // Add new lead ensuring data consistency before UI updates
   const handleAddLead = async (newLead: Lead) => {
     try {
+      // Purge any stale tasks from local state & storage for this lead or email
+      setManualTasks(prev => {
+        const cleaned = prev.filter(t =>
+          (newLead.leadId ? t.leadId !== newLead.leadId : true) &&
+          (!newLead.email || !t.leadEmail || t.leadEmail.toLowerCase() !== newLead.email.toLowerCase())
+        );
+        saveManualTasks(cleaned);
+        return cleaned;
+      });
+
+      // Purge tracking events for this lead/email from local state
+      setTrackingEvents(prev => prev.filter(e =>
+        (newLead.leadId ? e.leadId !== newLead.leadId : true) &&
+        (!newLead.email || !e.email || e.email.toLowerCase() !== newLead.email.toLowerCase())
+      ));
+
+      // Reset backend tracking for this email if applicable
+      if (newLead.email) {
+        fetch('/api/track/reset-lead', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email: newLead.email })
+        }).catch(() => {});
+      }
+
       const saved = await createLead(newLead, undefined, spreadsheetId || undefined);
       setLeads(prev => {
         const existingIdx = prev.findIndex(
@@ -919,6 +965,30 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
           setSelectedLead(null);
           setIsLeadDetailOpen(false);
         }
+
+        // Purge associated tasks from state & storage
+        setManualTasks(prev => {
+          const updated = prev.filter(t =>
+            t.leadId !== lead.leadId &&
+            (!lead.email || !t.leadEmail || t.leadEmail.toLowerCase() !== lead.email.toLowerCase())
+          );
+          saveManualTasks(updated);
+          return updated;
+        });
+
+        // Purge tracking events from local state
+        setTrackingEvents(prev => prev.filter(e =>
+          e.leadId !== lead.leadId &&
+          (!lead.email || !e.email || e.email.toLowerCase() !== lead.email.toLowerCase())
+        ));
+
+        // Purge tracking records on backend as well
+        fetch('/api/track/reset-lead', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ leadId: lead.leadId, email: lead.email })
+        }).catch(() => {});
+
         showToast(`Lead ${lead.name} deleted successfully!`, 'success');
       }
     } catch (e: any) {

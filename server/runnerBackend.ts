@@ -328,8 +328,8 @@ export async function runDueCampaignsJob(
       if (rawNodeType === 'manual_task' || rawNodeType === 'manualTask') {
         const localTasks = await loadLocalTasks();
         const existingTask = localTasks.find((t: any) =>
-          (t.leadId === lead.leadId || (t.leadEmail && lead.email && t.leadEmail.toLowerCase() === lead.email.toLowerCase())) &&
-          t.nodeId === currentNode.id
+          t.nodeId === currentNode.id &&
+          (t.leadId === lead.leadId || (!t.leadId && t.leadEmail && lead.email && t.leadEmail.toLowerCase() === lead.email.toLowerCase()))
         );
 
         if (!existingTask) {

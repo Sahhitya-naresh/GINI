@@ -504,9 +504,35 @@ async function createLead(leadData) {
         ...existing,
         ...leadData,
         leadId: existing.leadId,
+        currentStage: typeof leadData.currentStage === "number" ? leadData.currentStage : 0,
+        status: leadData.status || "Active",
+        lastEmailSentDate: leadData.lastEmailSentDate || "",
+        nextSendDate: leadData.nextSendDate || (/* @__PURE__ */ new Date()).toISOString().split("T")[0],
+        threadId: leadData.threadId || "",
+        opensCount: typeof leadData.opensCount === "number" ? leadData.opensCount : 0,
+        clicksCount: typeof leadData.clicksCount === "number" ? leadData.clicksCount : 0,
+        firstOpenedDate: leadData.firstOpenedDate || "",
+        lastOpenedDate: leadData.lastOpenedDate || "",
+        firstClickedDate: leadData.firstClickedDate || "",
+        lastClickedDate: leadData.lastClickedDate || "",
         updatedAt: (/* @__PURE__ */ new Date()).toISOString()
       };
       await col.updateOne({ leadId: existing.leadId }, { $set: updatedDoc });
+      try {
+        await db.collection(COLLECTIONS.TASKS).deleteMany({
+          $or: [
+            { leadId: existing.leadId },
+            { leadEmail: { $regex: `^${cleanEmail}$`, $options: "i" } }
+          ]
+        });
+        await db.collection(COLLECTIONS.TRACKING_EVENTS).deleteMany({
+          $or: [
+            { leadId: existing.leadId },
+            { email: { $regex: `^${cleanEmail}$`, $options: "i" } }
+          ]
+        });
+      } catch (_) {
+      }
       return updatedDoc;
     }
   }
@@ -517,6 +543,23 @@ async function createLead(leadData) {
   const existingById = await col.findOne({ leadId: finalLeadId });
   if (existingById) {
     finalLeadId = await getNextLeadId();
+  }
+  if (cleanEmail || finalLeadId) {
+    try {
+      const taskOr = [];
+      const trackOr = [];
+      if (finalLeadId) {
+        taskOr.push({ leadId: finalLeadId });
+        trackOr.push({ leadId: finalLeadId });
+      }
+      if (cleanEmail) {
+        taskOr.push({ leadEmail: { $regex: `^${cleanEmail}$`, $options: "i" } });
+        trackOr.push({ email: { $regex: `^${cleanEmail}$`, $options: "i" } });
+      }
+      if (taskOr.length > 0) await db.collection(COLLECTIONS.TASKS).deleteMany({ $or: taskOr });
+      if (trackOr.length > 0) await db.collection(COLLECTIONS.TRACKING_EVENTS).deleteMany({ $or: trackOr });
+    } catch (_) {
+    }
   }
   const now = (/* @__PURE__ */ new Date()).toISOString();
   const newLead = {
@@ -595,14 +638,29 @@ async function updateLead(leadData, token, spreadsheetId) {
 async function deleteLead(leadId) {
   const db = await getDb();
   const col = db.collection(COLLECTIONS.LEADS);
-  const result = await col.deleteOne({ leadId: leadId.trim() });
+  const cleanId = leadId.trim();
+  const existing = await col.findOne({ leadId: cleanId });
+  const leadEmail = existing?.email?.trim().toLowerCase();
+  const result = await col.deleteOne({ leadId: cleanId });
   try {
-    await db.collection(COLLECTIONS.TASKS).deleteMany({
-      $or: [
-        { leadId: leadId.trim() },
-        { id: `task-${leadId.trim()}` }
-      ]
-    });
+    const taskFilters = [
+      { leadId: cleanId },
+      { id: { $regex: cleanId, $options: "i" } }
+    ];
+    if (leadEmail) {
+      taskFilters.push({ leadEmail: { $regex: `^${leadEmail}$`, $options: "i" } });
+    }
+    await db.collection(COLLECTIONS.TASKS).deleteMany({ $or: taskFilters });
+  } catch (_) {
+  }
+  try {
+    const trackingFilters = [
+      { leadId: cleanId }
+    ];
+    if (leadEmail) {
+      trackingFilters.push({ email: { $regex: `^${leadEmail}$`, $options: "i" } });
+    }
+    await db.collection(COLLECTIONS.TRACKING_EVENTS).deleteMany({ $or: trackingFilters });
   } catch (_) {
   }
   return result.deletedCount > 0;
@@ -2454,7 +2512,7 @@ async function runDueCampaignsJob(targetCampaignId, token, spreadsheetId, userEm
       if (rawNodeType === "manual_task" || rawNodeType === "manualTask") {
         const localTasks = await loadLocalTasks();
         const existingTask = localTasks.find(
-          (t) => (t.leadId === lead.leadId || t.leadEmail && lead.email && t.leadEmail.toLowerCase() === lead.email.toLowerCase()) && t.nodeId === currentNode.id
+          (t) => t.nodeId === currentNode.id && (t.leadId === lead.leadId || !t.leadId && t.leadEmail && lead.email && t.leadEmail.toLowerCase() === lead.email.toLowerCase())
         );
         if (!existingTask) {
           tasksCreated++;

@@ -168,9 +168,37 @@ export async function createLead(leadData: Partial<BackendLead>): Promise<Backen
         ...existing,
         ...leadData,
         leadId: existing.leadId,
+        currentStage: typeof leadData.currentStage === 'number' ? leadData.currentStage : 0,
+        status: leadData.status || 'Active',
+        lastEmailSentDate: leadData.lastEmailSentDate || '',
+        nextSendDate: leadData.nextSendDate || new Date().toISOString().split('T')[0],
+        threadId: leadData.threadId || '',
+        opensCount: typeof leadData.opensCount === 'number' ? leadData.opensCount : 0,
+        clicksCount: typeof leadData.clicksCount === 'number' ? leadData.clicksCount : 0,
+        firstOpenedDate: leadData.firstOpenedDate || '',
+        lastOpenedDate: leadData.lastOpenedDate || '',
+        firstClickedDate: leadData.firstClickedDate || '',
+        lastClickedDate: leadData.lastClickedDate || '',
         updatedAt: new Date().toISOString()
       };
       await col.updateOne({ leadId: existing.leadId }, { $set: updatedDoc });
+
+      // Clean up previous tasks & tracking events for this email
+      try {
+        await db.collection(COLLECTIONS.TASKS).deleteMany({
+          $or: [
+            { leadId: existing.leadId },
+            { leadEmail: { $regex: `^${cleanEmail}$`, $options: 'i' } }
+          ]
+        });
+        await db.collection(COLLECTIONS.TRACKING_EVENTS).deleteMany({
+          $or: [
+            { leadId: existing.leadId },
+            { email: { $regex: `^${cleanEmail}$`, $options: 'i' } }
+          ]
+        });
+      } catch (_) {}
+
       return updatedDoc;
     }
   }
@@ -184,6 +212,24 @@ export async function createLead(leadData: Partial<BackendLead>): Promise<Backen
   const existingById = await col.findOne({ leadId: finalLeadId });
   if (existingById) {
     finalLeadId = await getNextLeadId();
+  }
+
+  // Purge any pre-existing orphan tasks or tracking events for this email or leadId
+  if (cleanEmail || finalLeadId) {
+    try {
+      const taskOr: any[] = [];
+      const trackOr: any[] = [];
+      if (finalLeadId) {
+        taskOr.push({ leadId: finalLeadId });
+        trackOr.push({ leadId: finalLeadId });
+      }
+      if (cleanEmail) {
+        taskOr.push({ leadEmail: { $regex: `^${cleanEmail}$`, $options: 'i' } });
+        trackOr.push({ email: { $regex: `^${cleanEmail}$`, $options: 'i' } });
+      }
+      if (taskOr.length > 0) await db.collection(COLLECTIONS.TASKS).deleteMany({ $or: taskOr });
+      if (trackOr.length > 0) await db.collection(COLLECTIONS.TRACKING_EVENTS).deleteMany({ $or: trackOr });
+    } catch (_) {}
   }
 
   const now = new Date().toISOString();
@@ -272,16 +318,36 @@ export async function updateLead(leadData: Partial<BackendLead>, token?: string,
 
 export async function deleteLead(leadId: string): Promise<boolean> {
   const db = await getDb();
-  const col = db.collection(COLLECTIONS.LEADS);
-  const result = await col.deleteOne({ leadId: leadId.trim() });
+  const col = db.collection<BackendLead>(COLLECTIONS.LEADS);
+  const cleanId = leadId.trim();
+  const existing = await col.findOne({ leadId: cleanId });
+  const leadEmail = existing?.email?.trim().toLowerCase();
+
+  const result = await col.deleteOne({ leadId: cleanId });
+
+  // Delete associated tasks
   try {
-    await db.collection(COLLECTIONS.TASKS).deleteMany({ 
-      $or: [
-        { leadId: leadId.trim() },
-        { id: `task-${leadId.trim()}` }
-      ]
-    });
+    const taskFilters: any[] = [
+      { leadId: cleanId },
+      { id: { $regex: cleanId, $options: 'i' } }
+    ];
+    if (leadEmail) {
+      taskFilters.push({ leadEmail: { $regex: `^${leadEmail}$`, $options: 'i' } });
+    }
+    await db.collection(COLLECTIONS.TASKS).deleteMany({ $or: taskFilters });
   } catch (_) {}
+
+  // Delete associated tracking events
+  try {
+    const trackingFilters: any[] = [
+      { leadId: cleanId }
+    ];
+    if (leadEmail) {
+      trackingFilters.push({ email: { $regex: `^${leadEmail}$`, $options: 'i' } });
+    }
+    await db.collection(COLLECTIONS.TRACKING_EVENTS).deleteMany({ $or: trackingFilters });
+  } catch (_) {}
+
   return result.deletedCount > 0;
 }
 
