@@ -204,8 +204,8 @@ export const LeadDetailModal: React.FC<LeadDetailModalProps> = ({
       const data = await getOutlookThread(token, lead.threadId, userEmail, lead.email);
       setThreadMessages(data.messages);
 
-      // Trigger reply check right after thread loads if latest message is from lead and lead is Active or Paused
-      if (lead.status === 'Active' || lead.status === 'Paused') {
+      // Trigger reply check right after thread loads if latest message is from lead and lead is not already Replied
+      if (lead.status !== 'Replied') {
         const msgs = data.messages || [];
         if (msgs.length > 0) {
           const sorted = [...msgs].sort(

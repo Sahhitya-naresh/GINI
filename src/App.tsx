@@ -793,29 +793,43 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
       const rawBackendLeads = await fetchLeadsFromBackend();
       const backendLeads = deduplicateLeads(rawBackendLeads || []);
       if (backendLeads && backendLeads.length > 0) {
+        let finalLeads = backendLeads;
         // Merge with current tracking metrics so server-logged open/clicks are not wiped out
         try {
           const stats = await fetchTrackingStats();
           if (stats) {
             if (stats.events) setTrackingEvents(stats.events);
             if (stats.statsByLead) {
-              const merged = deduplicateLeads(mergeTrackingWithLeads(backendLeads, stats.statsByLead));
-              setLeads(merged);
-              setSelectedLead(prev => {
-                if (!prev) return null;
-                const match = merged.find(l => l.leadId === prev.leadId || (l.email && l.email.toLowerCase() === prev.email.toLowerCase()));
-                return match || prev;
-              });
-              showToast(`Synced ${backendLeads.length} leads from MongoDB!`, 'success');
-              return;
+              finalLeads = deduplicateLeads(mergeTrackingWithLeads(backendLeads, stats.statsByLead));
             }
           }
         } catch (trackingErr) {
           console.warn('Could not fetch tracking during sync:', trackingErr);
         }
 
-        setLeads(backendLeads);
-        showToast(`Synced ${backendLeads.length} leads from MongoDB!`, 'success');
+        setLeads(finalLeads);
+        setSelectedLead(prev => {
+          if (!prev) return null;
+          const match = finalLeads.find(l => l.leadId === prev.leadId || (l.email && l.email.toLowerCase() === prev.email.toLowerCase()));
+          return match || prev;
+        });
+
+        // Trigger ReplyAlertModal popup for any leads with newly detected or unread replies
+        const newlyReplied = finalLeads.filter(b =>
+          b.status === 'Replied' && (
+            Boolean((b as any).hasUnreadReply) ||
+            !leadsRef.current.some(prev => prev.leadId === b.leadId && prev.status === 'Replied')
+          )
+        );
+        if (newlyReplied.length > 0) {
+          setReplyAlertLeads(prev => {
+            const existingIds = new Set(prev.map(l => l.leadId || l.email?.toLowerCase()));
+            const fresh = newlyReplied.filter(l => !existingIds.has(l.leadId || l.email?.toLowerCase()));
+            return fresh.length > 0 ? [...prev, ...fresh] : prev;
+          });
+        }
+
+        showToast(`Synced ${finalLeads.length} leads from MongoDB!`, 'success');
       } else {
         setLeads([]);
         setSelectedLead(null);
@@ -1046,6 +1060,13 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
         const savedLead = res.updatedLead;
         setLeads(prev => prev.map(l => l.leadId === savedLead.leadId ? savedLead : l));
         setSelectedLead(prev => prev && prev.leadId === savedLead.leadId ? savedLead : prev);
+
+        // Trigger ReplyAlertModal popup for this newly detected reply
+        setReplyAlertLeads(prev => {
+          const exists = prev.some(l => l.leadId === savedLead.leadId || (savedLead.email && l.email?.toLowerCase() === savedLead.email.toLowerCase()));
+          return exists ? prev : [...prev, savedLead];
+        });
+
         showToast(`Reply detected from ${targetLead.name}! Sequence stopped.`, 'success');
         return res;
       } else {
@@ -1070,11 +1091,11 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
     return res;
   };
 
-  // Bulk check replies on all active leads (manual button on table)
+  // Bulk check replies on all leads with email threads (manual button on table)
   const handleCheckAllReplies = async () => {
-    const leadsWithThreads = leads.filter(l => l.threadId && (l.status === 'Active' || l.status === 'Paused'));
+    const leadsWithThreads = leads.filter(l => (l.threadId || l.email) && l.status !== 'Replied');
     if (leadsWithThreads.length === 0) {
-      showToast('No active leads with active email threads to check.', 'info');
+      showToast('No leads with active email threads to check.', 'info');
       setLastCheckedTime(new Date());
       return;
     }
@@ -1094,7 +1115,7 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
       if (repliesFound > 0) {
         showToast(`Detected ${repliesFound} new replies! Leads moved to "Needs Manual Reply".`, 'success');
       } else {
-        showToast('All active threads checked. No new prospect replies found.', 'info');
+        showToast('All email threads checked. No new prospect replies found.', 'info');
       }
     } catch (err: any) {
       showToast(`Error checking replies: ${err.message}`, 'error');
@@ -1103,7 +1124,7 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
     }
   };
 
-  // Timed background check: every 3 minutes, loop Active/Paused leads with threadId
+  // Timed background check: every 30 seconds, loop all non-replied leads with threads
   const runBackgroundReplyCheck = useCallback(async () => {
     // Skip the run if the tab is hidden or a previous run is still in progress
     if (document.hidden || isBackgroundCheckingRef.current) {
@@ -1112,12 +1133,12 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
 
     isBackgroundCheckingRef.current = true;
     try {
-      const activeLeadsWithThreads = leadsRef.current.filter(
-        l => l.threadId && (l.status === 'Active' || l.status === 'Paused')
+      const candidatesToCheck = leadsRef.current.filter(
+        l => (l.threadId || l.email) && l.status !== 'Replied'
       );
 
       const newlyReplied: Lead[] = [];
-      for (const targetLead of activeLeadsWithThreads) {
+      for (const targetLead of candidatesToCheck) {
         const res = await checkLeadReply(targetLead, { isManual: false });
         if (res.hasReplied && res.updatedLead) {
           newlyReplied.push(res.updatedLead);
@@ -1126,8 +1147,8 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
 
       if (newlyReplied.length > 0) {
         setReplyAlertLeads(prev => {
-          const existingIds = new Set(prev.map(l => l.leadId || l.email));
-          const fresh = newlyReplied.filter(l => !existingIds.has(l.leadId || l.email));
+          const existingIds = new Set(prev.map(l => l.leadId || l.email?.toLowerCase()));
+          const fresh = newlyReplied.filter(l => !existingIds.has(l.leadId || l.email?.toLowerCase()));
           return fresh.length > 0 ? [...prev, ...fresh] : prev;
         });
       }
@@ -1143,8 +1164,8 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
     // Run once on initial app load
     runBackgroundReplyCheck();
 
-    // Run every 3 minutes
-    const intervalId = setInterval(runBackgroundReplyCheck, 3 * 60 * 1000);
+    // Run every 30 seconds for quick reply detection
+    const intervalId = setInterval(runBackgroundReplyCheck, 30 * 1000);
 
     // Run once immediately when the tab becomes visible again
     const handleVisibilityChange = () => {
