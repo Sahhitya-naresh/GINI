@@ -1107,8 +1107,9 @@ export const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({
                           <td className="py-2 px-3">
                             <span className={`inline-block px-1.5 py-0.5 rounded-full text-[10px] font-semibold ${
                               lead.status === 'Replied' ? 'bg-green-100 text-green-800 font-bold' :
-                              lead.status === 'Active' ? 'bg-blue-100 text-blue-800' :
+                              lead.status === 'Active' ? 'bg-emerald-100 text-emerald-800' :
                               lead.status === 'Paused' ? 'bg-amber-100 text-amber-800' :
+                              lead.status === 'Completed' ? 'bg-[#E3F2FD] text-[#1976D2]' :
                               'bg-slate-100 text-slate-600'
                             }`}>
                               {lead.status}

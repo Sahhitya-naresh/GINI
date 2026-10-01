@@ -264,6 +264,7 @@ export const LeadsTable: React.FC<LeadsTableProps> = ({
   const activeCount = leads.filter(l => l.status === 'Active').length;
   const repliedCount = leads.filter(l => l.status === 'Replied').length;
   const pausedCount = leads.filter(l => l.status === 'Paused').length;
+  const completedCount = leads.filter(l => l.status === 'Completed').length;
   const closedCount = leads.filter(l => l.status === 'Completed' || l.status === 'Broke Up').length;
 
   const renderStatusBadge = (status: Lead['status']) => {
@@ -277,7 +278,7 @@ export const LeadsTable: React.FC<LeadsTableProps> = ({
       case 'Broke Up':
         return <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold bg-slate-100 text-slate-600 border border-slate-200">Broke Up</span>;
       case 'Completed':
-        return <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">Completed</span>;
+        return <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold bg-[#E3F2FD] text-[#1976D2] border border-[#90CAF9]">Completed</span>;
       default:
         return <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-slate-100 text-slate-700">{status}</span>;
     }
@@ -860,6 +861,9 @@ export const LeadsTable: React.FC<LeadsTableProps> = ({
             </span>
             <span className="flex items-center gap-1.5">
               <span className="w-2 h-2 rounded-full bg-amber-500" /> Paused ({pausedCount})
+            </span>
+            <span className="flex items-center gap-1.5">
+              <span className="w-2 h-2 rounded-full bg-[#1976D2]" /> Completed ({completedCount})
             </span>
           </div>
         </div>

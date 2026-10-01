@@ -272,7 +272,7 @@ export const LeadDetailModal: React.FC<LeadDetailModalProps> = ({
       case 'Broke Up':
         return <span className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-slate-100 text-slate-700 border border-slate-200">Broke Up</span>;
       case 'Completed':
-        return <span className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-emerald-100 text-emerald-800 border border-emerald-200">Completed</span>;
+        return <span className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-[#E3F2FD] text-[#1976D2] border border-[#90CAF9]">Completed</span>;
       default:
         return <span className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-slate-100 text-slate-700">{lead.status}</span>;
     }
@@ -438,10 +438,10 @@ export const LeadDetailModal: React.FC<LeadDetailModalProps> = ({
               )}
 
               {lead.status === 'Completed' && (
-                <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-lg text-xs text-emerald-950 flex items-start gap-2">
-                  <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+                <div className="p-3 bg-[#E3F2FD] border border-[#90CAF9] rounded-lg text-xs text-[#0D47A1] flex items-start gap-2">
+                  <CheckCircle2 className="w-4 h-4 text-[#1976D2] shrink-0 mt-0.5" />
                   <div>
-                    <strong className="font-semibold">Campaign Completed:</strong> All sequence stages and actions for this campaign are finished. No further emails will be sent.
+                    <strong className="font-semibold text-[#1976D2]">Campaign Completed:</strong> All sequence stages and actions for this campaign are finished. No further emails will be sent.
                   </div>
                 </div>
               )}
