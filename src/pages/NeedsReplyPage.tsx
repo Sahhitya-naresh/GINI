@@ -1,5 +1,5 @@
 import React from 'react';
-import { Lead } from '../../types';
+import { Lead } from '../types';
 import { 
   Building2, 
   Mail, 

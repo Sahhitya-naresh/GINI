@@ -38,7 +38,7 @@ import {
   Search,
   Filter
 } from 'lucide-react';
-import { Lead, StageTemplate, TrackingEvent } from '../../types';
+import { Lead, StageTemplate, TrackingEvent } from '../types';
 
 interface AnalyticsDashboardProps {
   leads: Lead[];

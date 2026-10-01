@@ -1,1 +1,1 @@
-export { WorkflowCanvas, WorkflowsPage } from '../../pages/WorkflowsPage';
+export { WorkflowCanvas, WorkflowsPage } from '../../pages/WorkflowsPage/WorkflowsPage';

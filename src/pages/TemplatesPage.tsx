@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
-import { StageTemplate, Lead, ConnectedSender } from '../../types';
-import { renderEmailMergeTags, DEFAULT_STAGE_TEMPLATES } from '../../data/defaultTemplates';
+import { StageTemplate, Lead, ConnectedSender } from '../types';
+import { renderEmailMergeTags, DEFAULT_STAGE_TEMPLATES } from '../data/defaultTemplates';
 import { 
   Monitor, 
   Smartphone, 

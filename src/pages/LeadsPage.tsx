@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { Lead, StageTemplate, CampaignWorkflow } from '../../types';
-import { formatDisplayDate, isLeadDueForNextSend, getTodayDateString } from '../../utils/dateUtils';
+import { Lead, StageTemplate, CampaignWorkflow } from '../types';
+import { formatDisplayDate, isLeadDueForNextSend, getTodayDateString } from '../utils/dateUtils';
 import { 
   Search, 
   Filter, 

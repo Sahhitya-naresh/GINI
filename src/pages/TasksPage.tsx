@@ -16,8 +16,8 @@ import {
   ChevronRight,
   Loader2
 } from 'lucide-react';
-import { LeadManualTask, Lead } from '../../types';
-import { getTodayDateString } from '../../utils/dateUtils';
+import { LeadManualTask, Lead } from '../types';
+import { getTodayDateString } from '../utils/dateUtils';
 
 interface ManualTasksDashboardProps {
   tasks: LeadManualTask[];
