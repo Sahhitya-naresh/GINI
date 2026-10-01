@@ -667,8 +667,10 @@ export const LeadsTable: React.FC<LeadsTableProps> = ({
                   return (
                     <tr
                       key={lead.leadId || `lead-${lead.email || ''}-${idx}`}
-                      className={`hover:bg-red-50/30 transition-colors ${
-                        isReplied ? 'bg-red-50/40' : isDue ? 'bg-red-50/20' : ''
+                      className={`transition-colors ${
+                        isReplied
+                          ? 'bg-red-100/90 hover:bg-red-200/60'
+                          : 'hover:bg-emerald-50/70'
                       }`}
                     >
                       <td className="py-2.5 px-2.5 text-center">
