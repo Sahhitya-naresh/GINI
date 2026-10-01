@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { 
   Send, 
   Database,
@@ -15,7 +15,11 @@ import {
   AlertTriangle,
   X,
   CheckCircle2,
-  Key
+  Key,
+  Menu,
+  ChevronDown,
+  Layers,
+  CheckSquare
 } from 'lucide-react';
 import { BrandLogo } from './BrandLogo';
 
@@ -68,6 +72,42 @@ export const Header: React.FC<HeaderProps> = ({
   const [mongoUriInput, setMongoUriInput] = useState('mongodb+srv://sahhityanaresh_db_user:test12345678@cluster0.zebcge8.mongodb.net/?appName=Cluster0');
   const [isTestingMongo, setIsTestingMongo] = useState(false);
   const [mongoFeedback, setMongoFeedback] = useState<{ success?: boolean; message: string; code?: any } | null>(null);
+
+  // Right-side Navigation Menu Dropdown state
+  const [isNavMenuOpen, setIsNavMenuOpen] = useState(false);
+  const navMenuRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (navMenuRef.current && !navMenuRef.current.contains(event.target as Node)) {
+        setIsNavMenuOpen(false);
+      }
+    }
+    function handleKeyDown(e: KeyboardEvent) {
+      if (e.key === 'Escape') setIsNavMenuOpen(false);
+    }
+    if (isNavMenuOpen) {
+      document.addEventListener('mousedown', handleClickOutside);
+      document.addEventListener('keydown', handleKeyDown);
+    }
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [isNavMenuOpen]);
+
+  const currentTabLabel = useMemo(() => {
+    switch (currentTab) {
+      case 'leads': return 'All Leads';
+      case 'replied': return `Needs Reply${repliedCount > 0 ? ` (${repliedCount})` : ''}`;
+      case 'workflows': return 'Workflow Canvas';
+      case 'tasks': return `Tasks${tasksCount > 0 ? ` (${tasksCount})` : ''}`;
+      case 'templates': return 'Templates';
+      case 'analytics': return 'Analytics';
+      case 'settings': return 'Settings';
+      default: return 'Menu';
+    }
+  }, [currentTab, repliedCount, tasksCount]);
 
   const checkMongo = async () => {
     try {
@@ -139,119 +179,13 @@ export const Header: React.FC<HeaderProps> = ({
             />
           </div>
 
-          {/* Navigation Tabs in Red & White */}
-          <nav className="flex items-center gap-1 bg-slate-100/90 p-1 rounded-xl border border-slate-200/80 overflow-x-auto">
-            <button
-              id="tab-leads"
-              onClick={() => onTabChange('leads')}
-              className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs sm:text-sm font-medium transition-all shrink-0 ${
-                currentTab === 'leads'
-                  ? 'bg-red-600 text-white shadow-xs font-semibold'
-                  : 'text-slate-600 hover:text-red-700 hover:bg-red-50/60'
-              }`}
-            >
-              <Users className={`w-4 h-4 ${currentTab === 'leads' ? 'text-white' : 'text-slate-500'}`} />
-              <span>All Leads</span>
-            </button>
-
-            <button
-              id="tab-replied"
-              onClick={() => onTabChange('replied')}
-              className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs sm:text-sm font-medium transition-all relative shrink-0 ${
-                currentTab === 'replied'
-                  ? 'bg-red-600 text-white shadow-xs font-semibold'
-                  : 'text-slate-600 hover:text-red-700 hover:bg-red-50/60'
-              }`}
-            >
-              <MessageSquareReply className={`w-4 h-4 ${currentTab === 'replied' ? 'text-white' : 'text-red-600'}`} />
-              <span className="hidden sm:inline">Needs Reply</span>
-              <span className="sm:hidden">Replies</span>
-              {repliedCount > 0 && (
-                <span className="inline-flex items-center justify-center px-1.5 py-0.2 text-[10px] font-bold leading-none text-red-700 bg-white rounded-full animate-pulse shadow-xs">
-                  {repliedCount}
-                </span>
-              )}
-            </button>
-
-            <button
-              id="tab-workflows"
-              onClick={() => onTabChange('workflows')}
-              className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs sm:text-sm font-medium transition-all shrink-0 ${
-                currentTab === 'workflows'
-                  ? 'bg-red-600 text-white shadow-xs font-semibold'
-                  : 'text-slate-600 hover:text-red-700 hover:bg-red-50/60'
-              }`}
-            >
-              <span className="font-bold text-xs px-1 py-0.2 rounded bg-red-100 text-red-800">Flow</span>
-              <span>Workflow Canvas</span>
-            </button>
-
-            <button
-              id="tab-tasks"
-              onClick={() => onTabChange('tasks')}
-              className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs sm:text-sm font-medium transition-all relative shrink-0 ${
-                currentTab === 'tasks'
-                  ? 'bg-red-600 text-white shadow-xs font-semibold'
-                  : 'text-slate-600 hover:text-red-700 hover:bg-red-50/60'
-              }`}
-            >
-              <span>Tasks</span>
-              {tasksCount > 0 && (
-                <span className={`inline-flex items-center justify-center px-1.5 py-0.2 text-[10px] font-bold rounded-full ${
-                  currentTab === 'tasks' ? 'bg-white text-red-700' : 'bg-blue-600 text-white'
-                }`}>
-                  {tasksCount}
-                </span>
-              )}
-            </button>
-
-            <button
-              id="tab-templates"
-              onClick={() => onTabChange('templates')}
-              className={`hidden md:flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs sm:text-sm font-medium transition-all shrink-0 ${
-                currentTab === 'templates'
-                  ? 'bg-red-600 text-white shadow-xs font-semibold'
-                  : 'text-slate-600 hover:text-red-700 hover:bg-red-50/60'
-              }`}
-            >
-              <FileEdit className={`w-4 h-4 ${currentTab === 'templates' ? 'text-white' : 'text-slate-500'}`} />
-              <span>Templates</span>
-            </button>
-
-            <button
-              id="tab-analytics"
-              onClick={() => onTabChange('analytics')}
-              className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs sm:text-sm font-medium transition-all shrink-0 ${
-                currentTab === 'analytics'
-                  ? 'bg-red-600 text-white shadow-xs font-semibold'
-                  : 'text-slate-600 hover:text-red-700 hover:bg-red-50/60'
-              }`}
-            >
-              <TrendingUp className={`w-4 h-4 ${currentTab === 'analytics' ? 'text-white' : 'text-slate-500'}`} />
-              <span>Analytics</span>
-            </button>
-
-            <button
-              id="tab-settings"
-              onClick={() => onTabChange('settings')}
-              className={`p-1.5 rounded-lg transition-all shrink-0 ${
-                currentTab === 'settings' 
-                  ? 'bg-red-600 text-white shadow-xs' 
-                  : 'text-slate-600 hover:text-red-700 hover:bg-red-50/60'
-              }`}
-              title="Campaign Settings & Logo"
-            >
-              <SettingsIcon className="w-4 h-4" />
-            </button>
-          </nav>
-
-          {/* Right actions: Run Scheduler, Sheet Status, User Auth */}
-          <div className="flex items-center gap-2 sm:gap-3">
+          {/* Right actions: Run Scheduler, Sheet Status, Sync & Navigation Menu */}
+          <div className="flex items-center gap-2 sm:gap-2.5">
             {/* Run Due Sends Button in Crisp Red */}
             <button
               id="btn-run-due-scheduler"
               onClick={onOpenScheduler}
-              className="flex items-center gap-2 px-3.5 py-1.5 bg-red-600 hover:bg-red-700 active:bg-red-800 text-white rounded-lg text-xs sm:text-sm font-semibold shadow-xs shadow-red-500/20 transition-all"
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-red-600 hover:bg-red-700 active:bg-red-800 text-white rounded-lg text-xs sm:text-sm font-semibold shadow-xs shadow-red-500/20 transition-all cursor-pointer"
               title="Check replies and send due emails"
             >
               <Play className="w-3.5 h-3.5 fill-current" />
@@ -264,47 +198,265 @@ export const Header: React.FC<HeaderProps> = ({
               )}
             </button>
 
-            {/* Persistent, clickable MongoDB connection status indicator */}
+            {/* Discreet Storage Connection Status Indicator (Hides loud MongoDB icon) */}
             <button 
               id="connection-status-indicator"
               onClick={() => setShowMongoModal(true)}
               type="button"
-              className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium shadow-2xs transition-all shrink-0 cursor-pointer ${
+              className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold shadow-2xs transition-all shrink-0 cursor-pointer ${
                 mongoStatus.connected 
-                  ? 'bg-emerald-50/90 border border-emerald-200/90 text-emerald-800 hover:bg-emerald-100/90' 
+                  ? 'bg-slate-50 border border-slate-200/90 text-slate-700 hover:bg-slate-100 hover:border-slate-300' 
                   : 'bg-amber-50 border border-amber-300 text-amber-900 hover:bg-amber-100'
               }`}
-              title="Click to view MongoDB connection details or test credentials"
+              title={`Storage: MongoDB (${mongoStatus.database || 'outreach_flow'}) — ${mongoStatus.connected ? 'Connected' : 'Disconnected'}. Click to view connection status.`}
             >
-              {mongoStatus.connected ? (
-                <>
-                  <Database className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
-                  <span className="font-semibold text-emerald-950 hidden sm:inline">MongoDB:</span>
-                  <span className="sm:hidden font-semibold text-emerald-950">DB:</span>
-                  <span className="max-w-[100px] sm:max-w-[150px] truncate font-semibold text-emerald-900">
-                    {mongoStatus.database || 'outreach_flow'}
-                  </span>
-                  <span className="inline-block w-2 h-2 rounded-full bg-emerald-500 animate-pulse ml-0.5" />
-                </>
-              ) : (
-                <>
-                  <AlertTriangle className="w-3.5 h-3.5 text-amber-600 shrink-0" />
-                  <span className="hidden sm:inline font-medium">MongoDB: Disconnected</span>
-                  <span className="sm:hidden font-medium">DB Offline</span>
-                  <span className="inline-block w-2 h-2 rounded-full bg-amber-500 ml-0.5" />
-                </>
-              )}
+              <span className={`w-2 h-2 rounded-full shrink-0 ${mongoStatus.connected ? 'bg-emerald-500 animate-pulse' : 'bg-amber-500'}`} />
+              <span className="font-semibold text-slate-700 hidden sm:inline">Storage Connected</span>
+              <span className="font-semibold text-slate-700 sm:hidden">Connected</span>
             </button>
 
             {/* Sync Button */}
             <button
               onClick={onSync}
               disabled={isSyncing}
-              className="p-2 text-slate-500 hover:text-red-700 hover:bg-red-50 rounded-lg transition-colors"
+              className="p-1.5 text-slate-500 hover:text-red-700 hover:bg-red-50 rounded-lg transition-colors cursor-pointer border border-slate-200 hover:border-red-200 shrink-0"
               title="Refresh / Sync"
             >
               <RefreshCw className={`w-4 h-4 ${isSyncing ? 'animate-spin text-red-600' : ''}`} />
             </button>
+
+            {/* Navigation Menu Dropdown Button (Constant width so UI never shifts when changing tabs) */}
+            <div className="relative shrink-0" ref={navMenuRef}>
+              <button
+                id="btn-nav-menu"
+                type="button"
+                onClick={() => setIsNavMenuOpen(prev => !prev)}
+                className={`group flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-xl text-xs sm:text-sm font-semibold transition-all border shadow-xs cursor-pointer w-[215px] sm:w-[230px] shrink-0 ${
+                  isNavMenuOpen
+                    ? 'bg-red-50 text-red-700 border-red-400 ring-2 ring-red-500/20 shadow-sm'
+                    : 'bg-white hover:bg-slate-50 text-slate-800 border-slate-300 hover:border-red-300'
+                }`}
+                title="Navigation Menu — Click to switch between All Leads, Needs Reply, Workflows, Tasks, Templates, Analytics, and Settings"
+                aria-expanded={isNavMenuOpen}
+              >
+                {/* Visual Menu Pill Badge */}
+                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] font-black uppercase tracking-wider bg-red-600 text-white shrink-0 shadow-2xs">
+                  <Menu className="w-3 h-3 text-white stroke-[2.5]" />
+                  <span>Menu</span>
+                </span>
+
+                {/* Active View Label (Constant container width to prevent header shift) */}
+                <div className="flex-1 min-w-0 text-left px-1 flex items-center gap-1.5">
+                  <span className="font-bold text-slate-800 group-hover:text-red-600 transition-colors truncate text-xs sm:text-[13px]">
+                    {currentTabLabel}
+                  </span>
+                  {(repliedCount > 0 || tasksCount > 0) && (
+                    <span className="w-1.5 h-1.5 rounded-full bg-red-600 animate-pulse shrink-0"></span>
+                  )}
+                </div>
+
+                {/* Prominent Dropdown Arrow Box */}
+                <div className="pl-1 border-l border-slate-200 group-hover:border-red-200 transition-colors shrink-0">
+                  <div className={`w-5 h-5 rounded-md flex items-center justify-center transition-all ${
+                    isNavMenuOpen 
+                      ? 'bg-red-600 text-white' 
+                      : 'bg-slate-100 text-slate-500 group-hover:bg-red-100 group-hover:text-red-700'
+                  }`}>
+                    <ChevronDown className={`w-3.5 h-3.5 transition-transform duration-200 ${isNavMenuOpen ? 'rotate-180' : ''}`} />
+                  </div>
+                </div>
+              </button>
+
+              {/* Dropdown Menu Panel */}
+              {isNavMenuOpen && (
+                <div 
+                  id="nav-dropdown-menu"
+                  className="absolute right-0 mt-2 w-72 bg-white rounded-2xl shadow-xl border border-slate-200/90 py-2 z-50 animate-in fade-in zoom-in-95 duration-150 overflow-hidden"
+                >
+                  <div className="px-3.5 py-2 border-b border-slate-100 flex items-center justify-between">
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Navigation Views</span>
+                    <span className="text-[10px] text-red-600 font-semibold">GINI Outreach</span>
+                  </div>
+
+                  <div className="p-1.5 space-y-1">
+                    {/* Item 1: All Leads */}
+                    <button
+                      id="menu-tab-leads"
+                      type="button"
+                      onClick={() => { onTabChange('leads'); setIsNavMenuOpen(false); }}
+                      className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs transition-all cursor-pointer ${
+                        currentTab === 'leads'
+                          ? 'bg-red-50 text-red-700 font-bold border border-red-200/80 shadow-2xs'
+                          : 'text-slate-700 hover:bg-slate-50 hover:text-slate-900'
+                      }`}
+                    >
+                      <div className="flex items-center gap-2.5">
+                        <div className={`p-1.5 rounded-lg ${currentTab === 'leads' ? 'bg-red-600 text-white' : 'bg-slate-100 text-slate-500'}`}>
+                          <Users className="w-4 h-4" />
+                        </div>
+                        <div className="text-left">
+                          <p className="font-semibold leading-tight">All Leads</p>
+                          <p className="text-[10px] text-slate-400 font-normal">Database & prospect sequences</p>
+                        </div>
+                      </div>
+                      {currentTab === 'leads' && <CheckCircle2 className="w-4 h-4 text-red-600" />}
+                    </button>
+
+                    {/* Item 2: Needs Reply */}
+                    <button
+                      id="menu-tab-replied"
+                      type="button"
+                      onClick={() => { onTabChange('replied'); setIsNavMenuOpen(false); }}
+                      className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs transition-all cursor-pointer ${
+                        currentTab === 'replied'
+                          ? 'bg-red-50 text-red-700 font-bold border border-red-200/80 shadow-2xs'
+                          : 'text-slate-700 hover:bg-slate-50 hover:text-slate-900'
+                      }`}
+                    >
+                      <div className="flex items-center gap-2.5">
+                        <div className={`p-1.5 rounded-lg ${currentTab === 'replied' ? 'bg-red-600 text-white' : 'bg-red-50 text-red-600'}`}>
+                          <MessageSquareReply className="w-4 h-4" />
+                        </div>
+                        <div className="text-left">
+                          <p className="font-semibold leading-tight">Needs Reply</p>
+                          <p className="text-[10px] text-slate-400 font-normal">Prospect responses</p>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        {repliedCount > 0 && (
+                          <span className="px-2 py-0.5 text-[10px] font-bold text-white bg-red-600 rounded-full animate-pulse shadow-xs">
+                            {repliedCount}
+                          </span>
+                        )}
+                        {currentTab === 'replied' && <CheckCircle2 className="w-4 h-4 text-red-600" />}
+                      </div>
+                    </button>
+
+                    {/* Item 3: Workflow Canvas */}
+                    <button
+                      id="menu-tab-workflows"
+                      type="button"
+                      onClick={() => { onTabChange('workflows'); setIsNavMenuOpen(false); }}
+                      className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs transition-all cursor-pointer ${
+                        currentTab === 'workflows'
+                          ? 'bg-red-50 text-red-700 font-bold border border-red-200/80 shadow-2xs'
+                          : 'text-slate-700 hover:bg-slate-50 hover:text-slate-900'
+                      }`}
+                    >
+                      <div className="flex items-center gap-2.5">
+                        <div className={`p-1.5 rounded-lg ${currentTab === 'workflows' ? 'bg-red-600 text-white' : 'bg-slate-100 text-slate-500'}`}>
+                          <Layers className="w-4 h-4" />
+                        </div>
+                        <div className="text-left">
+                          <p className="font-semibold leading-tight">Workflow Canvas</p>
+                          <p className="text-[10px] text-slate-400 font-normal">Visual node sequence builder</p>
+                        </div>
+                      </div>
+                      {currentTab === 'workflows' && <CheckCircle2 className="w-4 h-4 text-red-600" />}
+                    </button>
+
+                    {/* Item 4: Tasks */}
+                    <button
+                      id="menu-tab-tasks"
+                      type="button"
+                      onClick={() => { onTabChange('tasks'); setIsNavMenuOpen(false); }}
+                      className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs transition-all cursor-pointer ${
+                        currentTab === 'tasks'
+                          ? 'bg-red-50 text-red-700 font-bold border border-red-200/80 shadow-2xs'
+                          : 'text-slate-700 hover:bg-slate-50 hover:text-slate-900'
+                      }`}
+                    >
+                      <div className="flex items-center gap-2.5">
+                        <div className={`p-1.5 rounded-lg ${currentTab === 'tasks' ? 'bg-red-600 text-white' : 'bg-slate-100 text-slate-500'}`}>
+                          <CheckSquare className="w-4 h-4" />
+                        </div>
+                        <div className="text-left">
+                          <p className="font-semibold leading-tight">Tasks</p>
+                          <p className="text-[10px] text-slate-400 font-normal">Manual call & outreach tasks</p>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        {tasksCount > 0 && (
+                          <span className="px-2 py-0.5 text-[10px] font-bold text-white bg-blue-600 rounded-full shadow-xs">
+                            {tasksCount}
+                          </span>
+                        )}
+                        {currentTab === 'tasks' && <CheckCircle2 className="w-4 h-4 text-red-600" />}
+                      </div>
+                    </button>
+
+                    {/* Item 5: Templates */}
+                    <button
+                      id="menu-tab-templates"
+                      type="button"
+                      onClick={() => { onTabChange('templates'); setIsNavMenuOpen(false); }}
+                      className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs transition-all cursor-pointer ${
+                        currentTab === 'templates'
+                          ? 'bg-red-50 text-red-700 font-bold border border-red-200/80 shadow-2xs'
+                          : 'text-slate-700 hover:bg-slate-50 hover:text-slate-900'
+                      }`}
+                    >
+                      <div className="flex items-center gap-2.5">
+                        <div className={`p-1.5 rounded-lg ${currentTab === 'templates' ? 'bg-red-600 text-white' : 'bg-slate-100 text-slate-500'}`}>
+                          <FileEdit className="w-4 h-4" />
+                        </div>
+                        <div className="text-left">
+                          <p className="font-semibold leading-tight">Templates</p>
+                          <p className="text-[10px] text-slate-400 font-normal">Email copy & stages (1-7)</p>
+                        </div>
+                      </div>
+                      {currentTab === 'templates' && <CheckCircle2 className="w-4 h-4 text-red-600" />}
+                    </button>
+
+                    {/* Item 6: Analytics */}
+                    <button
+                      id="menu-tab-analytics"
+                      type="button"
+                      onClick={() => { onTabChange('analytics'); setIsNavMenuOpen(false); }}
+                      className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs transition-all cursor-pointer ${
+                        currentTab === 'analytics'
+                          ? 'bg-red-50 text-red-700 font-bold border border-red-200/80 shadow-2xs'
+                          : 'text-slate-700 hover:bg-slate-50 hover:text-slate-900'
+                      }`}
+                    >
+                      <div className="flex items-center gap-2.5">
+                        <div className={`p-1.5 rounded-lg ${currentTab === 'analytics' ? 'bg-red-600 text-white' : 'bg-slate-100 text-slate-500'}`}>
+                          <TrendingUp className="w-4 h-4" />
+                        </div>
+                        <div className="text-left">
+                          <p className="font-semibold leading-tight">Analytics</p>
+                          <p className="text-[10px] text-slate-400 font-normal">Opens, clicks & metrics</p>
+                        </div>
+                      </div>
+                      {currentTab === 'analytics' && <CheckCircle2 className="w-4 h-4 text-red-600" />}
+                    </button>
+
+                    {/* Item 7: Settings */}
+                    <button
+                      id="menu-tab-settings"
+                      type="button"
+                      onClick={() => { onTabChange('settings'); setIsNavMenuOpen(false); }}
+                      className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs transition-all cursor-pointer ${
+                        currentTab === 'settings'
+                          ? 'bg-red-50 text-red-700 font-bold border border-red-200/80 shadow-2xs'
+                          : 'text-slate-700 hover:bg-slate-50 hover:text-slate-900'
+                      }`}
+                    >
+                      <div className="flex items-center gap-2.5">
+                        <div className={`p-1.5 rounded-lg ${currentTab === 'settings' ? 'bg-red-600 text-white' : 'bg-slate-100 text-slate-500'}`}>
+                          <SettingsIcon className="w-4 h-4" />
+                        </div>
+                        <div className="text-left">
+                          <p className="font-semibold leading-tight">Settings & Logo</p>
+                          <p className="text-[10px] text-slate-400 font-normal">Sender config & system controls</p>
+                        </div>
+                      </div>
+                      {currentTab === 'settings' && <CheckCircle2 className="w-4 h-4 text-red-600" />}
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
         </div>
       </div>

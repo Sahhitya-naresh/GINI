@@ -15,6 +15,10 @@
   --color-gini-red-950: #450a0a;
 }
 
+html {
+  scrollbar-gutter: stable;
+}
+
 /* Custom scrollbars */
 ::-webkit-scrollbar {
   width: 6px;

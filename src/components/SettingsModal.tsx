@@ -301,21 +301,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             >
               {/* Logo Preview (Shown as it is) */}
               <div className="p-2 bg-white rounded-lg border border-slate-200 shadow-2xs shrink-0 flex items-center justify-center min-w-[120px] min-h-[50px]">
-                {formData.customLogoUrl ? (
-                  <img 
-                    src={formData.customLogoUrl} 
-                    alt="Uploaded Company Logo" 
-                    className="max-h-12 max-w-[180px] object-contain"
-                    referrerPolicy="no-referrer"
-                  />
-                ) : (
-                  <div className="flex items-center gap-2">
-                    <span className="w-8 h-8 rounded-lg bg-red-600 text-white font-black flex items-center justify-center text-xs">
-                      GINI
-                    </span>
-                    <span className="text-xs text-slate-400 font-medium">Default Mark</span>
-                  </div>
-                )}
+                <img 
+                  src={formData.customLogoUrl || '/gini-iris-logo.png'} 
+                  alt="Company Logo Preview" 
+                  className="max-h-12 max-w-[180px] object-contain"
+                  referrerPolicy="no-referrer"
+                />
               </div>
 
               {/* Upload CTA & Dropzone */}

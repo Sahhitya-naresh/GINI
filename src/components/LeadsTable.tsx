@@ -198,34 +198,10 @@ export const LeadsTable: React.FC<LeadsTableProps> = ({
     }
   };
 
-  const renderStageBadge = (stage: number, status?: Lead['status']) => {
-    if (status === 'Completed') {
-      return (
-        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">
-          <CheckCircle2 className="w-3 h-3 text-emerald-600" />
-          <span>Stage {stage}: Completed</span>
-        </span>
-      );
-    }
-    if (status === 'Replied') {
-      return (
-        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-semibold bg-purple-50 text-purple-700 border border-purple-200">
-          <CheckCircle2 className="w-3 h-3 text-purple-600" />
-          <span>Stage {stage}: Replied</span>
-        </span>
-      );
-    }
-    if (stage === 0) {
-      return (
-        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-medium bg-slate-100 text-slate-600 border border-slate-200">
-          Stage 0: Ready
-        </span>
-      );
-    }
-    const template = templates.find(t => t.stage === stage);
+  const renderStageBadge = (stage: number) => {
     return (
-      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-semibold bg-red-50 text-red-700 border border-red-200/80">
-        Stage {stage}: {template?.name || `Stage ${stage}`}
+      <span className="inline-flex items-center px-2 py-0.5 rounded-md text-xs font-semibold bg-slate-100 text-slate-700 border border-slate-200">
+        Stage {stage}
       </span>
     );
   };
@@ -448,7 +424,7 @@ export const LeadsTable: React.FC<LeadsTableProps> = ({
           <table className="w-full text-left border-collapse text-xs">
             <thead>
               <tr className="bg-slate-50/80 border-b border-slate-200 text-slate-500 uppercase tracking-wider font-semibold text-[11px]">
-                <th className="py-3 px-3 w-10 text-center">
+                <th className="py-2.5 px-2.5 w-9 text-center">
                   <input
                     type="checkbox"
                     checked={filteredLeads.length > 0 && selectedLeadIds.size === filteredLeads.length}
@@ -457,12 +433,12 @@ export const LeadsTable: React.FC<LeadsTableProps> = ({
                     title="Select / Deselect all visible leads"
                   />
                 </th>
-                <th className="py-3 px-4">Lead</th>
-                <th className="py-3 px-4">Company &amp; Role</th>
-                <th className="py-3 px-4">Current Stage</th>
-                <th className="py-3 px-4">Status</th>
-                <th className="py-3 px-4">Next Send Date</th>
-                <th className="py-3 px-4">
+                <th className="py-2.5 px-3">Lead</th>
+                <th className="py-2.5 px-3">Company &amp; Role</th>
+                <th className="py-2.5 px-3 whitespace-nowrap">Current Stage</th>
+                <th className="py-2.5 px-3 whitespace-nowrap">Status</th>
+                <th className="py-2.5 px-3 whitespace-nowrap">Next Send Date</th>
+                <th className="py-2.5 px-3 whitespace-nowrap">
                   <div className="flex items-center gap-1">
                     <span>Engagement</span>
                     <span
@@ -473,14 +449,13 @@ export const LeadsTable: React.FC<LeadsTableProps> = ({
                     </span>
                   </div>
                 </th>
-                <th className="py-3 px-4">Thread ID</th>
-                <th className="py-3 px-4 text-right">Actions</th>
+                <th className="py-2.5 px-3 text-right whitespace-nowrap">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
               {filteredLeads.length === 0 ? (
                 <tr>
-                  <td colSpan={9} className="py-12 text-center text-slate-400">
+                  <td colSpan={8} className="py-12 text-center text-slate-400">
                     <p className="text-sm font-medium text-slate-600">No leads found</p>
                     <p className="text-xs text-slate-400 mt-1">Try changing your search keywords or status filter</p>
                   </td>
@@ -504,7 +479,7 @@ export const LeadsTable: React.FC<LeadsTableProps> = ({
                         isReplied ? 'bg-red-50/40' : isDue ? 'bg-red-50/20' : ''
                       }`}
                     >
-                      <td className="py-3 px-3 text-center">
+                      <td className="py-2.5 px-2.5 text-center">
                         <input
                           type="checkbox"
                           checked={selectedLeadIds.has(lead.leadId)}
@@ -513,10 +488,10 @@ export const LeadsTable: React.FC<LeadsTableProps> = ({
                         />
                       </td>
                       {/* Lead Name & Email & LinkedIn */}
-                      <td className="py-3.5 px-4">
+                      <td className="py-2.5 px-3 max-w-[200px]">
                         <div className="font-semibold text-slate-900 flex items-center gap-1.5">
-                          <span>{lead.name}</span>
-                          <span className="text-[10px] font-mono font-normal text-slate-400 bg-slate-100 px-1.5 py-0.2 rounded">
+                          <span className="truncate">{lead.name}</span>
+                          <span className="text-[10px] font-mono font-normal text-slate-400 bg-slate-100 px-1.5 py-0.2 rounded shrink-0">
                             {lead.leadId}
                           </span>
                           {lead.linkedinUrl && (
@@ -524,20 +499,20 @@ export const LeadsTable: React.FC<LeadsTableProps> = ({
                               href={lead.linkedinUrl.startsWith('http') ? lead.linkedinUrl : `https://${lead.linkedinUrl}`}
                               target="_blank"
                               rel="noreferrer"
-                              className="text-blue-600 hover:text-blue-800 p-0.5 rounded hover:bg-blue-50"
+                              className="text-blue-600 hover:text-blue-800 p-0.5 rounded hover:bg-blue-50 shrink-0"
                               title={`LinkedIn Profile: ${lead.linkedinUrl}`}
                             >
                               <ExternalLink className="w-3 h-3" />
                             </a>
                           )}
                         </div>
-                        <div className="text-[11px] text-slate-500 flex items-center gap-1 mt-0.5">
-                          <Mail className="w-3 h-3 text-slate-400" />
-                          <span>{lead.email}</span>
+                        <div className="text-[11px] text-slate-500 flex items-center gap-1 mt-0.5 truncate">
+                          <Mail className="w-3 h-3 text-slate-400 shrink-0" />
+                          <span className="truncate">{lead.email}</span>
                         </div>
                         {lead.campaign && (
                           <div className="mt-1">
-                            <span className="inline-flex items-center px-1.5 py-0.2 rounded text-[10px] font-medium bg-slate-100 text-slate-600 border border-slate-200">
+                            <span className="inline-flex items-center px-1.5 py-0.2 rounded text-[10px] font-medium bg-slate-100 text-slate-600 border border-slate-200 truncate max-w-[180px]">
                               {lead.campaign}
                             </span>
                           </div>
@@ -545,13 +520,13 @@ export const LeadsTable: React.FC<LeadsTableProps> = ({
                       </td>
 
                       {/* Company & Role & Pain Point */}
-                      <td className="py-3.5 px-4 max-w-xs">
+                      <td className="py-2.5 px-3 max-w-[170px]">
                         <div className="font-medium text-slate-800 flex items-center gap-1">
-                          <Building2 className="w-3.5 h-3.5 text-slate-400" />
-                          <span>{lead.company}</span>
+                          <Building2 className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                          <span className="truncate">{lead.company}</span>
                         </div>
                         {lead.jobTitle && (
-                          <div className="text-[11px] text-slate-600 font-medium mt-0.5">
+                          <div className="text-[11px] text-slate-600 font-medium mt-0.5 truncate">
                             {lead.jobTitle}
                           </div>
                         )}
@@ -561,25 +536,17 @@ export const LeadsTable: React.FC<LeadsTableProps> = ({
                       </td>
 
                       {/* Current Stage */}
-                      <td className="py-3.5 px-4">
-                        {renderStageBadge(lead.currentStage, lead.status)}
-                        {lead.currentNodeId && lead.status !== 'Completed' && lead.status !== 'Replied' && (
-                          <div className="text-[10px] font-mono text-slate-500 mt-1 flex items-center gap-1">
-                            <span className="w-1.5 h-1.5 rounded-full bg-red-500 shrink-0"></span>
-                            <span className="truncate max-w-[100px]" title={`Current Workflow Node: ${lead.currentNodeId}`}>
-                              {lead.currentNodeId}
-                            </span>
-                          </div>
-                        )}
+                      <td className="py-2.5 px-3 whitespace-nowrap">
+                        {renderStageBadge(lead.currentStage)}
                       </td>
 
                       {/* Status */}
-                      <td className="py-3.5 px-4">
+                      <td className="py-2.5 px-3 whitespace-nowrap">
                         {renderStatusBadge(lead.status)}
                       </td>
 
                       {/* Next Send Date */}
-                      <td className="py-3.5 px-4">
+                      <td className="py-2.5 px-3 whitespace-nowrap">
                         <div className="flex items-center gap-1.5">
                           <span className={`font-medium ${isDue ? 'text-red-700 font-bold' : 'text-slate-700'}`}>
                             {formatDisplayDate(lead.nextSendDate)}
@@ -598,8 +565,8 @@ export const LeadsTable: React.FC<LeadsTableProps> = ({
                       </td>
 
                       {/* Engagement: Opens & Clicks */}
-                      <td className="py-3.5 px-4">
-                        <div className="space-y-1">
+                      <td className="py-2.5 px-3 whitespace-nowrap">
+                        <div className="space-y-0.5">
                           <div 
                             className={`flex items-center gap-1 text-[11px] font-medium ${
                               (lead.opensCount || 0) > 0 ? 'text-blue-700' : 'text-slate-400'
@@ -621,30 +588,8 @@ export const LeadsTable: React.FC<LeadsTableProps> = ({
                         </div>
                       </td>
 
-                      {/* Thread ID */}
-                      <td className="py-3.5 px-4">
-                        {lead.threadId ? (
-                          <div className="flex items-center gap-1">
-                            <span className="font-mono text-[11px] text-slate-600 truncate max-w-[90px]" title={lead.threadId}>
-                              {lead.threadId}
-                            </span>
-                            <a
-                              href={`https://outlook.office.com/mail/deeplink/read/${encodeURIComponent(lead.threadId)}`}
-                              target="_blank"
-                              rel="noreferrer"
-                              className="text-slate-400 hover:text-red-600 p-0.5"
-                              title="Open in Outlook"
-                            >
-                              <ExternalLink className="w-3 h-3" />
-                            </a>
-                          </div>
-                        ) : (
-                          <span className="text-slate-400 text-[11px]">—</span>
-                        )}
-                      </td>
-
                       {/* Actions */}
-                      <td className="py-3.5 px-4 text-right">
+                      <td className="py-2.5 px-3 text-right whitespace-nowrap">
                         <div className="flex items-center justify-end gap-1.5">
                           
                           {/* Pause / Resume Button */}

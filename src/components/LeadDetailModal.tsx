@@ -315,8 +315,18 @@ export const LeadDetailModal: React.FC<LeadDetailModalProps> = ({
                 </a>
               </span>
               {lead.threadId && (
-                <span className="font-mono text-[11px] text-slate-400">
-                  Thread ID: {lead.threadId}
+                <span className="font-mono text-[11px] text-slate-500 bg-slate-100 px-2 py-0.5 rounded flex items-center gap-1 border border-slate-200">
+                  <span>Thread:</span>
+                  <span className="text-slate-800 font-semibold">{lead.threadId}</span>
+                  <a
+                    href={`https://outlook.office.com/mail/deeplink/read/${encodeURIComponent(lead.threadId)}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-red-600 hover:text-red-700 p-0.5 inline-flex items-center"
+                    title="Open thread in Outlook Web"
+                  >
+                    <ExternalLink className="w-3 h-3" />
+                  </a>
                 </span>
               )}
             </div>
