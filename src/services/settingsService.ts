@@ -17,7 +17,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
     7: 3
   },
   skipWeekends: true,
-  senderName: 'Alex from GINI Outreach Flow',
+  senderName: 'Alex from Giniiris outreach flow',
   senderEmail: '',
   customLogoUrl: ''
 };

@@ -358,7 +358,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     setFormData({ ...formData, senderName: newName });
                     setLocalSenders(prev => prev.map(s => s.isPrimary ? { ...s, name: newName } : s));
                   }}
-                  placeholder="e.g. Alex from GINI Outreach"
+                  placeholder="e.g. Alex from Giniiris outreach"
                   className="w-full text-xs sm:text-sm px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-red-500 focus:border-red-500"
                   required
                 />
@@ -727,7 +727,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           <div className="p-3.5 bg-red-50 border border-red-200 rounded-xl text-xs text-red-950 flex items-start gap-2">
             <ShieldCheck className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
             <div className="leading-relaxed">
-              <strong>Automatic Safety Rule:</strong> If a prospect replies to any stage email in Microsoft Outlook or the active email provider, GINI Outreach Flow immediately detects it, moves them to the <em>Needs Manual Reply</em> queue, and halts all subsequent automated stages permanently.
+              <strong>Automatic Safety Rule:</strong> If a prospect replies to any stage email in Microsoft Outlook or the active email provider, Giniiris outreach flow immediately detects it, moves them to the <em>Needs Manual Reply</em> queue, and halts all subsequent automated stages permanently.
             </div>
           </div>
 

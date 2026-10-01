@@ -275,7 +275,7 @@ export const Header: React.FC<HeaderProps> = ({
                 >
                   <div className="px-3.5 py-2 border-b border-slate-100 flex items-center justify-between">
                     <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Navigation Views</span>
-                    <span className="text-[10px] text-red-600 font-semibold">GINI Outreach</span>
+                    <span className="text-[10px] text-red-600 font-semibold">Giniiris outreach</span>
                   </div>
 
                   <div className="p-1.5 space-y-1">
