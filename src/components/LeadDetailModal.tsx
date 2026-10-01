@@ -285,6 +285,7 @@ export const LeadDetailModal: React.FC<LeadDetailModalProps> = ({
   const isSequenceFinished = lead.status === 'Completed' || lead.status === 'Replied' || lead.status === 'Broke Up' || (maxWorkflowStages > 0 && lead.currentStage >= maxWorkflowStages);
   const hasMoreStages = nextStageNum <= maxWorkflowStages && !isSequenceFinished && lead.status !== 'Paused';
   const nextTemplate = templates.find(t => t.stage === nextStageNum);
+  const stageList = [1, 2, 3, 4, 5, 6, 7];
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-3 sm:p-6 overflow-y-auto">
@@ -343,37 +344,45 @@ export const LeadDetailModal: React.FC<LeadDetailModalProps> = ({
           </div>
         </div>
 
-        {/* 7-Stage Horizontal Stepper */}
-        <div className="px-6 py-4 bg-white border-b border-slate-100 overflow-x-auto">
-          <div className="flex items-center justify-between min-w-[620px] gap-1">
-            {[1, 2, 3, 4, 5, 6, 7].map((stageNum) => {
+        {/* Stage Horizontal Stepper - Unified single place, no scroll */}
+        <div className="px-6 py-3.5 bg-slate-50/50 border-b border-slate-100">
+          <div className="flex items-start justify-between w-full">
+            {stageList.map((stageNum, idx) => {
               const template = templates.find(t => t.stage === stageNum);
               const isPast = lead.currentStage >= stageNum;
               const isCurrent = lead.currentStage === stageNum - 1 && lead.status === 'Active';
+              const isLast = idx === stageList.length - 1;
               
               return (
-                <div key={stageNum} className="flex-1 flex items-center">
-                  <div className="flex flex-col items-center flex-1 text-center">
+                <div key={stageNum} className={`flex items-start ${isLast ? 'flex-none' : 'flex-1'}`}>
+                  {/* Circle + Label */}
+                  <div className="flex flex-col items-center text-center shrink-0">
                     <div
-                      className={`w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold transition-all ${
+                      className={`w-6 h-6 sm:w-7 sm:h-7 rounded-full flex items-center justify-center text-xs font-bold transition-all ${
                         isPast
-                          ? 'bg-red-600 text-white shadow-xs'
+                          ? 'bg-red-600 text-white shadow-2xs'
                           : isCurrent
                           ? 'bg-red-600 text-white ring-4 ring-red-100 animate-pulse'
-                          : 'bg-slate-100 text-slate-400 border border-slate-200'
+                          : 'bg-white text-slate-400 border border-slate-200'
                       }`}
                     >
-                      {isPast ? <CheckCircle2 className="w-4 h-4" /> : stageNum}
+                      {isPast ? <CheckCircle2 className="w-3.5 h-3.5 sm:w-4 sm:h-4" /> : stageNum}
                     </div>
-                    <span className={`text-[11px] mt-1.5 font-medium truncate max-w-[80px] ${
-                      isPast ? 'text-red-900 font-semibold' : isCurrent ? 'text-red-600 font-bold' : 'text-slate-400'
-                    }`}>
+                    <span 
+                      className={`text-[10px] sm:text-[11px] mt-1 font-medium truncate max-w-[50px] sm:max-w-[76px] block ${
+                        isPast ? 'text-red-900 font-semibold' : isCurrent ? 'text-red-600 font-bold' : 'text-slate-400'
+                      }`}
+                      title={template?.name || `Stage ${stageNum}`}
+                    >
                       {template?.name || `Stage ${stageNum}`}
                     </span>
                   </div>
 
-                  {stageNum < 7 && (
-                    <div className={`h-0.5 w-6 sm:w-10 mx-1 ${isPast ? 'bg-red-600' : 'bg-slate-200'}`} />
+                  {/* Flexible Dynamic Connector */}
+                  {!isLast && (
+                    <div className="flex-1 mx-1.5 sm:mx-2 mt-3 sm:mt-3.5">
+                      <div className={`h-0.5 w-full rounded-full transition-colors ${isPast ? 'bg-red-600' : 'bg-slate-200'}`} />
+                    </div>
                   )}
                 </div>
               );
