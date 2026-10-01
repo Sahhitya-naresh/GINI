@@ -1,4 +1,5 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import { Routes, Route, Navigate, useLocation, useNavigate } from 'react-router-dom';
 import { Lead, StageTemplate, AppSettings, SendLogEntry, CampaignWorkflow, ConnectedSender, LeadManualTask, TrackingEvent } from './types';
 import { 
   getOutlookProfile, 
@@ -34,12 +35,18 @@ import {
 } from './services/leadBackendService';
 import { addBusinessDays, getTodayDateString, isLeadDueForNextSend } from './utils/dateUtils';
 
-// Components
+// Pages
+import {
+  LeadsPage,
+  NeedsReplyPage,
+  WorkflowsPage,
+  TasksPage,
+  TemplatesPage,
+  AnalyticsPage
+} from './pages';
+
+// Components & Modals
 import { Header } from './components/Header';
-import { LeadsTable } from './components/LeadsTable';
-import { NeedsManualReplyView } from './components/NeedsManualReplyView';
-import { TemplateAdmin } from './components/TemplateAdmin';
-import { AnalyticsDashboard } from './components/AnalyticsDashboard';
 import { LeadDetailModal } from './components/LeadDetailModal';
 import { CampaignSchedulerModal } from './components/CampaignSchedulerModal';
 import { AddLeadModal } from './components/AddLeadModal';
@@ -47,8 +54,6 @@ import { ImportLeadsModal } from './components/ImportLeadsModal';
 import { SettingsModal } from './components/SettingsModal';
 import { ConfirmationModal } from './components/ConfirmationModal';
 import { NotificationHub, AppActionLog } from './components/NotificationHub';
-import { WorkflowCanvas } from './components/workflow/WorkflowCanvas';
-import { ManualTasksDashboard } from './components/ManualTasksDashboard';
 
 // Icons
 import { AlertCircle, CheckCircle2, FileSpreadsheet, PlusCircle, Sparkles, Send, AlertTriangle, X } from 'lucide-react';
@@ -268,8 +273,33 @@ export default function App() {
     leadsRef.current = leads;
   }, [leads]);
 
-  // Navigation & Modals
-  const [currentTab, setCurrentTab] = useState<'leads' | 'replied' | 'workflows' | 'tasks' | 'templates' | 'analytics' | 'settings'>('leads');
+  // Navigation & Routing
+  const location = useLocation();
+  const navigate = useNavigate();
+
+  const currentTab = useMemo<'leads' | 'replied' | 'workflows' | 'tasks' | 'templates' | 'analytics' | 'settings'>(() => {
+    const segment = location.pathname.replace(/^\//, '').split('/')[0];
+    switch (segment) {
+      case 'replied': return 'replied';
+      case 'workflows': return 'workflows';
+      case 'tasks': return 'tasks';
+      case 'templates': return 'templates';
+      case 'analytics': return 'analytics';
+      case 'settings': return 'settings';
+      case 'leads':
+      default:
+        return 'leads';
+    }
+  }, [location.pathname]);
+
+  const handleTabChange = useCallback((tab: 'leads' | 'replied' | 'workflows' | 'tasks' | 'templates' | 'analytics' | 'settings') => {
+    if (tab === 'settings') {
+      setIsSettingsOpen(true);
+    } else {
+      navigate(`/${tab}`);
+    }
+  }, [navigate]);
+
   const [leadsCampaignFilter, setLeadsCampaignFilter] = useState<string>('ALL');
   const [trackingEvents, setTrackingEvents] = useState<TrackingEvent[]>([]);
   const [selectedLead, setSelectedLead] = useState<Lead | null>(null);
@@ -1576,13 +1606,7 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
         repliedCount={repliedCount}
         tasksCount={manualTasks.filter(t => !t.isCompleted).length}
         currentTab={currentTab}
-        onTabChange={(tab) => {
-          if (tab === 'settings') {
-            setIsSettingsOpen(true);
-          } else {
-            setCurrentTab(tab);
-          }
-        }}
+        onTabChange={handleTabChange}
         onSync={syncData}
         isSyncing={isSyncing}
         onOpenScheduler={() => setIsSchedulerOpen(true)}
@@ -1612,87 +1636,104 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
         </div>
       )}
 
-      {/* Main Content Area */}
+      {/* Main Content Area (Routing Based) */}
       <main className="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 lg:p-8">
-        {currentTab === 'leads' && (
-          <LeadsTable
-            leads={leads}
-            templates={templates}
-            campaigns={workflows}
-            onBulkAssignCampaign={handleBulkAssignCampaign}
-            initialCampaignFilter={leadsCampaignFilter}
-            onSelectLead={handleSelectLead}
-            onTogglePause={handleTogglePause}
-            onSendNextStage={handleInitiateSendNextStage}
-            onDeleteLead={handleDeleteLead}
-            onOpenAddLead={() => setIsAddLeadOpen(true)}
-            onOpenImportLeads={() => setIsImportLeadsOpen(true)}
-            onCheckReplies={handleCheckAllReplies}
-            isCheckingReplies={isCheckingReplies}
-            lastCheckedTime={lastCheckedTime}
-            onOpenScheduler={() => setIsSchedulerOpen(true)}
-            dueCount={dueCount}
+        <Routes>
+          <Route path="/" element={<Navigate to="/leads" replace />} />
+          <Route 
+            path="/leads" 
+            element={
+              <LeadsPage
+                leads={leads}
+                templates={templates}
+                campaigns={workflows}
+                onBulkAssignCampaign={handleBulkAssignCampaign}
+                initialCampaignFilter={leadsCampaignFilter}
+                onSelectLead={handleSelectLead}
+                onTogglePause={handleTogglePause}
+                onSendNextStage={handleInitiateSendNextStage}
+                onDeleteLead={handleDeleteLead}
+                onOpenAddLead={() => setIsAddLeadOpen(true)}
+                onOpenImportLeads={() => setIsImportLeadsOpen(true)}
+                onCheckReplies={handleCheckAllReplies}
+                isCheckingReplies={isCheckingReplies}
+                lastCheckedTime={lastCheckedTime}
+                onOpenScheduler={() => setIsSchedulerOpen(true)}
+                dueCount={dueCount}
+              />
+            } 
           />
-        )}
-
-        {currentTab === 'replied' && (
-          <NeedsManualReplyView
-            leads={leads}
-            onSelectLead={handleSelectLead}
-            onUpdateStatus={handleUpdateLeadStatus}
+          <Route 
+            path="/replied" 
+            element={
+              <NeedsReplyPage
+                leads={leads}
+                onSelectLead={handleSelectLead}
+                onUpdateStatus={handleUpdateLeadStatus}
+              />
+            } 
           />
-        )}
-
-        {currentTab === 'workflows' && (
-          <WorkflowCanvas
-            workflows={workflows}
-            activeWorkflowId={activeWorkflowId}
-            senders={senders}
-            templates={templates}
-            leads={leads}
-            onSaveWorkflow={handleSaveWorkflow}
-            onSelectWorkflow={(id) => setActiveWorkflowId(id)}
-            onCreateWorkflow={handleCreateWorkflow}
-            onDuplicateWorkflow={handleDuplicateWorkflow}
-            onDeleteWorkflow={handleDeleteWorkflow}
-            onResetWorkflows={handleResetWorkflows}
-            onToggleActive={handleToggleWorkflowActive}
+          <Route 
+            path="/workflows" 
+            element={
+              <WorkflowsPage
+                workflows={workflows}
+                activeWorkflowId={activeWorkflowId}
+                senders={senders}
+                templates={templates}
+                leads={leads}
+                onSaveWorkflow={handleSaveWorkflow}
+                onSelectWorkflow={(id) => setActiveWorkflowId(id)}
+                onCreateWorkflow={handleCreateWorkflow}
+                onDuplicateWorkflow={handleDuplicateWorkflow}
+                onDeleteWorkflow={handleDeleteWorkflow}
+                onResetWorkflows={handleResetWorkflows}
+                onToggleActive={handleToggleWorkflowActive}
+              />
+            } 
           />
-        )}
-
-        {currentTab === 'tasks' && (
-          <ManualTasksDashboard
-            tasks={manualTasks}
-            onToggleTask={handleToggleManualTask}
-            onSelectLead={handleSelectLead}
-            leads={leads}
+          <Route 
+            path="/tasks" 
+            element={
+              <TasksPage
+                tasks={manualTasks}
+                onToggleTask={handleToggleManualTask}
+                onSelectLead={handleSelectLead}
+                leads={leads}
+              />
+            } 
           />
-        )}
-
-        {currentTab === 'templates' && (
-          <TemplateAdmin
-            templates={templates}
-            onSaveTemplates={handleSaveTemplates}
-            leads={leads}
-            senderName={settings.senderName}
-            senders={senders}
+          <Route 
+            path="/templates" 
+            element={
+              <TemplatesPage
+                templates={templates}
+                onSaveTemplates={handleSaveTemplates}
+                leads={leads}
+                senderName={settings.senderName}
+                senders={senders}
+              />
+            } 
           />
-        )}
-
-        {currentTab === 'analytics' && (
-          <AnalyticsDashboard
-            leads={leads}
-            templates={templates}
-            trackingEvents={trackingEvents}
-            onRefresh={handleRefreshAnalytics}
-            onNavigateToLeads={(campaignName) => {
-              if (campaignName) {
-                setLeadsCampaignFilter(campaignName);
-              }
-              setCurrentTab('leads');
-            }}
+          <Route 
+            path="/analytics" 
+            element={
+              <AnalyticsPage
+                leads={leads}
+                templates={templates}
+                trackingEvents={trackingEvents}
+                onRefresh={handleRefreshAnalytics}
+                onNavigateToLeads={(campaignName) => {
+                  if (campaignName) {
+                    setLeadsCampaignFilter(campaignName);
+                  }
+                  navigate('/leads');
+                }}
+              />
+            } 
           />
-        )}
+          <Route path="*" element={<Navigate to="/leads" replace />} />
+        </Routes>
       </main>
 
       {/* Lead Detail & Thread Modal */}
@@ -1846,7 +1887,7 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
           setSelectedLead(targetLead);
           setIsLeadDetailOpen(true);
         }}
-        onNavigateToTab={(tab) => setCurrentTab(tab)}
+        onNavigateToTab={(tab) => handleTabChange(tab)}
         actionLogs={actionLogs}
         onClearActionLogs={() => {
           setActionLogs([]);
