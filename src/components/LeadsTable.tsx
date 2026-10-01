@@ -76,6 +76,11 @@ export const LeadsTable: React.FC<LeadsTableProps> = ({
   const [statusFilter, setStatusFilter] = useState<'ALL' | Lead['status']>('ALL');
   const [stageFilter, setStageFilter] = useState<string>('ALL');
   const [campaignFilter, setCampaignFilter] = useState<string>(initialCampaignFilter || 'ALL');
+  const [engagementFilter, setEngagementFilter] = useState<'ALL' | 'opened' | 'clicked' | 'both' | 'unopened'>('ALL');
+  const [industryFilter, setIndustryFilter] = useState<string>('ALL');
+  const [companyFilter, setCompanyFilter] = useState<string>('ALL');
+  const [dueFilter, setDueFilter] = useState<'ALL' | 'due' | 'upcoming'>('ALL');
+  const [sortBy, setSortBy] = useState<'default' | 'opens' | 'clicks' | 'name' | 'company' | 'nextSendDate'>('default');
   const [leadToDelete, setLeadToDelete] = useState<Lead | null>(null);
 
   // Bulk selection state
@@ -101,6 +106,24 @@ export const LeadsTable: React.FC<LeadsTableProps> = ({
     });
     return Array.from(set).sort();
   }, [leads, campaigns]);
+
+  // Discover distinct industries
+  const availableIndustries = useMemo(() => {
+    const set = new Set<string>();
+    leads.forEach(l => {
+      if (l.industry && l.industry.trim()) set.add(l.industry.trim());
+    });
+    return Array.from(set).sort();
+  }, [leads]);
+
+  // Discover distinct companies
+  const availableCompanies = useMemo(() => {
+    const set = new Set<string>();
+    leads.forEach(l => {
+      if (l.company && l.company.trim()) set.add(l.company.trim());
+    });
+    return Array.from(set).sort();
+  }, [leads]);
 
   const handleToggleSelectAll = () => {
     if (selectedLeadIds.size === filteredLeads.length && filteredLeads.length > 0) {
@@ -137,7 +160,7 @@ export const LeadsTable: React.FC<LeadsTableProps> = ({
   // Filtered and deduplicated leads
   const filteredLeads = useMemo(() => {
     const seen = new Set<string>();
-    return leads.filter((lead, idx) => {
+    const list = leads.filter((lead, idx) => {
       const uniqueKey = lead.leadId?.trim() || lead.email?.trim().toLowerCase() || `lead-${idx}`;
       if (seen.has(uniqueKey)) return false;
       seen.add(uniqueKey);
@@ -151,6 +174,7 @@ export const LeadsTable: React.FC<LeadsTableProps> = ({
           lead.company.toLowerCase().includes(query) ||
           lead.painPoint.toLowerCase().includes(query) ||
           lead.leadId.toLowerCase().includes(query) ||
+          (lead.industry && lead.industry.toLowerCase().includes(query)) ||
           (lead.jobTitle && lead.jobTitle.toLowerCase().includes(query)) ||
           (lead.campaign && lead.campaign.toLowerCase().includes(query)) ||
           lead.notes.toLowerCase().includes(query);
@@ -172,9 +196,70 @@ export const LeadsTable: React.FC<LeadsTableProps> = ({
         return false;
       }
 
+      // Engagement
+      if (engagementFilter === 'opened' && (lead.opensCount || 0) <= 0) return false;
+      if (engagementFilter === 'clicked' && (lead.clicksCount || 0) <= 0) return false;
+      if (engagementFilter === 'both' && ((lead.opensCount || 0) <= 0 || (lead.clicksCount || 0) <= 0)) return false;
+      if (engagementFilter === 'unopened' && (lead.opensCount || 0) > 0) return false;
+
+      // Industry
+      if (industryFilter !== 'ALL' && lead.industry !== industryFilter) return false;
+
+      // Company
+      if (companyFilter !== 'ALL' && lead.company !== companyFilter) return false;
+
+      // Due Filter
+      if (dueFilter === 'due') {
+        const isDue = lead.status === 'Active' && isLeadDueForNextSend(lead.nextSendDate);
+        if (!isDue) return false;
+      }
+      if (dueFilter === 'upcoming') {
+        const isDue = lead.status === 'Active' && isLeadDueForNextSend(lead.nextSendDate);
+        if (isDue || !lead.nextSendDate) return false;
+      }
+
       return true;
     });
-  }, [leads, searchQuery, statusFilter, stageFilter, campaignFilter]);
+
+    // Sorting
+    if (sortBy === 'opens') {
+      list.sort((a, b) => (b.opensCount || 0) - (a.opensCount || 0));
+    } else if (sortBy === 'clicks') {
+      list.sort((a, b) => (b.clicksCount || 0) - (a.clicksCount || 0));
+    } else if (sortBy === 'name') {
+      list.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+    } else if (sortBy === 'company') {
+      list.sort((a, b) => (a.company || '').localeCompare(b.company || ''));
+    } else if (sortBy === 'nextSendDate') {
+      list.sort((a, b) => {
+        if (!a.nextSendDate) return 1;
+        if (!b.nextSendDate) return -1;
+        return a.nextSendDate.localeCompare(b.nextSendDate);
+      });
+    }
+
+    return list;
+  }, [leads, searchQuery, statusFilter, stageFilter, campaignFilter, engagementFilter, industryFilter, companyFilter, dueFilter, sortBy]);
+
+  const activeAdvancedFilterCount = [
+    engagementFilter !== 'ALL',
+    industryFilter !== 'ALL',
+    companyFilter !== 'ALL',
+    dueFilter !== 'ALL',
+    sortBy !== 'default'
+  ].filter(Boolean).length;
+
+  const handleResetFilters = () => {
+    setEngagementFilter('ALL');
+    setIndustryFilter('ALL');
+    setCompanyFilter('ALL');
+    setDueFilter('ALL');
+    setSortBy('default');
+    setStatusFilter('ALL');
+    setStageFilter('ALL');
+    setCampaignFilter('ALL');
+    setSearchQuery('');
+  };
 
   const activeCount = leads.filter(l => l.status === 'Active').length;
   const repliedCount = leads.filter(l => l.status === 'Replied').length;
@@ -358,22 +443,128 @@ export const LeadsTable: React.FC<LeadsTableProps> = ({
 
         </div>
 
-        {/* Filter Pills */}
-        <div className="flex items-center gap-1.5 overflow-x-auto pt-1 text-xs">
-          <span className="text-slate-400 text-[11px] font-semibold uppercase tracking-wider mr-1">Status:</span>
-          {(['ALL', 'Active', 'Replied', 'Paused', 'Completed', 'Broke Up'] as const).map((st) => (
-            <button
-              key={st}
-              onClick={() => setStatusFilter(st)}
-              className={`px-2.5 py-1 rounded-md font-medium transition-colors ${
-                statusFilter === st
-                  ? 'bg-red-600 text-white shadow-2xs font-semibold'
-                  : 'text-slate-600 hover:bg-red-50 hover:text-red-700'
-              }`}
-            >
-              {st === 'ALL' ? 'All' : st}
-            </button>
-          ))}
+        {/* Filter Toolbar: Status Pills + Advanced Filters Strip */}
+        <div className="flex flex-wrap items-center justify-between gap-2.5 pt-2 border-t border-slate-100 text-xs">
+          {/* Status Pills */}
+          <div className="flex items-center gap-1.5 flex-wrap">
+            <span className="text-slate-400 text-[11px] font-semibold uppercase tracking-wider mr-1">Status:</span>
+            {(['ALL', 'Active', 'Replied', 'Paused', 'Completed', 'Broke Up'] as const).map((st) => (
+              <button
+                key={st}
+                onClick={() => setStatusFilter(st)}
+                className={`px-2.5 py-1 rounded-md font-semibold transition-colors ${
+                  statusFilter === st
+                    ? 'bg-red-600 text-white shadow-2xs'
+                    : 'text-slate-600 hover:bg-red-50 hover:text-red-700'
+                }`}
+              >
+                {st === 'ALL' ? 'All' : st}
+              </button>
+            ))}
+          </div>
+
+          {/* Advanced Filters Strip */}
+          <div className="flex items-center gap-2 flex-wrap">
+            {/* Engagement Filter */}
+            <div className="flex items-center gap-1 bg-slate-50 border border-slate-300 rounded-lg px-2 py-1 text-xs w-[138px]">
+              <Eye className="w-3 h-3 text-slate-400 shrink-0" />
+              <select
+                value={engagementFilter}
+                onChange={(e) => setEngagementFilter(e.target.value as any)}
+                className="bg-transparent text-slate-700 font-medium focus:outline-none cursor-pointer w-full truncate"
+                title="Filter by recipient engagement"
+              >
+                <option value="ALL">All Engagement</option>
+                <option value="opened">Opened (&gt;0 opens)</option>
+                <option value="clicked">Clicked Link (&gt;0 clicks)</option>
+                <option value="both">High Intent (Opens + Clicks)</option>
+                <option value="unopened">Unopened (0 opens)</option>
+              </select>
+            </div>
+
+            {/* Company Filter */}
+            {availableCompanies.length > 0 && (
+              <div className="flex items-center gap-1 bg-slate-50 border border-slate-300 rounded-lg px-2 py-1 text-xs w-[138px]">
+                <Building2 className="w-3 h-3 text-slate-400 shrink-0" />
+                <select
+                  value={companyFilter}
+                  onChange={(e) => setCompanyFilter(e.target.value)}
+                  className="bg-transparent text-slate-700 font-medium focus:outline-none cursor-pointer w-full truncate"
+                  title="Filter by company"
+                >
+                  <option value="ALL">All Companies</option>
+                  {availableCompanies.map((comp) => (
+                    <option key={comp} value={comp}>{comp}</option>
+                  ))}
+                </select>
+              </div>
+            )}
+
+            {/* Industry Filter */}
+            {availableIndustries.length > 0 && (
+              <div className="flex items-center gap-1 bg-slate-50 border border-slate-300 rounded-lg px-2 py-1 text-xs w-[138px]">
+                <Filter className="w-3 h-3 text-slate-400 shrink-0" />
+                <select
+                  value={industryFilter}
+                  onChange={(e) => setIndustryFilter(e.target.value)}
+                  className="bg-transparent text-slate-700 font-medium focus:outline-none cursor-pointer w-full truncate"
+                  title="Filter by industry"
+                >
+                  <option value="ALL">All Industries</option>
+                  {availableIndustries.map((ind) => (
+                    <option key={ind} value={ind}>{ind}</option>
+                  ))}
+                </select>
+              </div>
+            )}
+
+            {/* Due / Schedule Filter */}
+            <div className="w-[130px]">
+              <select
+                value={dueFilter}
+                onChange={(e) => setDueFilter(e.target.value as any)}
+                className="text-xs border border-slate-300 rounded-lg px-2 py-1 bg-slate-50 text-slate-700 font-medium focus:outline-none cursor-pointer w-full truncate"
+                title="Filter by next send due status"
+              >
+                <option value="ALL">All Schedules</option>
+                <option value="due">Due Now / Overdue</option>
+                <option value="upcoming">Scheduled Ahead</option>
+              </select>
+            </div>
+
+            {/* Sort By */}
+            <div className="w-[138px]">
+              <select
+                value={sortBy}
+                onChange={(e) => setSortBy(e.target.value as any)}
+                className="text-xs border border-slate-300 rounded-lg px-2 py-1 bg-slate-50 text-slate-700 font-medium focus:outline-none cursor-pointer w-full truncate"
+                title="Sort leads list"
+              >
+                <option value="default">Sort: Default</option>
+                <option value="opens">Sort: Most Opens</option>
+                <option value="clicks">Sort: Most Clicks</option>
+                <option value="name">Sort: Name (A-Z)</option>
+                <option value="company">Sort: Company (A-Z)</option>
+                <option value="nextSendDate">Sort: Next Send Date</option>
+              </select>
+            </div>
+
+            {/* Reset All Filters button (slot preserved so elements never jump horizontally) */}
+            <div className="w-16 flex items-center justify-start shrink-0">
+              <button
+                onClick={handleResetFilters}
+                className={`flex items-center gap-1 text-[11px] font-semibold text-red-600 hover:text-red-800 hover:bg-red-50 px-2 py-1 rounded transition-opacity cursor-pointer ${
+                  (activeAdvancedFilterCount > 0 || statusFilter !== 'ALL' || stageFilter !== 'ALL' || campaignFilter !== 'ALL' || searchQuery.trim())
+                    ? 'opacity-100 pointer-events-auto'
+                    : 'opacity-0 pointer-events-none'
+                }`}
+                title="Reset all active filters"
+              >
+                <RotateCcw className="w-3 h-3" />
+                <span>Reset</span>
+              </button>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -420,7 +611,7 @@ export const LeadsTable: React.FC<LeadsTableProps> = ({
 
       {/* Main Leads Table */}
       <div className="bg-white rounded-xl border border-slate-200 shadow-2xs overflow-hidden">
-        <div className="overflow-x-auto">
+        <div className="overflow-x-auto min-h-[380px]">
           <table className="w-full text-left border-collapse text-xs">
             <thead>
               <tr className="bg-slate-50/80 border-b border-slate-200 text-slate-500 uppercase tracking-wider font-semibold text-[11px]">

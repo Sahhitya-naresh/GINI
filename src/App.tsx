@@ -46,7 +46,7 @@ import { AddLeadModal } from './components/AddLeadModal';
 import { ImportLeadsModal } from './components/ImportLeadsModal';
 import { SettingsModal } from './components/SettingsModal';
 import { ConfirmationModal } from './components/ConfirmationModal';
-import { ReplyAlertModal } from './components/ReplyAlertModal';
+import { NotificationHub, AppActionLog } from './components/NotificationHub';
 import { WorkflowCanvas } from './components/workflow/WorkflowCanvas';
 import { ManualTasksDashboard } from './components/ManualTasksDashboard';
 
@@ -283,6 +283,43 @@ export default function App() {
   const [replyAlertLeads, setReplyAlertLeads] = useState<Lead[]>([]);
   const dismissedReplyAlertsRef = useRef<Set<string>>(loadDismissedReplyAlerts());
 
+  // Activity Log State for Notification Hub
+  const [actionLogs, setActionLogs] = useState<AppActionLog[]>(() => {
+    try {
+      const saved = localStorage.getItem('gini_action_logs');
+      return saved ? JSON.parse(saved) : [
+        {
+          id: 'init-1',
+          type: 'general',
+          title: 'Workspace Active',
+          description: 'Giniiris Outreach engine initialized and connected to MongoDB',
+          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+        }
+      ];
+    } catch {
+      return [];
+    }
+  });
+
+  const logAppAction = useCallback((type: AppActionLog['type'], title: string, description: string) => {
+    const item: AppActionLog = {
+      id: `act-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      type,
+      title,
+      description,
+      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    };
+    setActionLogs(prev => {
+      const updated = [item, ...prev].slice(0, 50);
+      try {
+        localStorage.setItem('gini_action_logs', JSON.stringify(updated));
+      } catch (e) {
+        console.error('Failed to save action log:', e);
+      }
+      return updated;
+    });
+  }, []);
+
   const handleDismissReplyAlerts = useCallback((leadsToDismiss: Lead[]) => {
     if (leadsToDismiss.length === 0) return;
 
@@ -465,8 +502,10 @@ export default function App() {
 
     try {
       await saveCampaignToBackend(newW, undefined, spreadsheetId || undefined);
+      logAppAction('workflow', 'New Workflow Created', `Created campaign sequence "${newW.name}".`);
       showToast(`Created workflow "${newW.name}"`, 'success');
     } catch (err: any) {
+      logAppAction('workflow', 'Workflow Created (Local)', `Created campaign sequence "${newW.name}".`);
       showToast(`Created workflow "${newW.name}" locally`, 'info');
     }
   };
@@ -498,6 +537,7 @@ export default function App() {
 
     try {
       await toggleCampaignActiveOnBackend(workflowId, isActive, undefined, spreadsheetId || undefined);
+      logAppAction('workflow', `Workflow ${isActive ? 'Activated' : 'Paused'}`, `Workflow status updated to ${isActive ? 'Active' : 'Paused'}.`);
     } catch (err: any) {
       console.warn('Backend campaign toggle active warning:', err);
     }
@@ -961,6 +1001,7 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
       setSelectedLead(updatedLead);
     }
 
+    logAppAction('pause_toggle', `${newStatus === 'Paused' ? 'Paused' : 'Resumed'} Sequence`, `${lead.name} (${lead.company || lead.email}) was ${newStatus.toLowerCase()} manually.`);
     showToast(`Lead ${lead.name} is now ${newStatus}.`, 'info');
   };
 
@@ -1022,6 +1063,7 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
         }
         return [...prev, saved];
       });
+      logAppAction('lead_add', 'New Lead Added', `${saved.name} (${saved.company || saved.email || 'Pipeline'}) added to outreach.`);
       showToast(`Lead ${saved.name} added successfully!`, 'success');
     } catch (e: any) {
       console.error('Failed to add lead:', e);
@@ -1068,6 +1110,7 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
         if (lead.email) dismissedReplyAlertsRef.current.delete(lead.email.toLowerCase());
         saveDismissedReplyAlerts(dismissedReplyAlertsRef.current);
 
+        logAppAction('general', 'Lead Deleted', `${lead.name} (${lead.company || lead.email}) was removed from workspace.`);
         showToast(`Lead ${lead.name} deleted successfully!`, 'success');
       }
     } catch (e: any) {
@@ -1094,6 +1137,7 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
         }
         return copy;
       });
+      logAppAction('lead_import', 'Batch Import Completed', `Successfully imported ${savedLeads.length} leads into MongoDB.`);
       showToast(`Successfully imported and committed ${savedLeads.length} leads!`, 'success');
     } catch (err: any) {
       console.error('Failed to batch append to sheet:', err);
@@ -1138,6 +1182,7 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
           });
         }
 
+        logAppAction('reply_check', 'Inbound Reply Received', `Prospect reply detected from ${targetLead.name} (${targetLead.email})! Sequence halted.`);
         showToast(`Reply detected from ${targetLead.name}! Sequence stopped.`, 'success');
         return res;
       } else {
@@ -1183,6 +1228,9 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
       }
 
       setLastCheckedTime(new Date());
+      logAppAction('reply_check', 'Inbox Scan Completed', repliesFound > 0
+        ? `Found ${repliesFound} new prospect replies across checked threads.`
+        : `Checked active email threads; no new prospect replies found.`);
       if (repliesFound > 0) {
         showToast(`Detected ${repliesFound} new replies! Leads moved to "Needs Manual Reply".`, 'success');
       } else {
@@ -1434,6 +1482,7 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
       };
 
       await handleUpdateLead(updatedLead);
+      logAppAction('email_send', `Stage ${stageNum} Dispatched`, `Sent Stage ${stageNum} email to ${lead.name} (${lead.email})${isFinished ? ' — Sequence Completed' : ''}.`);
       if (isFinished) {
         showToast(`Stage ${stageNum} sent to ${lead.name}! Campaign sequence is now completed.`, 'success');
       } else {
@@ -1785,15 +1834,25 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
         onCancel={() => setConfirmDialog(prev => ({ ...prev, isOpen: false }))}
       />
 
-      {/* Background Reply Alert Notification Modal */}
-      <ReplyAlertModal
-        isOpen={replyAlertLeads.length > 0}
-        leads={replyAlertLeads}
-        onClose={() => handleDismissReplyAlerts(replyAlertLeads)}
+      {/* Floating Bottom-Right Activity & Notification Hub (Alerts, Actions, Notes) */}
+      <NotificationHub
+        replyAlerts={replyAlertLeads}
+        onDismissReplyAlert={(leadId) => {
+          const target = leads.find(l => l.leadId === leadId) || replyAlertLeads.find(l => l.leadId === leadId);
+          if (target) handleDismissReplyAlerts([target]);
+        }}
+        onClearAllReplyAlerts={() => handleDismissReplyAlerts(replyAlertLeads)}
         onOpenLead={(targetLead) => {
           setSelectedLead(targetLead);
           setIsLeadDetailOpen(true);
-          handleDismissReplyAlerts([targetLead, ...replyAlertLeads]);
+        }}
+        onNavigateToTab={(tab) => setCurrentTab(tab)}
+        actionLogs={actionLogs}
+        onClearActionLogs={() => {
+          setActionLogs([]);
+          try {
+            localStorage.removeItem('gini_action_logs');
+          } catch {}
         }}
       />
     </div>

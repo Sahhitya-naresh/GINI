@@ -430,31 +430,8 @@ export const Header: React.FC<HeaderProps> = ({
                       </div>
                       {currentTab === 'analytics' && <CheckCircle2 className="w-4 h-4 text-red-600" />}
                     </button>
-
-                    {/* Item 7: Settings */}
-                    <button
-                      id="menu-tab-settings"
-                      type="button"
-                      onClick={() => { onTabChange('settings'); setIsNavMenuOpen(false); }}
-                      className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs transition-all cursor-pointer ${
-                        currentTab === 'settings'
-                          ? 'bg-red-50 text-red-700 font-bold border border-red-200/80 shadow-2xs'
-                          : 'text-slate-700 hover:bg-slate-50 hover:text-slate-900'
-                      }`}
-                    >
-                      <div className="flex items-center gap-2.5">
-                        <div className={`p-1.5 rounded-lg ${currentTab === 'settings' ? 'bg-red-600 text-white' : 'bg-slate-100 text-slate-500'}`}>
-                          <SettingsIcon className="w-4 h-4" />
-                        </div>
-                        <div className="text-left">
-                          <p className="font-semibold leading-tight">Settings & Logo</p>
-                          <p className="text-[10px] text-slate-400 font-normal">Sender config & system controls</p>
-                        </div>
-                      </div>
-                      {currentTab === 'settings' && <CheckCircle2 className="w-4 h-4 text-red-600" />}
-                    </button>
+                    </div>
                   </div>
-                </div>
               )}
             </div>
           </div>
