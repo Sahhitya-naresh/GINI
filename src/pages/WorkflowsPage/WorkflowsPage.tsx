@@ -624,7 +624,7 @@ export const WorkflowCanvas: React.FC<WorkflowCanvasProps> = ({
   }
 
   return (
-    <div className="flex flex-col h-[calc(100vh-140px)] bg-slate-50 border border-slate-200 rounded-2xl overflow-hidden shadow-xs relative">
+    <div className="flex flex-col h-[calc(100vh-95px)] w-full bg-slate-50 border border-slate-200 rounded-2xl overflow-hidden shadow-xs relative">
       
       {/* ================================================================== */}
       {/* TOP WORKFLOW TOOLBAR                                               */}

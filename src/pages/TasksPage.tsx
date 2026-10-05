@@ -69,7 +69,7 @@ export const ManualTasksDashboard: React.FC<ManualTasksDashboardProps> = ({
   };
 
   return (
-    <div className="max-w-6xl mx-auto space-y-5 animate-in fade-in duration-200">
+    <div className="w-full space-y-4 animate-in fade-in duration-200 pb-8">
       
       {/* Top Banner */}
       <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-xs flex flex-col md:flex-row md:items-center justify-between gap-4">

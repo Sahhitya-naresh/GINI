@@ -293,7 +293,7 @@ export const LeadsTable: React.FC<LeadsTableProps> = ({
   };
 
   return (
-    <div className="space-y-4 max-w-7xl mx-auto pb-12">
+    <div className="space-y-3.5 w-full pb-8">
       
       {/* Metric Stat Strips */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">

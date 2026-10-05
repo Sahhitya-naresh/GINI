@@ -94,7 +94,7 @@ export const TemplateAdmin: React.FC<TemplateAdminProps> = ({
   };
 
   return (
-    <div className="space-y-6 max-w-7xl mx-auto pb-12">
+    <div className="space-y-4 w-full pb-8">
       {/* Top Banner */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-white p-5 rounded-xl border border-red-100 shadow-2xs">
         <div>

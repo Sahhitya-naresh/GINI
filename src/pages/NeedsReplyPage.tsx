@@ -23,7 +23,7 @@ export const NeedsManualReplyView: React.FC<NeedsManualReplyViewProps> = ({
   const repliedLeads = leads.filter(l => l.status === 'Replied');
 
   return (
-    <div className="space-y-6 max-w-7xl mx-auto pb-12">
+    <div className="space-y-4 w-full pb-8">
       {/* Hero Header - Red and White */}
       <div className="bg-red-600 text-white rounded-2xl p-6 sm:p-8 shadow-sm relative overflow-hidden">
         <div className="relative z-10 max-w-2xl">
@@ -51,7 +51,7 @@ export const NeedsManualReplyView: React.FC<NeedsManualReplyViewProps> = ({
           </p>
         </div>
       ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
           {repliedLeads.map((lead, idx) => (
             <div
               key={lead.leadId || `replied-lead-${lead.email || ''}-${idx}`}

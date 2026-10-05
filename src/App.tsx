@@ -1636,8 +1636,8 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
         </div>
       )}
 
-      {/* Main Content Area (Routing Based) */}
-      <main className="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 lg:p-8">
+      {/* Main Content Area (Routing Based - Widescreen Full Bleed) */}
+      <main className="flex-1 w-full px-3 py-3 sm:px-5 sm:py-4">
         <Routes>
           <Route path="/" element={<Navigate to="/leads" replace />} />
           <Route 

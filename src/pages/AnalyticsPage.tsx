@@ -395,7 +395,7 @@ export const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({
   }, [totalLeads]);
 
   return (
-    <div className="space-y-6 max-w-7xl mx-auto pb-12">
+    <div className="space-y-5 w-full pb-8">
       
       {/* Top Header & View Switcher */}
       <div className="bg-white rounded-xl border border-red-100 p-4 sm:p-6 shadow-2xs space-y-4">
