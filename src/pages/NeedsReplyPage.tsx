@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { Lead } from '../types';
 import { 
   Building2, 
@@ -24,17 +24,17 @@ export const NeedsManualReplyView: React.FC<NeedsManualReplyViewProps> = ({
 
   return (
     <div className="space-y-4 w-full pb-8">
-      {/* Hero Header - Red and White */}
-      <div className="bg-red-600 text-white rounded-2xl p-6 sm:p-8 shadow-sm relative overflow-hidden">
+      {/* Hero Header - Amber to White Gradient */}
+      <div className="bg-gradient-to-r from-amber-400 via-amber-200 to-amber-50 text-slate-900 border border-amber-200/80 rounded-2xl p-6 sm:p-8 shadow-sm relative overflow-hidden">
         <div className="relative z-10 max-w-2xl">
-          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-white/20 text-white text-xs font-semibold mb-3 border border-white/30">
-            <Flame className="w-3.5 h-3.5 fill-current text-white" />
+          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-amber-600/15 text-amber-900 text-xs font-semibold mb-3 border border-amber-500/30">
+            <Flame className="w-3.5 h-3.5 fill-current text-amber-700" />
             <span>High-Priority Inbound Queue</span>
           </div>
-          <h2 className="text-2xl sm:text-3xl font-bold tracking-tight">
+          <h2 className="text-2xl sm:text-3xl font-bold tracking-tight text-slate-900">
             Needs Manual Reply ({repliedLeads.length})
           </h2>
-          <p className="text-sm text-red-100 mt-2 leading-relaxed">
+          <p className="text-sm text-slate-700 mt-2 leading-relaxed">
             These leads replied to one of your outreach stages! The automated sequence was permanently stopped for each of them so you can handle the relationship personally.
           </p>
         </div>
