@@ -50,6 +50,59 @@ interface AnalyticsDashboardProps {
 
 type AnalyticsTab = 'campaigns' | 'stages';
 
+// Stage-specific chromatic sequence for the 7-stage funnel (strictly no blue or shades of blue)
+const STAGE_CONFIGS: Record<number, { badge: string; bar: string; borderHover: string; textAccent: string; labelBg: string }> = {
+  1: {
+    badge: 'bg-violet-600 text-white shadow-2xs',
+    bar: 'bg-gradient-to-r from-violet-600 to-purple-600',
+    borderHover: 'hover:border-violet-300',
+    textAccent: 'text-violet-700',
+    labelBg: 'bg-violet-50 text-violet-700 border-violet-200'
+  },
+  2: {
+    badge: 'bg-fuchsia-600 text-white shadow-2xs',
+    bar: 'bg-gradient-to-r from-fuchsia-600 to-pink-500',
+    borderHover: 'hover:border-fuchsia-300',
+    textAccent: 'text-fuchsia-700',
+    labelBg: 'bg-fuchsia-50 text-fuchsia-700 border-fuchsia-200'
+  },
+  3: {
+    badge: 'bg-rose-500 text-white shadow-2xs',
+    bar: 'bg-gradient-to-r from-rose-500 to-rose-400',
+    borderHover: 'hover:border-rose-300',
+    textAccent: 'text-rose-700',
+    labelBg: 'bg-rose-50 text-rose-700 border-rose-200'
+  },
+  4: {
+    badge: 'bg-orange-500 text-white shadow-2xs',
+    bar: 'bg-gradient-to-r from-orange-500 to-amber-500',
+    borderHover: 'hover:border-orange-300',
+    textAccent: 'text-orange-700',
+    labelBg: 'bg-orange-50 text-orange-700 border-orange-200'
+  },
+  5: {
+    badge: 'bg-amber-500 text-white shadow-2xs',
+    bar: 'bg-gradient-to-r from-amber-500 to-yellow-400',
+    borderHover: 'hover:border-amber-300',
+    textAccent: 'text-amber-700',
+    labelBg: 'bg-amber-50 text-amber-700 border-amber-200'
+  },
+  6: {
+    badge: 'bg-emerald-600 text-white shadow-2xs',
+    bar: 'bg-gradient-to-r from-emerald-500 to-emerald-600',
+    borderHover: 'hover:border-emerald-300',
+    textAccent: 'text-emerald-700',
+    labelBg: 'bg-emerald-50 text-emerald-700 border-emerald-200'
+  },
+  7: {
+    badge: 'bg-slate-700 text-white shadow-2xs',
+    bar: 'bg-gradient-to-r from-slate-600 to-slate-700',
+    borderHover: 'hover:border-slate-300',
+    textAccent: 'text-slate-700',
+    labelBg: 'bg-slate-100 text-slate-700 border-slate-200'
+  },
+};
+
 export const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({
   leads,
   templates,
@@ -398,11 +451,11 @@ export const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({
     <div className="space-y-5 w-full pb-8">
       
       {/* Top Header & View Switcher */}
-      <div className="bg-white rounded-xl border border-red-100 p-4 sm:p-6 shadow-2xs space-y-4">
+      <div className="bg-white rounded-xl border border-slate-200 p-4 sm:p-6 shadow-2xs space-y-4">
         <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
           <div>
             <div className="flex items-center gap-2">
-              <div className="w-8 h-8 rounded-lg bg-red-600 text-white flex items-center justify-center font-bold shadow-2xs">
+              <div className="w-8 h-8 rounded-lg bg-slate-900 text-white flex items-center justify-center font-bold shadow-2xs">
                 <TrendingUp className="w-4 h-4" />
               </div>
               <h2 className="text-lg sm:text-xl font-bold text-slate-900">
@@ -421,13 +474,15 @@ export const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({
               onClick={() => setActiveTab('campaigns')}
               className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all ${
                 activeTab === 'campaigns'
-                  ? 'bg-white text-red-700 shadow-xs border border-red-200/80'
+                  ? 'bg-slate-900 text-white shadow-xs'
                   : 'text-slate-600 hover:text-slate-900'
               }`}
             >
-              <FolderOpen className="w-3.5 h-3.5 text-red-600" />
+              <FolderOpen className={`w-3.5 h-3.5 ${activeTab === 'campaigns' ? 'text-white' : 'text-slate-700'}`} />
               <span>Campaign Analytics</span>
-              <span className="ml-1 px-1.5 py-0.2 text-[10px] rounded-full bg-red-100 text-red-800 font-semibold">
+              <span className={`ml-1 px-1.5 py-0.2 text-[10px] rounded-full font-semibold ${
+                activeTab === 'campaigns' ? 'bg-slate-700 text-white' : 'bg-slate-200 text-slate-800'
+              }`}>
                 {campaignsSummary.length}
               </span>
             </button>
@@ -437,11 +492,11 @@ export const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({
               onClick={() => setActiveTab('stages')}
               className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all ${
                 activeTab === 'stages'
-                  ? 'bg-white text-red-700 shadow-xs border border-red-200/80'
+                  ? 'bg-slate-900 text-white shadow-xs'
                   : 'text-slate-600 hover:text-slate-900'
               }`}
             >
-              <Layers className="w-3.5 h-3.5 text-red-600" />
+              <Layers className={`w-3.5 h-3.5 ${activeTab === 'stages' ? 'text-white' : 'text-slate-600'}`} />
               <span>7-Stage Funnel</span>
             </button>
           </div>
@@ -478,8 +533,8 @@ export const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({
                   onClick={() => setDateRange(r)}
                   className={`px-2 py-1 rounded-md font-semibold transition-all ${
                     dateRange === r
-                      ? 'bg-red-600 text-white shadow-2xs'
-                      : 'text-slate-600 hover:text-red-700 hover:bg-red-50/50'
+                      ? 'bg-slate-900 text-white shadow-2xs'
+                      : 'text-slate-600 hover:text-slate-900 hover:bg-slate-200/60'
                   }`}
                 >
                   {r === 'all' ? 'All Time' : r === '7d' ? '7 Days' : r === '30d' ? '30 Days' : '90 Days'}
@@ -498,11 +553,11 @@ export const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({
               className={`text-xs font-semibold flex items-center gap-1.5 px-3 py-1.5 rounded-lg border transition-all ${
                 isRefreshing
                   ? 'bg-slate-100 text-slate-400 border-slate-200 cursor-not-allowed'
-                  : 'text-red-700 bg-red-50/70 hover:bg-red-100/80 border-red-200 hover:border-red-300 shadow-2xs active:scale-98'
+                  : 'text-slate-800 bg-white hover:bg-slate-50 border-slate-300 shadow-2xs active:scale-98'
               }`}
               title="Sync latest leads and tracking metrics from MongoDB"
             >
-              <RefreshCw className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin text-slate-400' : 'text-red-600'}`} />
+              <RefreshCw className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin text-slate-400' : 'text-slate-700'}`} />
               <span>{isRefreshing ? 'Refreshing Metrics...' : 'Refresh Metrics'}</span>
             </button>
           )}
@@ -519,13 +574,13 @@ export const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             
             {/* Top Converting Campaign */}
-            <div className="bg-white rounded-xl border border-red-200 p-4 shadow-2xs bg-gradient-to-br from-red-50/40 to-white relative overflow-hidden">
+            <div className="bg-white rounded-xl border border-amber-200 p-4 shadow-2xs bg-gradient-to-br from-amber-50/40 to-white relative overflow-hidden">
               <div className="flex items-center justify-between">
-                <span className="text-xs font-bold uppercase tracking-wider text-red-700 flex items-center gap-1.5">
+                <span className="text-xs font-bold uppercase tracking-wider text-amber-700 flex items-center gap-1.5">
                   <Trophy className="w-4 h-4 text-amber-500" />
                   Top Converting Campaign
                 </span>
-                <span className="text-[11px] font-bold px-2 py-0.5 rounded-full bg-red-100 text-red-800">
+                <span className="text-[11px] font-bold px-2 py-0.5 rounded-full bg-amber-100 text-amber-800">
                   Best Reply Rate
                 </span>
               </div>
@@ -534,7 +589,7 @@ export const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({
                   {topCampaignByReplies?.name || 'None yet'}
                 </h3>
                 <div className="flex items-baseline gap-2 mt-1">
-                  <span className="text-2xl font-extrabold text-red-700">
+                  <span className="text-2xl font-extrabold text-amber-700">
                     {topCampaignByReplies?.replyRate || '0.0'}%
                   </span>
                   <span className="text-xs text-slate-500 font-medium">
@@ -542,12 +597,12 @@ export const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({
                   </span>
                 </div>
               </div>
-              <div className="mt-3 pt-2.5 border-t border-red-100/80 flex items-center justify-between text-xs text-slate-500">
+              <div className="mt-3 pt-2.5 border-t border-amber-100/80 flex items-center justify-between text-xs text-slate-500">
                 <span>Opens: <strong className="text-slate-700">{topCampaignByReplies?.openRate || 0}%</strong></span>
                 <span>Clicks: <strong className="text-slate-700">{topCampaignByReplies?.clickRate || 0}%</strong></span>
                 <button
                   onClick={() => setInspectedCampaign(topCampaignByReplies?.name || null)}
-                  className="text-red-600 font-bold hover:underline flex items-center gap-0.5"
+                  className="text-amber-700 font-bold hover:underline flex items-center gap-0.5"
                 >
                   <span>Inspect</span>
                   <ChevronRight className="w-3 h-3" />
@@ -656,7 +711,7 @@ export const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({
                     <Legend wrapperStyle={{ fontSize: '11px', paddingTop: '8px' }} />
                     <Bar dataKey="Open Rate %" fill="#3b82f6" radius={[3, 3, 0, 0]} />
                     <Bar dataKey="Click Rate %" fill="#a855f7" radius={[3, 3, 0, 0]} />
-                    <Bar dataKey="Reply Rate %" fill="#dc2626" radius={[3, 3, 0, 0]} />
+                    <Bar dataKey="Reply Rate %" fill="#f59e0b" radius={[3, 3, 0, 0]} />
                   </BarChart>
                 </ResponsiveContainer>
               </div>
@@ -1144,7 +1199,7 @@ export const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-100 pb-3">
               <div>
                 <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
-                  <Layers className="w-4 h-4 text-red-600" />
+                  <Layers className="w-4 h-4 text-violet-600" />
                   <span>7-Stage Sequence Funnel &amp; Drop-off Analysis</span>
                 </h3>
                 <p className="text-xs text-slate-500">
@@ -1160,12 +1215,19 @@ export const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({
             <div className="space-y-3">
               {funnelData.map((f, idx) => {
                 const widthPct = reachedLeads > 0 ? Math.max(12, Math.round((f.leadsReached / reachedLeads) * 100)) : 10;
+                const stageStyle = STAGE_CONFIGS[f.stageNum] || {
+                  badge: 'bg-indigo-600 text-white shadow-2xs',
+                  bar: 'bg-gradient-to-r from-blue-500 to-indigo-600',
+                  borderHover: 'hover:border-indigo-300',
+                  textAccent: 'text-indigo-700',
+                  labelBg: 'bg-indigo-50 text-indigo-700 border-indigo-200',
+                };
 
                 return (
-                  <div key={f.stage} className="p-3.5 bg-slate-50 rounded-xl border border-slate-200 hover:border-red-300 transition-all space-y-2">
+                  <div key={f.stage} className={`p-3.5 bg-slate-50 rounded-xl border border-slate-200 ${stageStyle.borderHover} transition-all space-y-2`}>
                     <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
                       <div className="flex items-center gap-2">
-                        <span className="w-6 h-6 rounded-md bg-red-600 text-white font-bold text-xs flex items-center justify-center">
+                        <span className={`w-6 h-6 rounded-md ${stageStyle.badge} font-bold text-xs flex items-center justify-center`}>
                           {f.stageNum}
                         </span>
                         <span className="font-bold text-sm text-slate-900">{f.name}</span>
@@ -1179,9 +1241,9 @@ export const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({
                         </div>
                         {idx > 0 && (
                           <div className="flex items-center gap-1 text-slate-500">
-                            <ArrowDownRight className="w-3.5 h-3.5 text-red-500" />
+                            <ArrowDownRight className="w-3.5 h-3.5 text-slate-400" />
                             <span>Drop-off: </span>
-                            <strong className="text-red-600">-{f.dropOff} ({f.dropOffPercent}%)</strong>
+                            <strong className="text-slate-600">-{f.dropOff} ({f.dropOffPercent}%)</strong>
                           </div>
                         )}
                         <div className="text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded font-semibold border border-emerald-200">
@@ -1191,9 +1253,9 @@ export const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({
                     </div>
 
                     {/* Progress Bar with Dropoff Indicator */}
-                    <div className="w-full bg-slate-200 rounded-full h-2.5 overflow-hidden flex">
+                    <div className="w-full bg-slate-200/80 rounded-full h-2.5 overflow-hidden flex">
                       <div 
-                        className="bg-red-600 h-full transition-all duration-500 rounded-full"
+                        className={`${stageStyle.bar} h-full transition-all duration-500 rounded-full shadow-2xs`}
                         style={{ width: `${widthPct}%` }}
                         title={`${f.leadsReached} leads reached (${widthPct}%)`}
                       />
@@ -1205,7 +1267,7 @@ export const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({
                       <span>&bull;</span>
                       <span>Click Rate: <strong className="text-slate-700">{f.clickRate}%</strong></span>
                       <span>&bull;</span>
-                      <span>Direct Replies at this Stage: <strong className="text-red-700">{f.replies}</strong></span>
+                      <span>Direct Replies at this Stage: <strong className="text-amber-700 font-bold">{f.replies}</strong></span>
                     </div>
                   </div>
                 );
@@ -1220,7 +1282,7 @@ export const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({
             <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-2xs space-y-3">
               <div className="flex items-center justify-between">
                 <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
-                  <MessageSquareReply className="w-4 h-4 text-red-600" />
+                  <MessageSquareReply className="w-4 h-4 text-violet-600" />
                   <span>Replies by Sequence Stage</span>
                 </h3>
                 <span className="text-xs text-slate-400">Which stages convert best</span>
@@ -1238,9 +1300,9 @@ export const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({
                         name === 'replies' ? 'Total Replies' : 'Stage Reply Rate'
                       ]}
                       labelFormatter={(label) => `Stage: ${label}`}
-                      contentStyle={{ backgroundColor: '#ffffff', borderColor: '#fee2e2', borderRadius: '8px', fontSize: '12px' }}
+                      contentStyle={{ backgroundColor: '#ffffff', borderColor: '#f3e8ff', borderRadius: '8px', fontSize: '12px' }}
                     />
-                    <Bar dataKey="replies" fill="#dc2626" radius={[4, 4, 0, 0]} name="replies" />
+                    <Bar dataKey="replies" fill="#7c3aed" radius={[4, 4, 0, 0]} name="replies" />
                   </BarChart>
                 </ResponsiveContainer>
               </div>
@@ -1253,7 +1315,7 @@ export const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({
             <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-2xs space-y-3">
               <div className="flex items-center justify-between">
                 <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
-                  <Clock className="w-4 h-4 text-red-600" />
+                  <Clock className="w-4 h-4 text-emerald-600" />
                   <span>Time-to-Reply Distribution</span>
                 </h3>
                 <span className="text-xs text-slate-400">Response latency</span>
@@ -1267,9 +1329,9 @@ export const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({
                     <YAxis allowDecimals={false} tick={{ fontSize: 10, fill: '#64748b' }} />
                     <Tooltip 
                       formatter={(val: any) => [`${val} prospects`, 'Responses']}
-                      contentStyle={{ backgroundColor: '#ffffff', borderColor: '#fee2e2', borderRadius: '8px', fontSize: '12px' }}
+                      contentStyle={{ backgroundColor: '#ffffff', borderColor: '#dcfce7', borderRadius: '8px', fontSize: '12px' }}
                     />
-                    <Bar dataKey="count" fill="#ea580c" radius={[4, 4, 0, 0]} name="Replies" />
+                    <Bar dataKey="count" fill="#10b981" radius={[4, 4, 0, 0]} name="Replies" />
                   </BarChart>
                 </ResponsiveContainer>
               </div>
@@ -1290,7 +1352,7 @@ export const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-100 pb-3">
               <div>
                 <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
-                  <Calendar className="w-4 h-4 text-red-600" />
+                  <Calendar className="w-4 h-4 text-slate-700" />
                   <span>Weekly Sequence Activity: Sends, Opens &amp; Replies</span>
                 </h3>
                 <p className="text-xs text-slate-500">
@@ -1302,12 +1364,12 @@ export const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({
                   <span className="w-2.5 h-2.5 rounded-full bg-slate-400" />
                   <span>Sends</span>
                 </span>
-                <span className="flex items-center gap-1 text-blue-600 font-medium">
-                  <span className="w-2.5 h-2.5 rounded-full bg-blue-500" />
+                <span className="flex items-center gap-1 text-violet-600 font-medium">
+                  <span className="w-2.5 h-2.5 rounded-full bg-violet-500" />
                   <span>Opens</span>
                 </span>
-                <span className="flex items-center gap-1 text-red-600 font-bold">
-                  <span className="w-2.5 h-2.5 rounded-full bg-red-600" />
+                <span className="flex items-center gap-1 text-amber-600 font-bold">
+                  <span className="w-2.5 h-2.5 rounded-full bg-amber-500" />
                   <span>Replies</span>
                 </span>
               </div>
@@ -1322,21 +1384,21 @@ export const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({
                       <stop offset="95%" stopColor="#94a3b8" stopOpacity={0}/>
                     </linearGradient>
                     <linearGradient id="colorOpens" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="5%" stopColor="#3b82f6" stopOpacity={0.3}/>
-                      <stop offset="95%" stopColor="#3b82f6" stopOpacity={0}/>
+                      <stop offset="5%" stopColor="#8b5cf6" stopOpacity={0.3}/>
+                      <stop offset="95%" stopColor="#8b5cf6" stopOpacity={0}/>
                     </linearGradient>
                     <linearGradient id="colorReplies" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="5%" stopColor="#dc2626" stopOpacity={0.4}/>
-                      <stop offset="95%" stopColor="#dc2626" stopOpacity={0}/>
+                      <stop offset="5%" stopColor="#f59e0b" stopOpacity={0.4}/>
+                      <stop offset="95%" stopColor="#f59e0b" stopOpacity={0}/>
                     </linearGradient>
                   </defs>
                   <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
                   <XAxis dataKey="week" tick={{ fontSize: 11, fill: '#64748b' }} />
                   <YAxis tick={{ fontSize: 11, fill: '#64748b' }} />
-                  <Tooltip contentStyle={{ backgroundColor: '#ffffff', borderColor: '#fee2e2', borderRadius: '8px', fontSize: '12px' }} />
+                  <Tooltip contentStyle={{ backgroundColor: '#ffffff', borderColor: '#fef3c7', borderRadius: '8px', fontSize: '12px' }} />
                   <Area type="monotone" dataKey="sends" stroke="#64748b" fillOpacity={1} fill="url(#colorSends)" name="Outbound Sends" />
-                  <Area type="monotone" dataKey="opens" stroke="#2563eb" fillOpacity={1} fill="url(#colorOpens)" name="Email Opens" />
-                  <Area type="monotone" dataKey="replies" stroke="#dc2626" strokeWidth={2} fillOpacity={1} fill="url(#colorReplies)" name="Replies Detected" />
+                  <Area type="monotone" dataKey="opens" stroke="#7c3aed" fillOpacity={1} fill="url(#colorOpens)" name="Email Opens" />
+                  <Area type="monotone" dataKey="replies" stroke="#d97706" strokeWidth={2} fillOpacity={1} fill="url(#colorReplies)" name="Replies Detected" />
                 </AreaChart>
               </ResponsiveContainer>
             </div>
