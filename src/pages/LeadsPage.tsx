@@ -272,9 +272,9 @@ export const LeadsTable: React.FC<LeadsTableProps> = ({
       case 'Active':
         return <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">Active</span>;
       case 'Replied':
-        return <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold bg-red-50 text-red-700 border border-red-200 animate-pulse">Replied</span>;
+        return <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold bg-amber-100 text-amber-800 border border-amber-200 animate-pulse">Replied</span>;
       case 'Paused':
-        return <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold bg-amber-50 text-amber-700 border border-amber-200">Paused</span>;
+        return <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold bg-slate-100 text-slate-700 border border-slate-200">Paused</span>;
       case 'Broke Up':
         return <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold bg-slate-100 text-slate-600 border border-slate-200">Broke Up</span>;
       case 'Completed':
@@ -325,14 +325,14 @@ export const LeadsTable: React.FC<LeadsTableProps> = ({
         <div 
           onClick={() => setStatusFilter('Replied')}
           className={`p-3.5 bg-white rounded-xl border transition-all cursor-pointer ${
-            statusFilter === 'Replied' ? 'border-red-500 shadow-xs ring-1 ring-red-500' : 'border-slate-200 hover:border-slate-300'
+            statusFilter === 'Replied' ? 'border-amber-500 shadow-xs ring-1 ring-amber-500' : 'border-slate-200 hover:border-slate-300'
           }`}
         >
           <span className="text-xs font-medium text-slate-500">Replies Detected</span>
           <div className="flex items-baseline gap-2 mt-0.5">
-            <p className="text-xl font-bold text-red-700">{repliedCount}</p>
+            <p className="text-xl font-bold text-amber-600">{repliedCount}</p>
             {repliedCount > 0 && (
-              <span className="text-[11px] font-semibold text-red-600">Needs Reply</span>
+              <span className="text-[11px] font-semibold text-amber-700">Needs Reply</span>
             )}
           </div>
         </div>
@@ -340,11 +340,11 @@ export const LeadsTable: React.FC<LeadsTableProps> = ({
         <div 
           onClick={() => setStatusFilter('Paused')}
           className={`p-3.5 bg-white rounded-xl border transition-all cursor-pointer ${
-            statusFilter === 'Paused' ? 'border-amber-500 shadow-xs ring-1 ring-amber-500' : 'border-slate-200 hover:border-slate-300'
+            statusFilter === 'Paused' ? 'border-slate-400 shadow-xs ring-1 ring-slate-400' : 'border-slate-200 hover:border-slate-300'
           }`}
         >
           <span className="text-xs font-medium text-slate-500">Paused Safety Overrides</span>
-          <p className="text-xl font-bold text-amber-700 mt-0.5">{pausedCount}</p>
+          <p className="text-xl font-bold text-slate-700 mt-0.5">{pausedCount}</p>
         </div>
       </div>
 
@@ -669,7 +669,9 @@ export const LeadsTable: React.FC<LeadsTableProps> = ({
                       key={lead.leadId || `lead-${lead.email || ''}-${idx}`}
                       className={`transition-colors ${
                         isReplied
-                          ? 'bg-red-100/90 hover:bg-red-200/60'
+                          ? 'bg-amber-50/80 hover:bg-amber-100/70'
+                          : isCompleted
+                          ? 'hover:bg-[#E3F2FD]'
                           : 'hover:bg-emerald-50/70'
                       }`}
                     >
@@ -859,10 +861,10 @@ export const LeadsTable: React.FC<LeadsTableProps> = ({
               <span className="w-2 h-2 rounded-full bg-emerald-500" /> Active ({activeCount})
             </span>
             <span className="flex items-center gap-1.5">
-              <span className="w-2 h-2 rounded-full bg-red-500" /> Replied ({repliedCount})
+              <span className="w-2 h-2 rounded-full bg-amber-500" /> Replied ({repliedCount})
             </span>
             <span className="flex items-center gap-1.5">
-              <span className="w-2 h-2 rounded-full bg-amber-500" /> Paused ({pausedCount})
+              <span className="w-2 h-2 rounded-full bg-slate-400" /> Paused ({pausedCount})
             </span>
             <span className="flex items-center gap-1.5">
               <span className="w-2 h-2 rounded-full bg-[#1976D2]" /> Completed ({completedCount})
