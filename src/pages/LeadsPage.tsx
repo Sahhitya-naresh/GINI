@@ -295,24 +295,32 @@ export const LeadsTable: React.FC<LeadsTableProps> = ({
   return (
     <div className="space-y-3.5 w-full pb-8">
       
-      {/* Metric Stat Strips */}
+      {/* Metric Stat Strips with Top Color Accent Lines */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        {/* Total Leads - Blue #1976D2 */}
         <div 
           onClick={() => setStatusFilter('ALL')}
-          className={`p-3.5 bg-white rounded-xl border transition-all cursor-pointer ${
-            statusFilter === 'ALL' ? 'border-red-500 shadow-xs ring-1 ring-red-500' : 'border-slate-200 hover:border-slate-300'
+          className={`relative overflow-hidden p-3.5 bg-white rounded-xl border transition-all cursor-pointer ${
+            statusFilter === 'ALL' 
+              ? 'border-[#1976D2] shadow-xs ring-1 ring-[#1976D2]' 
+              : 'border-slate-200 hover:border-[#1976D2]'
           }`}
         >
+          <div className="absolute top-0 inset-x-0 h-1 bg-[#1976D2]" />
           <span className="text-xs font-medium text-slate-500">Total Leads</span>
-          <p className="text-xl font-bold text-slate-900 mt-0.5">{leads.length}</p>
+          <p className="text-xl font-bold text-[#1976D2] mt-0.5">{leads.length}</p>
         </div>
 
+        {/* Active Sequences - Green */}
         <div 
           onClick={() => setStatusFilter('Active')}
-          className={`p-3.5 bg-white rounded-xl border transition-all cursor-pointer ${
-            statusFilter === 'Active' ? 'border-red-500 shadow-xs ring-1 ring-red-500' : 'border-slate-200 hover:border-slate-300'
+          className={`relative overflow-hidden p-3.5 bg-white rounded-xl border transition-all cursor-pointer ${
+            statusFilter === 'Active' 
+              ? 'border-emerald-500 shadow-xs ring-1 ring-emerald-500' 
+              : 'border-slate-200 hover:border-emerald-500'
           }`}
         >
+          <div className="absolute top-0 inset-x-0 h-1 bg-emerald-500" />
           <span className="text-xs font-medium text-slate-500">Active Sequences</span>
           <div className="flex items-baseline gap-2 mt-0.5">
             <p className="text-xl font-bold text-emerald-700">{activeCount}</p>
@@ -322,12 +330,16 @@ export const LeadsTable: React.FC<LeadsTableProps> = ({
           </div>
         </div>
 
+        {/* Replies Detected - Amber */}
         <div 
           onClick={() => setStatusFilter('Replied')}
-          className={`p-3.5 bg-white rounded-xl border transition-all cursor-pointer ${
-            statusFilter === 'Replied' ? 'border-amber-500 shadow-xs ring-1 ring-amber-500' : 'border-slate-200 hover:border-slate-300'
+          className={`relative overflow-hidden p-3.5 bg-white rounded-xl border transition-all cursor-pointer ${
+            statusFilter === 'Replied' 
+              ? 'border-amber-500 shadow-xs ring-1 ring-amber-500' 
+              : 'border-slate-200 hover:border-amber-500'
           }`}
         >
+          <div className="absolute top-0 inset-x-0 h-1 bg-amber-500" />
           <span className="text-xs font-medium text-slate-500">Replies Detected</span>
           <div className="flex items-baseline gap-2 mt-0.5">
             <p className="text-xl font-bold text-amber-600">{repliedCount}</p>
@@ -337,12 +349,16 @@ export const LeadsTable: React.FC<LeadsTableProps> = ({
           </div>
         </div>
 
+        {/* Paused Safety Overrides - Slate */}
         <div 
           onClick={() => setStatusFilter('Paused')}
-          className={`p-3.5 bg-white rounded-xl border transition-all cursor-pointer ${
-            statusFilter === 'Paused' ? 'border-slate-400 shadow-xs ring-1 ring-slate-400' : 'border-slate-200 hover:border-slate-300'
+          className={`relative overflow-hidden p-3.5 bg-white rounded-xl border transition-all cursor-pointer ${
+            statusFilter === 'Paused' 
+              ? 'border-slate-500 shadow-xs ring-1 ring-slate-500' 
+              : 'border-slate-200 hover:border-slate-400'
           }`}
         >
+          <div className="absolute top-0 inset-x-0 h-1 bg-slate-400" />
           <span className="text-xs font-medium text-slate-500">Paused Safety Overrides</span>
           <p className="text-xl font-bold text-slate-700 mt-0.5">{pausedCount}</p>
         </div>
