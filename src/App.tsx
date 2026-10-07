@@ -688,12 +688,45 @@ export default function App() {
               return;
             }
 
-            // CASE 3: Direct Email Node without Delay (e.g. Task -> Email)
+            // CASE 3: Direct Email Node (e.g. Task -> Email)
             if (nodeType === 'email') {
-              // Resolve sender account
+              const val = nextNode.data?.stepDelayValue;
+              const unit = nextNode.data?.stepDelayUnit || 'minutes';
+              let delayMs = 0;
+              if (val && val > 0) {
+                if (unit === 'seconds') delayMs = val * 1000;
+                else if (unit === 'hours') delayMs = val * 3600 * 1000;
+                else if (unit === 'days') delayMs = val * 86400 * 1000;
+                else delayMs = val * 60 * 1000;
+              }
+
+              if (delayMs > 0) {
+                const scheduledDate = new Date(Date.now() + delayMs).toISOString().split('T')[0];
+                const updatedLead: Lead = {
+                  ...targetLead,
+                  currentNodeId: nextNode.id,
+                  nodeEnteredDate: new Date().toISOString(),
+                  nextSendDate: scheduledDate,
+                  status: 'Active'
+                };
+                await handleUpdateLead(updatedLead);
+                showToast(`Task completed! Lead "${targetLead.name}" moved to "${nextNode.data?.label || 'Email'}" (scheduled after ${val} ${unit}).`, 'success');
+                return;
+              }
+
+              // Resolve sender account (email node specific sender first, fallback to start node)
               const startNode = assignedWorkflow.nodes?.find(n => n.type === 'startNode' || n.data?.nodeType === 'start');
-              const senderId = startNode?.data?.senderId || nextNode.data?.senderId || 'sender-primary';
-              const senderObj = senders.find(s => s.id === senderId || s.email === senderId) || senders.find(s => s.isPrimary) || senders[0];
+              const nodeSenderId = nextNode.data?.senderId;
+              const nodeSenderEmail = nextNode.data?.senderEmail;
+              const startSenderId = startNode?.data?.senderId;
+              const startSenderEmail = startNode?.data?.senderEmail;
+              const effectiveSenderId = nodeSenderId || startSenderId || 'sender-primary';
+              const effectiveSenderEmail = nodeSenderEmail || startSenderEmail;
+
+              const senderObj = senders.find(s => 
+                (effectiveSenderEmail && s.email.toLowerCase() === effectiveSenderEmail.toLowerCase()) ||
+                (effectiveSenderId && s.id === effectiveSenderId)
+              ) || senders.find(s => s.isPrimary) || senders[0];
               const effectiveSenderName = senderObj?.name || settings.senderName;
 
               // Resolve stage template & custom body/subject if configured

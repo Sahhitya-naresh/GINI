@@ -382,13 +382,16 @@ export function evaluateCondition(
 ): boolean {
   const condType = nodeData?.conditionType || 'has_replied';
   if (condType === 'has_replied') {
-    return lead.status === 'Replied';
+    return lead.status === 'Replied' || lead.hasReplied || Boolean(lead.replyReceived) || Boolean(lead.replyDetectedDate);
   }
   if (condType === 'email_opened') {
     return Number(lead.opensCount || 0) > 0;
   }
   if (condType === 'link_clicked') {
     return Number(lead.clicksCount || 0) > 0;
+  }
+  if (condType === 'has_linkedin_url') {
+    return Boolean(lead.linkedinUrl && String(lead.linkedinUrl).trim().length > 0);
   }
   return false;
 }
