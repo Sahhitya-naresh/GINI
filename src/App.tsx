@@ -700,20 +700,6 @@ export default function App() {
                 else delayMs = val * 60 * 1000;
               }
 
-              if (delayMs > 0) {
-                const scheduledDate = new Date(Date.now() + delayMs).toISOString().split('T')[0];
-                const updatedLead: Lead = {
-                  ...targetLead,
-                  currentNodeId: nextNode.id,
-                  nodeEnteredDate: new Date().toISOString(),
-                  nextSendDate: scheduledDate,
-                  status: 'Active'
-                };
-                await handleUpdateLead(updatedLead);
-                showToast(`Task completed! Lead "${targetLead.name}" moved to "${nextNode.data?.label || 'Email'}" (scheduled after ${val} ${unit}).`, 'success');
-                return;
-              }
-
               // Resolve sender account (email node specific sender first, fallback to start node)
               const startNode = assignedWorkflow.nodes?.find(n => n.type === 'startNode' || n.data?.nodeType === 'start');
               const nodeSenderId = nextNode.data?.senderId;
@@ -768,50 +754,77 @@ export default function App() {
                 nextSendDate = nextStageNum < maxStages ? addBusinessDays(today, gapDays) : '';
               }
 
-              try {
-                showToast(`Task completed! Dispatching Stage ${nextStageNum} email to ${targetLead.name}...`, 'info');
-                const sendResult = await sendStageEmail(
-                  null,
-                  targetLead,
-                  stageTemplate,
-                  userEmail,
-                  effectiveSenderName,
-                  undefined,
-                  senderObj?.provider || 'outlook'
-                );
+              const executeEmailSend = async () => {
+                try {
+                  showToast(`Dispatching Stage ${nextStageNum} email to ${targetLead.name}...`, 'info');
+                  const sendResult = await sendStageEmail(
+                    null,
+                    targetLead,
+                    stageTemplate,
+                    userEmail,
+                    effectiveSenderName,
+                    undefined,
+                    senderObj?.provider || 'outlook'
+                  );
 
-                const isCompleted = !downstreamNode && nextStageNum >= (assignedWorkflow.nodes?.filter(n => (n.data?.nodeType || n.type || '').includes('email')).length || 1);
+                  const isCompleted = !downstreamNode && nextStageNum >= (assignedWorkflow.nodes?.filter(n => (n.data?.nodeType || n.type || '').includes('email')).length || 1);
 
-                const updatedLead: Lead = {
-                  ...targetLead,
-                  currentStage: nextStageNum,
-                  currentNodeId: nextNodeId,
-                  campaignId: assignedWorkflow.id,
-                  campaign: assignedWorkflow.name || targetLead.campaign,
-                  senderUsed: senderObj?.email || userEmail,
-                  nodeEnteredDate: today,
-                  threadId: sendResult.threadId || targetLead.threadId,
-                  lastEmailSentDate: today,
-                  nextSendDate: nextSendDate,
-                  status: isCompleted ? 'Completed' : 'Active'
-                };
+                  const updatedLead: Lead = {
+                    ...targetLead,
+                    currentStage: nextStageNum,
+                    currentNodeId: nextNodeId,
+                    campaignId: assignedWorkflow.id,
+                    campaign: assignedWorkflow.name || targetLead.campaign,
+                    senderUsed: senderObj?.email || userEmail,
+                    nodeEnteredDate: new Date().toISOString(),
+                    threadId: sendResult.threadId || targetLead.threadId,
+                    lastEmailSentDate: new Date().toISOString(),
+                    nextSendDate: nextSendDate,
+                    status: isCompleted ? 'Completed' : 'Active'
+                  };
 
-                await handleUpdateLead(updatedLead);
-                showToast(`Task completed & Stage ${nextStageNum} email sent to "${targetLead.name}" (${targetLead.email})!`, 'success');
-                return;
-              } catch (sendErr: any) {
-                console.error('Failed to send stage email on task completion:', sendErr);
-                const updatedLead: Lead = {
+                  await handleUpdateLead(updatedLead);
+                  showToast(`Stage ${nextStageNum} email sent to "${targetLead.name}" (${targetLead.email})!`, 'success');
+                } catch (sendErr: any) {
+                  console.error('Failed to send stage email on task completion:', sendErr);
+                  const fallbackLead: Lead = {
+                    ...targetLead,
+                    currentNodeId: nextNode.id,
+                    nodeEnteredDate: new Date().toISOString(),
+                    nextSendDate: today,
+                    status: 'Active'
+                  };
+                  await handleUpdateLead(fallbackLead);
+                  showToast(`Task completed, but email failed: ${sendErr?.message || sendErr}`, 'error');
+                }
+              };
+
+              if (delayMs > 0) {
+                const scheduledDate = new Date(Date.now() + delayMs).toISOString().split('T')[0];
+                const interimLead: Lead = {
                   ...targetLead,
                   currentNodeId: nextNode.id,
-                  nodeEnteredDate: today,
-                  nextSendDate: today,
+                  nodeEnteredDate: new Date().toISOString(),
+                  nextSendDate: scheduledDate,
                   status: 'Active'
                 };
-                await handleUpdateLead(updatedLead);
-                showToast(`Task completed, but email failed: ${sendErr?.message || sendErr}`, 'error');
+                await handleUpdateLead(interimLead);
+
+                // For short delays (e.g. up to 10 minutes, like 30s or 1m), automatically auto-dispatch via timer in browser!
+                if (delayMs <= 10 * 60 * 1000) {
+                  showToast(`Task completed! Email Stage ${nextStageNum} scheduled to send automatically in ${val} ${unit}...`, 'info');
+                  setTimeout(() => {
+                    executeEmailSend();
+                  }, delayMs);
+                } else {
+                  showToast(`Task completed! Lead "${targetLead.name}" moved to "${nextNode.data?.label || 'Email'}" (scheduled after ${val} ${unit}).`, 'success');
+                }
                 return;
               }
+
+              // delayMs === 0: execute immediately!
+              await executeEmailSend();
+              return;
             }
 
             // DEFAULT: Advance to node
@@ -1355,20 +1368,41 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
     // Run every 30 seconds for quick reply detection
     const intervalId = setInterval(runBackgroundReplyCheck, 30 * 1000);
 
+    // Periodically run due campaigns in the background so elapsed step timers execute automatically
+    const runBackgroundDueWorkflows = async () => {
+      try {
+        const res = await fetch('/api/campaigns/run-due', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ userEmail })
+        });
+        if (res.ok) {
+          const data = await res.json();
+          if (data.emailsSentCount > 0 || data.tasksCreatedCount > 0 || data.advancedNodesCount > 0) {
+            await syncData({ silent: true });
+          }
+        }
+      } catch (_) {}
+    };
+
+    const dueWorkflowIntervalId = setInterval(runBackgroundDueWorkflows, 10 * 1000);
+
     // Run once immediately when the tab becomes visible again
     const handleVisibilityChange = () => {
       if (!document.hidden) {
         runBackgroundReplyCheck();
+        runBackgroundDueWorkflows();
       }
     };
     document.addEventListener('visibilitychange', handleVisibilityChange);
 
-    // Clean up interval and listener on unmount
+    // Clean up intervals and listener on unmount
     return () => {
       clearInterval(intervalId);
+      clearInterval(dueWorkflowIntervalId);
       document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
-  }, [runBackgroundReplyCheck]);
+  }, [runBackgroundReplyCheck, syncData, userEmail]);
 
   // Send single stage email (with confirmation dialog and campaign check)
   const handleInitiateSendNextStage = (lead: Lead) => {
