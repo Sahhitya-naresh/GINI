@@ -368,6 +368,8 @@ export async function runDueCampaignsJob(
           conditionMet = (lead.opensCount || 0) > 0;
         } else if (conditionType === 'link_clicked') {
           conditionMet = (lead.clicksCount || 0) > 0;
+        } else if (conditionType === 'has_linkedin_url') {
+          conditionMet = Boolean(lead.linkedinUrl && String(lead.linkedinUrl).trim().length > 0);
         }
 
         const handleId = conditionMet ? 'yes' : 'no';
@@ -535,7 +537,17 @@ export async function runDueCampaignsJob(
         // 6.5 ONLY THEN EXECUTE THE SEND:
         const stageNum = currentNode.data?.templateStage || (lead.currentStage + 1);
         const sendFromAccount = sender ? sender.email : (currentNode.data?.senderEmail || userEmail || 'Default Inbox');
-        const template = DEFAULT_STAGE_TEMPLATES.find(t => t.stage === stageNum) || DEFAULT_STAGE_TEMPLATES[0];
+        let template = DEFAULT_STAGE_TEMPLATES.find(t => t.stage === stageNum) || DEFAULT_STAGE_TEMPLATES[0];
+
+        // Respect custom subject & body configured on the Email node
+        if (currentNode.data?.useCustomTemplate && currentNode.data?.customSubject) {
+          template = {
+            ...template,
+            stage: stageNum,
+            subject: String(currentNode.data.customSubject),
+            bodyHtml: (String(currentNode.data.customBody || '')).replace(/\n/g, '<br/>')
+          };
+        }
 
         const baseUrl = getPublicBaseUrl();
         try {

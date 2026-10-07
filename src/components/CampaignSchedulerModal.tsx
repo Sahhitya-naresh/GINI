@@ -77,10 +77,14 @@ export const CampaignSchedulerModal: React.FC<CampaignSchedulerModalProps> = ({
       const isWfActive = Boolean(assignedWf?.isActive ?? (assignedWf as any)?.is_active ?? true);
       if (assignedWf && !isWfActive) return false;
 
-      // Condition nodes are automated routing points and are always due for evaluation
+      // Condition, merge, and task nodes are workflow routing points and are always due for evaluation
       const currentLeadNode = assignedWf?.nodes?.find(n => n.id === l.currentNodeId);
-      const isCond = currentLeadNode?.type === 'conditionNode' || currentLeadNode?.type === 'condition' || currentLeadNode?.data?.nodeType === 'condition';
-      if (isCond) return true;
+      const isAutoStep = currentLeadNode && (
+        currentLeadNode.type === 'conditionNode' || currentLeadNode.data?.nodeType === 'condition' ||
+        currentLeadNode.type === 'mergeNode' || currentLeadNode.data?.nodeType === 'merge' ||
+        currentLeadNode.type === 'manualTaskNode' || currentLeadNode.data?.nodeType === 'manual_task'
+      );
+      if (isAutoStep) return true;
 
       return isLeadDueForNextSend(l.nextSendDate);
     });
@@ -385,6 +389,8 @@ export const CampaignSchedulerModal: React.FC<CampaignSchedulerModalProps> = ({
             conditionMet = (targetLead.opensCount || 0) > 0;
           } else if (condType === 'link_clicked') {
             conditionMet = (targetLead.clicksCount || 0) > 0;
+          } else if (condType === 'has_linkedin_url') {
+            conditionMet = Boolean(targetLead.linkedinUrl && String(targetLead.linkedinUrl).trim().length > 0);
           }
 
           const handleId = conditionMet ? 'yes' : 'no';
@@ -494,6 +500,53 @@ export const CampaignSchedulerModal: React.FC<CampaignSchedulerModalProps> = ({
               await updateLead(targetLead, token || undefined, spreadsheetId);
               const idx = updatedLeadsList.findIndex(l => l.leadId === targetLead.leadId);
               if (idx !== -1) updatedLeadsList[idx] = { ...targetLead };
+              setExecutionLogs([...newLogs]);
+              continue;
+            }
+          }
+        }
+
+        const isMergeNode = (node: any) => {
+          if (!node) return false;
+          const t = node.type || '';
+          const nt = node.data?.nodeType || '';
+          return t === 'mergeNode' || t === 'merge' || nt === 'merge';
+        };
+
+        const isLinkedInNode = (node: any) => {
+          if (!node) return false;
+          const t = node.type || '';
+          const nt = node.data?.nodeType || '';
+          return t.includes('linkedin') || nt.includes('linkedin');
+        };
+
+        // Step 2.075: Check if current node is a Merge or LinkedIn node (passthrough)
+        if (isMergeNode(currentNode) || isLinkedInNode(currentNode)) {
+          const outgoingEdge = assignedWorkflow.edges?.find(e => e.source === currentNode.id);
+          if (outgoingEdge) {
+            const nextNode = assignedWorkflow.nodes?.find(n => n.id === outgoingEdge.target);
+            if (nextNode) {
+              targetLead.currentNodeId = nextNode.id;
+              targetLead.nodeEnteredDate = new Date().toISOString();
+              const nextDelayMs = getDelayMs(nextNode.data?.stepDelayValue, nextNode.data?.stepDelayUnit);
+              if (nextDelayMs > 0) {
+                targetLead.nextSendDate = new Date(Date.now() + nextDelayMs).toISOString().split('T')[0];
+              } else {
+                targetLead.nextSendDate = today;
+              }
+              await updateLead(targetLead, token || undefined, spreadsheetId);
+              const idx = updatedLeadsList.findIndex(l => l.leadId === targetLead.leadId);
+              if (idx !== -1) updatedLeadsList[idx] = { ...targetLead };
+              newLogs.push({
+                id: `${Date.now()}-${i}-merge`,
+                timestamp: new Date().toLocaleTimeString(),
+                leadId: targetLead.leadId,
+                leadName: targetLead.name,
+                leadEmail: targetLead.email,
+                stage: targetLead.currentStage,
+                status: 'skipped',
+                details: `Advanced through "${currentNode.data?.label || currentNode.id}" to "${nextNode.data?.label || nextNode.id}".`
+              });
               setExecutionLogs([...newLogs]);
               continue;
             }
