@@ -214,21 +214,26 @@ export async function createLead(leadData: Partial<BackendLead>): Promise<Backen
     finalLeadId = await getNextLeadId();
   }
 
-  // Purge any pre-existing orphan tasks or tracking events for this email or leadId
+  // Purge any pre-existing orphan tasks, tracking events, or replies for this email or leadId
   if (cleanEmail || finalLeadId) {
     try {
       const taskOr: any[] = [];
       const trackOr: any[] = [];
+      const replyOr: any[] = [];
       if (finalLeadId) {
         taskOr.push({ leadId: finalLeadId });
         trackOr.push({ leadId: finalLeadId });
+        replyOr.push({ leadId: finalLeadId });
       }
       if (cleanEmail) {
         taskOr.push({ leadEmail: { $regex: `^${cleanEmail}$`, $options: 'i' } });
         trackOr.push({ email: { $regex: `^${cleanEmail}$`, $options: 'i' } });
+        replyOr.push({ leadEmail: { $regex: `^${cleanEmail}$`, $options: 'i' } });
+        replyOr.push({ from: { $regex: `^${cleanEmail}$`, $options: 'i' } });
       }
       if (taskOr.length > 0) await db.collection(COLLECTIONS.TASKS).deleteMany({ $or: taskOr });
       if (trackOr.length > 0) await db.collection(COLLECTIONS.TRACKING_EVENTS).deleteMany({ $or: trackOr });
+      if (replyOr.length > 0) await db.collection(COLLECTIONS.INBOUND_REPLIES).deleteMany({ $or: replyOr });
     } catch (_) {}
   }
 
@@ -346,6 +351,18 @@ export async function deleteLead(leadId: string): Promise<boolean> {
       trackingFilters.push({ email: { $regex: `^${leadEmail}$`, $options: 'i' } });
     }
     await db.collection(COLLECTIONS.TRACKING_EVENTS).deleteMany({ $or: trackingFilters });
+  } catch (_) {}
+
+  // Delete associated inbound replies
+  try {
+    const replyFilters: any[] = [
+      { leadId: cleanId }
+    ];
+    if (leadEmail) {
+      replyFilters.push({ leadEmail: { $regex: `^${leadEmail}$`, $options: 'i' } });
+      replyFilters.push({ from: { $regex: `^${leadEmail}$`, $options: 'i' } });
+    }
+    await db.collection(COLLECTIONS.INBOUND_REPLIES).deleteMany({ $or: replyFilters });
   } catch (_) {}
 
   return result.deletedCount > 0;

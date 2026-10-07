@@ -375,6 +375,13 @@ export async function checkAppThreadForReply(params: CheckReplyParams): Promise<
   }
 
   // Strategy 2: Check messages directly received from lead email
+  // CRITICAL: Strategy 2 searches the mailbox for any email ever received from cleanLeadEmail.
+  // It is ONLY valid to correlate as an outreach reply if an outreach email was actually sent (lastSentDate is present).
+  // Without lastSentDate, any historical email in the mailbox from that address would falsely trigger a reply!
+  if (!params.lastSentDate) {
+    return { hasReplied: false, reason: 'No outreach email sent yet; direct mailbox search omitted' };
+  }
+
   try {
     const url = `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(serviceAccount)}/messages?$filter=from/emailAddress/address eq '${encodeURIComponent(cleanLeadEmail)}'&$top=5&$select=id,conversationId,subject,from,receivedDateTime,bodyPreview&$orderby=receivedDateTime desc`;
     const res = await fetch(url, {
@@ -384,14 +391,15 @@ export async function checkAppThreadForReply(params: CheckReplyParams): Promise<
     if (res.ok) {
       const data = await res.json();
       const messages: any[] = data.value || [];
+      const sentDate = params.lastSentDate.includes('T')
+        ? new Date(params.lastSentDate).getTime()
+        : new Date(`${params.lastSentDate}T00:00:00Z`).getTime();
 
       for (const msg of messages) {
-        if (params.lastSentDate) {
-          const msgDate = new Date(msg.receivedDateTime).getTime();
-          const sentDate = new Date(params.lastSentDate).getTime();
-          if (msgDate < sentDate - 60000) {
-            continue;
-          }
+        const msgDate = new Date(msg.receivedDateTime).getTime();
+        // Discard messages received before or at the time the outreach email was dispatched
+        if (isNaN(msgDate) || isNaN(sentDate) || msgDate <= sentDate) {
+          continue;
         }
 
         return {

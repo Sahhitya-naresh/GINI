@@ -548,16 +548,21 @@ async function createLead(leadData) {
     try {
       const taskOr = [];
       const trackOr = [];
+      const replyOr = [];
       if (finalLeadId) {
         taskOr.push({ leadId: finalLeadId });
         trackOr.push({ leadId: finalLeadId });
+        replyOr.push({ leadId: finalLeadId });
       }
       if (cleanEmail) {
         taskOr.push({ leadEmail: { $regex: `^${cleanEmail}$`, $options: "i" } });
         trackOr.push({ email: { $regex: `^${cleanEmail}$`, $options: "i" } });
+        replyOr.push({ leadEmail: { $regex: `^${cleanEmail}$`, $options: "i" } });
+        replyOr.push({ from: { $regex: `^${cleanEmail}$`, $options: "i" } });
       }
       if (taskOr.length > 0) await db.collection(COLLECTIONS.TASKS).deleteMany({ $or: taskOr });
       if (trackOr.length > 0) await db.collection(COLLECTIONS.TRACKING_EVENTS).deleteMany({ $or: trackOr });
+      if (replyOr.length > 0) await db.collection(COLLECTIONS.INBOUND_REPLIES).deleteMany({ $or: replyOr });
     } catch (_) {
     }
   }
@@ -661,6 +666,17 @@ async function deleteLead(leadId) {
       trackingFilters.push({ email: { $regex: `^${leadEmail}$`, $options: "i" } });
     }
     await db.collection(COLLECTIONS.TRACKING_EVENTS).deleteMany({ $or: trackingFilters });
+  } catch (_) {
+  }
+  try {
+    const replyFilters = [
+      { leadId: cleanId }
+    ];
+    if (leadEmail) {
+      replyFilters.push({ leadEmail: { $regex: `^${leadEmail}$`, $options: "i" } });
+      replyFilters.push({ from: { $regex: `^${leadEmail}$`, $options: "i" } });
+    }
+    await db.collection(COLLECTIONS.INBOUND_REPLIES).deleteMany({ $or: replyFilters });
   } catch (_) {
   }
   return result.deletedCount > 0;
@@ -1854,6 +1870,9 @@ async function checkAppThreadForReply(params) {
       console.warn("[MS Graph] Conversation reply check failed:", err);
     }
   }
+  if (!params.lastSentDate) {
+    return { hasReplied: false, reason: "No outreach email sent yet; direct mailbox search omitted" };
+  }
   try {
     const url = `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(serviceAccount)}/messages?$filter=from/emailAddress/address eq '${encodeURIComponent(cleanLeadEmail)}'&$top=5&$select=id,conversationId,subject,from,receivedDateTime,bodyPreview&$orderby=receivedDateTime desc`;
     const res = await fetch(url, {
@@ -1862,13 +1881,11 @@ async function checkAppThreadForReply(params) {
     if (res.ok) {
       const data = await res.json();
       const messages = data.value || [];
+      const sentDate = params.lastSentDate.includes("T") ? new Date(params.lastSentDate).getTime() : (/* @__PURE__ */ new Date(`${params.lastSentDate}T00:00:00Z`)).getTime();
       for (const msg of messages) {
-        if (params.lastSentDate) {
-          const msgDate = new Date(msg.receivedDateTime).getTime();
-          const sentDate = new Date(params.lastSentDate).getTime();
-          if (msgDate < sentDate - 6e4) {
-            continue;
-          }
+        const msgDate = new Date(msg.receivedDateTime).getTime();
+        if (isNaN(msgDate) || isNaN(sentDate) || msgDate <= sentDate) {
+          continue;
         }
         return {
           hasReplied: true,
@@ -2311,6 +2328,9 @@ async function checkLeadForReply(lead, _token, _userEmail, _sender) {
   if (lead.hasReplied === true || lead.hasUnreadReply === true || lead.lastReplyReceivedDate) {
     return { hasReplied: true, reason: "Incoming reply flag detected on lead record" };
   }
+  if (!lead.lastEmailSentDate && !lead.threadId && (lead.currentStage || 0) === 0) {
+    return { hasReplied: false, reason: "No outreach email dispatched to this lead yet" };
+  }
   try {
     const res = await checkAppThreadForReply({
       leadEmail: lead.email,
@@ -2694,7 +2714,7 @@ async function runDueCampaignsJob(targetCampaignId, token, spreadsheetId, userEm
           await saveLocalSenders(senders);
         }
         emailsSent++;
-        lead.lastEmailSentDate = todayStr;
+        lead.lastEmailSentDate = (/* @__PURE__ */ new Date()).toISOString();
         lead.senderUsed = sendFromAccount;
         lead.currentStage = stageNum;
         const outgoingEdge2 = edges.find((e) => e.source === currentNode.id);
@@ -3198,9 +3218,17 @@ app.post("/api/leads/batch", async (req, res) => {
 });
 app.post("/api/leads/delete", async (req, res) => {
   try {
-    const { leadId } = req.body;
+    const { leadId, email } = req.body;
     if (!leadId) {
       return res.status(400).json({ success: false, error: "Missing leadId" });
+    }
+    const cleanId = String(leadId).trim();
+    const cleanEmail = String(email || "").trim().toLowerCase();
+    for (let i = inMemoryInboundReplies.length - 1; i >= 0; i--) {
+      const r = inMemoryInboundReplies[i];
+      if (cleanId && r.leadId === cleanId || cleanEmail && r.leadEmail.toLowerCase() === cleanEmail) {
+        inMemoryInboundReplies.splice(i, 1);
+      }
     }
     const deleted = await deleteLead(leadId);
     res.json({ success: true, deleted });
@@ -3487,6 +3515,9 @@ app.post("/api/email/check-reply", async (req, res) => {
       return res.json({ success: true, ...result });
     }
     if (process.env.NODE_ENV !== "production") {
+      if (!lastSentDate && !threadId) {
+        return res.json({ success: true, hasReplied: false, reason: "No outreach email sent to this lead yet" });
+      }
       const cleanEmail = leadEmail.trim().toLowerCase();
       let reply = inMemoryInboundReplies.find(
         (r) => r.leadEmail === cleanEmail || threadId && r.threadId === threadId
@@ -3504,6 +3535,13 @@ app.post("/api/email/check-reply", async (req, res) => {
         }
       }
       if (reply) {
+        if (lastSentDate) {
+          const sentTime = new Date(lastSentDate.includes("T") ? lastSentDate : `${lastSentDate}T00:00:00Z`).getTime();
+          const replyTime = new Date(reply.receivedDateTime || reply.createdAt || 0).getTime();
+          if (!isNaN(sentTime) && !isNaN(replyTime) && replyTime <= sentTime) {
+            return res.json({ success: true, hasReplied: false, reason: "Stored reply is older than outreach dispatch date" });
+          }
+        }
         return res.json({
           success: true,
           hasReplied: true,

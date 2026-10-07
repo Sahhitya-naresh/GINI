@@ -56,6 +56,11 @@ async function checkLeadForReply(
     return { hasReplied: true, reason: 'Incoming reply flag detected on lead record' };
   }
 
+  // 1.5 A lead cannot have replied to outreach if no outreach email was ever dispatched to them!
+  if (!lead.lastEmailSentDate && !lead.threadId && (lead.currentStage || 0) === 0) {
+    return { hasReplied: false, reason: 'No outreach email dispatched to this lead yet' };
+  }
+
   // 2. Query fixed service account mailbox via Microsoft Graph
   try {
     const res = await checkAppThreadForReply({
@@ -572,7 +577,7 @@ export async function runDueCampaignsJob(
         }
 
         emailsSent++;
-        lead.lastEmailSentDate = todayStr;
+        lead.lastEmailSentDate = new Date().toISOString();
         lead.senderUsed = sendFromAccount;
         lead.currentStage = stageNum;
 

@@ -116,8 +116,14 @@ export const AddLeadModal: React.FC<AddLeadModalProps> = ({
       threadId: '',
       currentNodeId: firstNodeId,
       nodeEnteredDate: firstNodeId ? todayStr : undefined,
-      notes: notes.trim()
-    };
+      notes: notes.trim(),
+      opensCount: 0,
+      clicksCount: 0,
+      hasReplied: false,
+      replyReceived: false,
+      replyDetectedDate: '',
+      lastReplyReceivedDate: ''
+    } as any;
 
     try {
       await onAddLead(newLead);

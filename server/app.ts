@@ -559,10 +559,21 @@ app.post('/api/leads/batch', async (req, res) => {
 
 app.post('/api/leads/delete', async (req, res) => {
   try {
-    const { leadId } = req.body;
+    const { leadId, email } = req.body;
     if (!leadId) {
       return res.status(400).json({ success: false, error: 'Missing leadId' });
     }
+    const cleanId = String(leadId).trim();
+    const cleanEmail = String(email || '').trim().toLowerCase();
+
+    // Purge in-memory inbound replies for this lead
+    for (let i = inMemoryInboundReplies.length - 1; i >= 0; i--) {
+      const r = inMemoryInboundReplies[i];
+      if ((cleanId && (r as any).leadId === cleanId) || (cleanEmail && r.leadEmail.toLowerCase() === cleanEmail)) {
+        inMemoryInboundReplies.splice(i, 1);
+      }
+    }
+
     const deleted = await deleteLead(leadId);
     res.json({ success: true, deleted });
   } catch (err: any) {
@@ -913,6 +924,11 @@ app.post('/api/email/check-reply', async (req, res) => {
     // In production, real Microsoft Graph API is the sole source of truth for reply detection.
     // Stored simulated replies are restricted to local non-production environments.
     if (process.env.NODE_ENV !== 'production') {
+      // If no outreach email was ever sent to this lead, it cannot have replied to outreach!
+      if (!lastSentDate && !threadId) {
+        return res.json({ success: true, hasReplied: false, reason: 'No outreach email sent to this lead yet' });
+      }
+
       const cleanEmail = leadEmail.trim().toLowerCase();
       let reply = inMemoryInboundReplies.find(
         r => r.leadEmail === cleanEmail || (threadId && r.threadId === threadId)
@@ -931,6 +947,16 @@ app.post('/api/email/check-reply', async (req, res) => {
       }
 
       if (reply) {
+        // Enforce timestamp correlation: reply must be received AFTER lastSentDate
+        if (lastSentDate) {
+          const sentTime = new Date(lastSentDate.includes('T') ? lastSentDate : `${lastSentDate}T00:00:00Z`).getTime();
+          const replyTime = new Date(reply.receivedDateTime || (reply as any).createdAt || 0).getTime();
+          if (!isNaN(sentTime) && !isNaN(replyTime) && replyTime <= sentTime) {
+            // Reply is older than outreach dispatch date; ignore as stale previous test reply!
+            return res.json({ success: true, hasReplied: false, reason: 'Stored reply is older than outreach dispatch date' });
+          }
+        }
+
         return res.json({
           success: true,
           hasReplied: true,
