@@ -107,7 +107,9 @@ export interface WorkflowNodeData {
   
   // LinkedIn nodes
   messageText?: string;
-  comingSoon?: boolean;
+  // Custom step delay timer (wait time after previous step before this step executes)
+  stepDelayValue?: number;
+  stepDelayUnit?: 'seconds' | 'minutes' | 'hours' | 'days';
 
   [key: string]: unknown;
 }

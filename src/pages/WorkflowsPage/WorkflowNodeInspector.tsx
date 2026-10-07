@@ -763,6 +763,83 @@ export const WorkflowNodeInspector: React.FC<WorkflowNodeInspectorProps> = ({
           </div>
         )}
 
+        {/* ------------------------------------------------------------------ */}
+        {/* STEP DELAY TIMER (All Node Types)                                  */}
+        {/* How long to wait after previous node completes before this step executes */}
+        {/* ------------------------------------------------------------------ */}
+        <div className="space-y-2 pt-3 border-t border-slate-200">
+          <div className="flex items-center justify-between">
+            <label className="font-bold text-slate-800 flex items-center gap-1.5 text-xs">
+              <Clock className="w-3.5 h-3.5 text-red-600" />
+              <span>Step Delay Timer</span>
+            </label>
+            <span className="text-[10px] text-slate-400 font-medium">Optional</span>
+          </div>
+          <p className="text-[11px] text-slate-500 leading-tight">
+            How long to wait after the previous node completes before this step executes.
+          </p>
+
+          <div className="grid grid-cols-2 gap-2 pt-0.5">
+            <div>
+              <label className="block text-[11px] font-semibold text-slate-600 mb-1">
+                Delay Value
+              </label>
+              <input
+                type="number"
+                min={1}
+                placeholder="0 (Immediate)"
+                value={data.stepDelayValue !== undefined && data.stepDelayValue !== null ? data.stepDelayValue : ''}
+                onKeyDown={(e) => {
+                  if (['e', 'E', '+', '-', '.'].includes(e.key)) {
+                    e.preventDefault();
+                  }
+                }}
+                onChange={(e) => {
+                  const raw = e.target.value;
+                  if (raw === '') {
+                    onUpdateNodeData(node.id, { stepDelayValue: undefined });
+                  } else {
+                    const parsed = parseInt(raw, 10);
+                    if (!isNaN(parsed) && parsed >= 1) {
+                      onUpdateNodeData(node.id, { 
+                        stepDelayValue: parsed,
+                        stepDelayUnit: data.stepDelayUnit || 'minutes'
+                      });
+                    }
+                  }
+                }}
+                className="w-full px-2.5 py-1.5 border border-slate-300 rounded-lg text-xs font-medium focus:outline-none focus:border-red-500 focus:ring-1 focus:ring-red-200"
+              />
+            </div>
+
+            <div>
+              <label className="block text-[11px] font-semibold text-slate-600 mb-1">
+                Delay Unit
+              </label>
+              <select
+                value={data.stepDelayUnit || 'minutes'}
+                onChange={(e) => {
+                  onUpdateNodeData(node.id, { 
+                    stepDelayUnit: e.target.value as 'seconds' | 'minutes' | 'hours' | 'days' 
+                  });
+                }}
+                className="w-full px-2.5 py-1.5 border border-slate-300 rounded-lg text-xs font-medium bg-white focus:outline-none focus:border-red-500"
+              >
+                <option value="seconds">Seconds</option>
+                <option value="minutes">Minutes</option>
+                <option value="hours">Hours</option>
+                <option value="days">Days</option>
+              </select>
+            </div>
+          </div>
+
+          <p className="text-[10px] text-slate-400 bg-slate-50 p-2 rounded-md border border-slate-200">
+            {data.stepDelayValue && data.stepDelayValue > 0
+              ? `Leads will pause for ${data.stepDelayValue} ${data.stepDelayUnit || 'minutes'} after the previous step finishes before running this step.`
+              : 'Default: 0 delay (executes immediately once the previous step finishes).'}
+          </p>
+        </div>
+
       </div>
 
       {/* Inspector Actions Footer */}

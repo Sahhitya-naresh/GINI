@@ -2358,6 +2358,26 @@ function isWithinSendingSchedule(schedule) {
   }
   return { allowed: true };
 }
+function getStepDelayMs(value, unit) {
+  if (typeof value !== "number" || isNaN(value) || value <= 0) return 0;
+  switch (unit) {
+    case "seconds":
+      return value * 1e3;
+    case "minutes":
+      return value * 60 * 1e3;
+    case "hours":
+      return value * 60 * 60 * 1e3;
+    case "days":
+      return value * 24 * 60 * 60 * 1e3;
+    default:
+      return value * 60 * 1e3;
+  }
+}
+function parseNodeEnteredTime(dateStr, fallbackMs = Date.now()) {
+  if (!dateStr) return fallbackMs;
+  const parsed = Date.parse(dateStr);
+  return isNaN(parsed) ? fallbackMs : parsed;
+}
 async function runDueCampaignsJob(targetCampaignId, token, spreadsheetId, userEmail) {
   const campaigns = await listCampaigns(token, spreadsheetId);
   const leads = await listLeads(token, spreadsheetId);
@@ -2417,7 +2437,13 @@ async function runDueCampaignsJob(targetCampaignId, token, spreadsheetId, userEm
           lead.campaignId = campaign.id;
           lead.campaign = campaign.name;
           lead.currentNodeId = currentNode.id;
-          lead.nodeEnteredDate = todayStr;
+          lead.nodeEnteredDate = (/* @__PURE__ */ new Date()).toISOString();
+          const initDelayMs = getStepDelayMs(currentNode.data?.stepDelayValue, currentNode.data?.stepDelayUnit);
+          if (initDelayMs > 0) {
+            lead.nextSendDate = new Date(nowMs + initDelayMs).toISOString().split("T")[0];
+          } else {
+            lead.nextSendDate = todayStr;
+          }
           await updateLead(lead, token, spreadsheetId);
           logs.push(`Initialized lead ${lead.name} into node "${currentNode.data?.label || currentNode.id}".`);
         }
@@ -2427,10 +2453,35 @@ async function runDueCampaignsJob(targetCampaignId, token, spreadsheetId, userEm
       if (rawNodeType.endsWith("Node")) {
         rawNodeType = rawNodeType.replace("Node", "");
       }
+      const leadSender = senders.find((s) => s.email === lead.senderUsed || s.id === lead.senderUsed) || senders.find((s) => s.isPrimary) || senders[0];
+      const replyCheck = await checkLeadForReply(lead, token, userEmail, leadSender);
+      if (replyCheck.hasReplied) {
+        lead.status = "Replied";
+        lead.notes = lead.notes ? `${lead.notes} | [Reply detected on ${todayStr}: ${replyCheck.reason}]` : `Reply detected on ${todayStr}: ${replyCheck.reason}`;
+        await updateLead(lead, token, spreadsheetId);
+        logs.push(
+          `Reply check for lead ${lead.name} (${lead.email}): Reply detected! Pulled lead to "Needs Reply" (status: Replied) instead of sending.`
+        );
+        continue;
+      }
+      const stepDelayMs = getStepDelayMs(currentNode.data?.stepDelayValue, currentNode.data?.stepDelayUnit);
+      if (stepDelayMs > 0) {
+        const enteredMs = parseNodeEnteredTime(lead.nodeEnteredDate, nowMs);
+        const elapsedMs = nowMs - enteredMs;
+        if (elapsedMs < stepDelayMs) {
+          const remainingSec = Math.ceil((stepDelayMs - elapsedMs) / 1e3);
+          const unit = currentNode.data?.stepDelayUnit || "minutes";
+          const val = currentNode.data?.stepDelayValue;
+          logs.push(
+            `Step delay active on node "${currentNode.data?.label || currentNode.id}" for ${lead.name} (${val} ${unit}). Elapsed: ${Math.max(0, Math.floor(elapsedMs / 1e3))}s / Required: ${Math.floor(stepDelayMs / 1e3)}s (${remainingSec}s remaining). Postponing execution.`
+          );
+          continue;
+        }
+      }
       if (rawNodeType === "wait") {
         const waitDuration = currentNode.data?.waitDuration ?? currentNode.data?.waitDays ?? 1;
         const waitUnit = currentNode.data?.waitUnit || "days";
-        const enteredDate = lead.nodeEnteredDate ? new Date(lead.nodeEnteredDate).getTime() : nowMs;
+        const enteredDate = parseNodeEnteredTime(lead.nodeEnteredDate, nowMs);
         let elapsed = 0;
         if (waitUnit === "hours") {
           elapsed = Math.floor((nowMs - enteredDate) / (1e3 * 60 * 60));
@@ -2444,17 +2495,30 @@ async function runDueCampaignsJob(targetCampaignId, token, spreadsheetId, userEm
           if (outgoingEdge2) {
             const nextNode = nodes.find((n) => n.id === outgoingEdge2.target);
             if (nextNode) {
-              logs.push(
-                `Wait period satisfied (${elapsed}/${waitDuration} ${waitUnit} elapsed) for ${lead.name}. Advancing from "${currentNode.data?.label || currentNode.id}" to next node: "${nextNode.data?.label || nextNode.id}".`
-              );
               lead.currentNodeId = nextNode.id;
-              lead.nodeEnteredDate = todayStr;
-              currentNode = nextNode;
-              rawNodeType = currentNode.data?.nodeType || currentNode.type || "";
-              if (rawNodeType.endsWith("Node")) {
-                rawNodeType = rawNodeType.replace("Node", "");
+              lead.nodeEnteredDate = (/* @__PURE__ */ new Date()).toISOString();
+              const nextDelayMs = getStepDelayMs(nextNode.data?.stepDelayValue, nextNode.data?.stepDelayUnit);
+              if (nextDelayMs > 0) {
+                lead.nextSendDate = new Date(nowMs + nextDelayMs).toISOString().split("T")[0];
+                logs.push(
+                  `Wait period satisfied (${elapsed}/${waitDuration} ${waitUnit} elapsed) for ${lead.name}. Advanced from "${currentNode.data?.label || currentNode.id}" to next node: "${nextNode.data?.label || nextNode.id}" with ${nextNode.data?.stepDelayValue} ${nextNode.data?.stepDelayUnit} delay.`
+                );
+                await updateLead(lead, token, spreadsheetId);
+                advancedCount++;
+                continue;
+              } else {
+                lead.nextSendDate = todayStr;
+                logs.push(
+                  `Wait period satisfied (${elapsed}/${waitDuration} ${waitUnit} elapsed) for ${lead.name}. Advancing from "${currentNode.data?.label || currentNode.id}" to next node: "${nextNode.data?.label || nextNode.id}".`
+                );
+                await updateLead(lead, token, spreadsheetId);
+                currentNode = nextNode;
+                rawNodeType = currentNode.data?.nodeType || currentNode.type || "";
+                if (rawNodeType.endsWith("Node")) {
+                  rawNodeType = rawNodeType.replace("Node", "");
+                }
+                advancedCount++;
               }
-              advancedCount++;
             } else {
               logs.push(`Wait node "${currentNode.id}" has invalid target node. Halting.`);
               continue;
@@ -2469,17 +2533,6 @@ async function runDueCampaignsJob(targetCampaignId, token, spreadsheetId, userEm
           );
           continue;
         }
-      }
-      const leadSender = senders.find((s) => s.email === lead.senderUsed || s.id === lead.senderUsed) || senders.find((s) => s.isPrimary) || senders[0];
-      const replyCheck = await checkLeadForReply(lead, token, userEmail, leadSender);
-      if (replyCheck.hasReplied) {
-        lead.status = "Replied";
-        lead.notes = lead.notes ? `${lead.notes} | [Reply detected on ${todayStr}: ${replyCheck.reason}]` : `Reply detected on ${todayStr}: ${replyCheck.reason}`;
-        await updateLead(lead, token, spreadsheetId);
-        logs.push(
-          `Reply check for lead ${lead.name} (${lead.email}): Reply detected! Pulled lead to "Needs Reply" (status: Replied) instead of sending.`
-        );
-        continue;
       }
       if (rawNodeType === "condition") {
         const conditionType = currentNode.data?.conditionType || "has_replied";
@@ -2499,12 +2552,21 @@ async function runDueCampaignsJob(targetCampaignId, token, spreadsheetId, userEm
           const nextNode = nodes.find((n) => n.id === branchEdge.target);
           if (nextNode) {
             lead.currentNodeId = nextNode.id;
-            lead.nodeEnteredDate = todayStr;
+            lead.nodeEnteredDate = (/* @__PURE__ */ new Date()).toISOString();
+            const nextDelayMs = getStepDelayMs(nextNode.data?.stepDelayValue, nextNode.data?.stepDelayUnit);
+            if (nextDelayMs > 0) {
+              lead.nextSendDate = new Date(nowMs + nextDelayMs).toISOString().split("T")[0];
+              logs.push(
+                `Condition "${conditionType}" evaluated to ${conditionMet ? "YES" : "NO"} for ${lead.name}. Routed to "${nextNode.data?.label || nextNode.id}" with ${nextNode.data?.stepDelayValue} ${nextNode.data?.stepDelayUnit} delay.`
+              );
+            } else {
+              lead.nextSendDate = todayStr;
+              logs.push(
+                `Condition "${conditionType}" evaluated to ${conditionMet ? "YES" : "NO"} for ${lead.name}. Routed to "${nextNode.data?.label || nextNode.id}".`
+              );
+            }
             await updateLead(lead, token, spreadsheetId);
             advancedCount++;
-            logs.push(
-              `Condition "${conditionType}" evaluated to ${conditionMet ? "YES" : "NO"} for ${lead.name}. Routed to "${nextNode.data?.label || nextNode.id}".`
-            );
           }
         }
         continue;
@@ -2538,7 +2600,7 @@ async function runDueCampaignsJob(targetCampaignId, token, spreadsheetId, userEm
           localTasks.push(newTask);
           await saveLocalTasks(localTasks);
           lead.currentNodeId = currentNode.id;
-          lead.nodeEnteredDate = todayStr;
+          lead.nodeEnteredDate = (/* @__PURE__ */ new Date()).toISOString();
           await updateLead(lead, token, spreadsheetId);
           logs.push(`Generated Manual Task for ${lead.name}: "${title}". Sequence paused until completed in Tasks tab.`);
           continue;
@@ -2552,14 +2614,24 @@ async function runDueCampaignsJob(targetCampaignId, token, spreadsheetId, userEm
           const nextNode = nodes.find((n) => n.id === outgoingEdge2.target);
           if (nextNode) {
             lead.currentNodeId = nextNode.id;
-            lead.nodeEnteredDate = todayStr;
-            advancedCount++;
-            logs.push(`Manual Task "${existingTask.title}" completed. Advanced ${lead.name} to "${nextNode.data?.label || nextNode.id}".`);
-            await updateLead(lead, token, spreadsheetId);
-            currentNode = nextNode;
-            rawNodeType = currentNode.data?.nodeType || currentNode.type || "";
-            if (rawNodeType.endsWith("Node")) {
-              rawNodeType = rawNodeType.replace("Node", "");
+            lead.nodeEnteredDate = (/* @__PURE__ */ new Date()).toISOString();
+            const nextDelayMs = getStepDelayMs(nextNode.data?.stepDelayValue, nextNode.data?.stepDelayUnit);
+            if (nextDelayMs > 0) {
+              lead.nextSendDate = new Date(nowMs + nextDelayMs).toISOString().split("T")[0];
+              logs.push(`Manual Task "${existingTask.title}" completed. Advanced ${lead.name} to "${nextNode.data?.label || nextNode.id}" with ${nextNode.data?.stepDelayValue} ${nextNode.data?.stepDelayUnit} delay.`);
+              await updateLead(lead, token, spreadsheetId);
+              advancedCount++;
+              continue;
+            } else {
+              lead.nextSendDate = todayStr;
+              logs.push(`Manual Task "${existingTask.title}" completed. Advanced ${lead.name} to "${nextNode.data?.label || nextNode.id}".`);
+              await updateLead(lead, token, spreadsheetId);
+              currentNode = nextNode;
+              rawNodeType = currentNode.data?.nodeType || currentNode.type || "";
+              if (rawNodeType.endsWith("Node")) {
+                rawNodeType = rawNodeType.replace("Node", "");
+              }
+              advancedCount++;
             }
           }
         }
@@ -2620,11 +2692,20 @@ async function runDueCampaignsJob(targetCampaignId, token, spreadsheetId, userEm
           const nextNode = nodes.find((n) => n.id === outgoingEdge2.target);
           if (nextNode) {
             lead.currentNodeId = nextNode.id;
-            lead.nodeEnteredDate = todayStr;
+            lead.nodeEnteredDate = (/* @__PURE__ */ new Date()).toISOString();
+            const nextDelayMs = getStepDelayMs(nextNode.data?.stepDelayValue, nextNode.data?.stepDelayUnit);
+            if (nextDelayMs > 0) {
+              lead.nextSendDate = new Date(nowMs + nextDelayMs).toISOString().split("T")[0];
+              logs.push(
+                `Dispatched Email Stage ${stageNum} to ${lead.name} (${lead.email}) from "${sender?.name || sendFromAccount}". Advanced to next node: "${nextNode.data?.label || nextNode.id}" (due after ${nextNode.data?.stepDelayValue} ${nextNode.data?.stepDelayUnit}).`
+              );
+            } else {
+              lead.nextSendDate = todayStr;
+              logs.push(
+                `Dispatched Email Stage ${stageNum} to ${lead.name} (${lead.email}) from "${sender?.name || sendFromAccount}". Advanced to next node: "${nextNode.data?.label || nextNode.id}".`
+              );
+            }
             advancedCount++;
-            logs.push(
-              `Dispatched Email Stage ${stageNum} to ${lead.name} (${lead.email}) from "${sender?.name || sendFromAccount}". Advanced to next node: "${nextNode.data?.label || nextNode.id}".`
-            );
           } else {
             lead.status = "Completed";
             lead.nextSendDate = "";
@@ -2649,10 +2730,17 @@ async function runDueCampaignsJob(targetCampaignId, token, spreadsheetId, userEm
         const nextNode = nodes.find((n) => n.id === outgoingEdge.target);
         if (nextNode) {
           lead.currentNodeId = nextNode.id;
-          lead.nodeEnteredDate = todayStr;
+          lead.nodeEnteredDate = (/* @__PURE__ */ new Date()).toISOString();
+          const nextDelayMs = getStepDelayMs(nextNode.data?.stepDelayValue, nextNode.data?.stepDelayUnit);
+          if (nextDelayMs > 0) {
+            lead.nextSendDate = new Date(nowMs + nextDelayMs).toISOString().split("T")[0];
+            logs.push(`Transitioned ${lead.name} from "${currentNode.data?.label || currentNode.id}" to "${nextNode.data?.label || nextNode.id}" (due after ${nextNode.data?.stepDelayValue} ${nextNode.data?.stepDelayUnit}).`);
+          } else {
+            lead.nextSendDate = todayStr;
+            logs.push(`Transitioned ${lead.name} from "${currentNode.data?.label || currentNode.id}" to "${nextNode.data?.label || nextNode.id}".`);
+          }
           await updateLead(lead, token, spreadsheetId);
           advancedCount++;
-          logs.push(`Transitioned ${lead.name} from "${currentNode.data?.label || currentNode.id}" to "${nextNode.data?.label || nextNode.id}".`);
         }
       }
     }

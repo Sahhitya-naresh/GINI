@@ -116,6 +116,35 @@ function isWithinSendingSchedule(schedule?: any): { allowed: boolean; reason?: s
   return { allowed: true };
 }
 
+/**
+ * Computes delay duration in milliseconds from a node's configured timer.
+ * Returns 0 if value is not set or <= 0 (immediate transition fallback).
+ */
+export function getStepDelayMs(value?: number, unit?: string): number {
+  if (typeof value !== 'number' || isNaN(value) || value <= 0) return 0;
+  switch (unit) {
+    case 'seconds':
+      return value * 1000;
+    case 'minutes':
+      return value * 60 * 1000;
+    case 'hours':
+      return value * 60 * 60 * 1000;
+    case 'days':
+      return value * 24 * 60 * 60 * 1000;
+    default:
+      return value * 60 * 1000;
+  }
+}
+
+/**
+ * Safely parses nodeEnteredDate, supporting both full ISO 8601 timestamps and legacy YYYY-MM-DD date strings.
+ */
+export function parseNodeEnteredTime(dateStr?: string, fallbackMs = Date.now()): number {
+  if (!dateStr) return fallbackMs;
+  const parsed = Date.parse(dateStr);
+  return isNaN(parsed) ? fallbackMs : parsed;
+}
+
 export async function runDueCampaignsJob(
   targetCampaignId?: string,
   token?: string,
@@ -198,7 +227,13 @@ export async function runDueCampaignsJob(
           lead.campaignId = campaign.id;
           lead.campaign = campaign.name;
           lead.currentNodeId = currentNode.id;
-          lead.nodeEnteredDate = todayStr;
+          lead.nodeEnteredDate = new Date().toISOString();
+          const initDelayMs = getStepDelayMs(currentNode.data?.stepDelayValue, currentNode.data?.stepDelayUnit);
+          if (initDelayMs > 0) {
+            lead.nextSendDate = new Date(nowMs + initDelayMs).toISOString().split('T')[0];
+          } else {
+            lead.nextSendDate = todayStr;
+          }
           await updateLead(lead, token, spreadsheetId);
           logs.push(`Initialized lead ${lead.name} into node "${currentNode.data?.label || currentNode.id}".`);
         }
@@ -212,60 +247,7 @@ export async function runDueCampaignsJob(
       }
 
       // --------------------------------------------------------------------
-      // STEP 1: WAIT NODE HANDLING
-      // If current node is a Wait node, check if wait duration has already elapsed.
-      // If elapsed, advance to next node and proceed to evaluate it in this same job run!
-      // --------------------------------------------------------------------
-      if (rawNodeType === 'wait') {
-        const waitDuration = currentNode.data?.waitDuration ?? currentNode.data?.waitDays ?? 1;
-        const waitUnit = currentNode.data?.waitUnit || 'days';
-        const enteredDate = lead.nodeEnteredDate ? new Date(lead.nodeEnteredDate).getTime() : nowMs;
-
-        let elapsed = 0;
-        if (waitUnit === 'hours') {
-          elapsed = Math.floor((nowMs - enteredDate) / (1000 * 60 * 60));
-        } else if (waitUnit === 'minutes') {
-          elapsed = Math.floor((nowMs - enteredDate) / (1000 * 60));
-        } else {
-          // days
-          elapsed = Math.floor((nowMs - enteredDate) / (1000 * 60 * 60 * 24));
-        }
-
-        if (elapsed >= waitDuration) {
-          // Wait duration satisfied! Advance along outgoing edge
-          const outgoingEdge = edges.find((e: any) => e.source === currentNode.id);
-          if (outgoingEdge) {
-            const nextNode = nodes.find((n: any) => n.id === outgoingEdge.target);
-            if (nextNode) {
-              logs.push(
-                `Wait period satisfied (${elapsed}/${waitDuration} ${waitUnit} elapsed) for ${lead.name}. Advancing from "${currentNode.data?.label || currentNode.id}" to next node: "${nextNode.data?.label || nextNode.id}".`
-              );
-              lead.currentNodeId = nextNode.id;
-              lead.nodeEnteredDate = todayStr;
-              currentNode = nextNode;
-              rawNodeType = currentNode.data?.nodeType || currentNode.type || '';
-              if (rawNodeType.endsWith('Node')) {
-                rawNodeType = rawNodeType.replace('Node', '');
-              }
-              advancedCount++;
-            } else {
-              logs.push(`Wait node "${currentNode.id}" has invalid target node. Halting.`);
-              continue;
-            }
-          } else {
-            logs.push(`Wait node "${currentNode.id}" has no outgoing edge. Halting.`);
-            continue;
-          }
-        } else {
-          logs.push(
-            `Lead ${lead.name} is waiting in "${currentNode.data?.label || 'Wait'}" (${elapsed}/${waitDuration} ${waitUnit} elapsed).`
-          );
-          continue;
-        }
-      }
-
-      // --------------------------------------------------------------------
-      // STEP 2: CHECK FOR REPLY FIRST
+      // STEP 1: CHECK FOR REPLY FIRST
       // If found, pulls the lead to Needs Reply (status: Replied) instead of sending!
       // Look up sender record for this lead to use correct provider instance
       // --------------------------------------------------------------------
@@ -288,7 +270,93 @@ export async function runDueCampaignsJob(
       }
 
       // --------------------------------------------------------------------
-      // STEP 3: CONDITION NODE EVALUATION
+      // STEP 2: CUSTOM STEP DELAY TIMER (WAIT TIME AFTER PREVIOUS NODE)
+      // Check if current node has a custom delay configured before executing.
+      // If elapsed time since nodeEnteredDate < delay, postpone execution!
+      // --------------------------------------------------------------------
+      const stepDelayMs = getStepDelayMs(currentNode.data?.stepDelayValue, currentNode.data?.stepDelayUnit);
+      if (stepDelayMs > 0) {
+        const enteredMs = parseNodeEnteredTime(lead.nodeEnteredDate, nowMs);
+        const elapsedMs = nowMs - enteredMs;
+        if (elapsedMs < stepDelayMs) {
+          const remainingSec = Math.ceil((stepDelayMs - elapsedMs) / 1000);
+          const unit = currentNode.data?.stepDelayUnit || 'minutes';
+          const val = currentNode.data?.stepDelayValue;
+          logs.push(
+            `Step delay active on node "${currentNode.data?.label || currentNode.id}" for ${lead.name} (${val} ${unit}). Elapsed: ${Math.max(0, Math.floor(elapsedMs / 1000))}s / Required: ${Math.floor(stepDelayMs / 1000)}s (${remainingSec}s remaining). Postponing execution.`
+          );
+          continue; // Custom step delay has not elapsed yet; postpone execution of this node
+        }
+      }
+
+      // --------------------------------------------------------------------
+      // STEP 3: WAIT NODE HANDLING
+      // If current node is a Wait node, check if wait duration has already elapsed.
+      // If elapsed, advance to next node!
+      // --------------------------------------------------------------------
+      if (rawNodeType === 'wait') {
+        const waitDuration = currentNode.data?.waitDuration ?? currentNode.data?.waitDays ?? 1;
+        const waitUnit = currentNode.data?.waitUnit || 'days';
+        const enteredDate = parseNodeEnteredTime(lead.nodeEnteredDate, nowMs);
+
+        let elapsed = 0;
+        if (waitUnit === 'hours') {
+          elapsed = Math.floor((nowMs - enteredDate) / (1000 * 60 * 60));
+        } else if (waitUnit === 'minutes') {
+          elapsed = Math.floor((nowMs - enteredDate) / (1000 * 60));
+        } else {
+          // days
+          elapsed = Math.floor((nowMs - enteredDate) / (1000 * 60 * 60 * 24));
+        }
+
+        if (elapsed >= waitDuration) {
+          // Wait duration satisfied! Advance along outgoing edge
+          const outgoingEdge = edges.find((e: any) => e.source === currentNode.id);
+          if (outgoingEdge) {
+            const nextNode = nodes.find((n: any) => n.id === outgoingEdge.target);
+            if (nextNode) {
+              lead.currentNodeId = nextNode.id;
+              lead.nodeEnteredDate = new Date().toISOString();
+              const nextDelayMs = getStepDelayMs(nextNode.data?.stepDelayValue, nextNode.data?.stepDelayUnit);
+              if (nextDelayMs > 0) {
+                lead.nextSendDate = new Date(nowMs + nextDelayMs).toISOString().split('T')[0];
+                logs.push(
+                  `Wait period satisfied (${elapsed}/${waitDuration} ${waitUnit} elapsed) for ${lead.name}. Advanced from "${currentNode.data?.label || currentNode.id}" to next node: "${nextNode.data?.label || nextNode.id}" with ${nextNode.data?.stepDelayValue} ${nextNode.data?.stepDelayUnit} delay.`
+                );
+                await updateLead(lead, token, spreadsheetId);
+                advancedCount++;
+                continue;
+              } else {
+                lead.nextSendDate = todayStr;
+                logs.push(
+                  `Wait period satisfied (${elapsed}/${waitDuration} ${waitUnit} elapsed) for ${lead.name}. Advancing from "${currentNode.data?.label || currentNode.id}" to next node: "${nextNode.data?.label || nextNode.id}".`
+                );
+                await updateLead(lead, token, spreadsheetId);
+                currentNode = nextNode;
+                rawNodeType = currentNode.data?.nodeType || currentNode.type || '';
+                if (rawNodeType.endsWith('Node')) {
+                  rawNodeType = rawNodeType.replace('Node', '');
+                }
+                advancedCount++;
+              }
+            } else {
+              logs.push(`Wait node "${currentNode.id}" has invalid target node. Halting.`);
+              continue;
+            }
+          } else {
+            logs.push(`Wait node "${currentNode.id}" has no outgoing edge. Halting.`);
+            continue;
+          }
+        } else {
+          logs.push(
+            `Lead ${lead.name} is waiting in "${currentNode.data?.label || 'Wait'}" (${elapsed}/${waitDuration} ${waitUnit} elapsed).`
+          );
+          continue;
+        }
+      }
+
+      // --------------------------------------------------------------------
+      // STEP 4: CONDITION NODE EVALUATION
       // --------------------------------------------------------------------
       if (rawNodeType === 'condition') {
         const conditionType = currentNode.data?.conditionType || 'has_replied';
@@ -311,19 +379,28 @@ export async function runDueCampaignsJob(
           const nextNode = nodes.find((n: any) => n.id === branchEdge.target);
           if (nextNode) {
             lead.currentNodeId = nextNode.id;
-            lead.nodeEnteredDate = todayStr;
+            lead.nodeEnteredDate = new Date().toISOString();
+            const nextDelayMs = getStepDelayMs(nextNode.data?.stepDelayValue, nextNode.data?.stepDelayUnit);
+            if (nextDelayMs > 0) {
+              lead.nextSendDate = new Date(nowMs + nextDelayMs).toISOString().split('T')[0];
+              logs.push(
+                `Condition "${conditionType}" evaluated to ${conditionMet ? 'YES' : 'NO'} for ${lead.name}. Routed to "${nextNode.data?.label || nextNode.id}" with ${nextNode.data?.stepDelayValue} ${nextNode.data?.stepDelayUnit} delay.`
+              );
+            } else {
+              lead.nextSendDate = todayStr;
+              logs.push(
+                `Condition "${conditionType}" evaluated to ${conditionMet ? 'YES' : 'NO'} for ${lead.name}. Routed to "${nextNode.data?.label || nextNode.id}".`
+              );
+            }
             await updateLead(lead, token, spreadsheetId);
             advancedCount++;
-            logs.push(
-              `Condition "${conditionType}" evaluated to ${conditionMet ? 'YES' : 'NO'} for ${lead.name}. Routed to "${nextNode.data?.label || nextNode.id}".`
-            );
           }
         }
         continue;
       }
 
       // --------------------------------------------------------------------
-      // STEP 4: MANUAL TASK NODE
+      // STEP 5: MANUAL TASK NODE
       // --------------------------------------------------------------------
       if (rawNodeType === 'manual_task' || rawNodeType === 'manualTask') {
         const localTasks = await loadLocalTasks();
@@ -366,7 +443,7 @@ export async function runDueCampaignsJob(
           await saveLocalTasks(localTasks);
 
           lead.currentNodeId = currentNode.id;
-          lead.nodeEnteredDate = todayStr;
+          lead.nodeEnteredDate = new Date().toISOString();
           await updateLead(lead, token, spreadsheetId);
 
           logs.push(`Generated Manual Task for ${lead.name}: "${title}". Sequence paused until completed in Tasks tab.`);
@@ -384,28 +461,38 @@ export async function runDueCampaignsJob(
           const nextNode = nodes.find((n: any) => n.id === outgoingEdge.target);
           if (nextNode) {
             lead.currentNodeId = nextNode.id;
-            lead.nodeEnteredDate = todayStr;
-            advancedCount++;
-            logs.push(`Manual Task "${existingTask.title}" completed. Advanced ${lead.name} to "${nextNode.data?.label || nextNode.id}".`);
-            await updateLead(lead, token, spreadsheetId);
-            currentNode = nextNode;
-            rawNodeType = currentNode.data?.nodeType || currentNode.type || '';
-            if (rawNodeType.endsWith('Node')) {
-              rawNodeType = rawNodeType.replace('Node', '');
+            lead.nodeEnteredDate = new Date().toISOString();
+            const nextDelayMs = getStepDelayMs(nextNode.data?.stepDelayValue, nextNode.data?.stepDelayUnit);
+            if (nextDelayMs > 0) {
+              lead.nextSendDate = new Date(nowMs + nextDelayMs).toISOString().split('T')[0];
+              logs.push(`Manual Task "${existingTask.title}" completed. Advanced ${lead.name} to "${nextNode.data?.label || nextNode.id}" with ${nextNode.data?.stepDelayValue} ${nextNode.data?.stepDelayUnit} delay.`);
+              await updateLead(lead, token, spreadsheetId);
+              advancedCount++;
+              continue;
+            } else {
+              lead.nextSendDate = todayStr;
+              logs.push(`Manual Task "${existingTask.title}" completed. Advanced ${lead.name} to "${nextNode.data?.label || nextNode.id}".`);
+              await updateLead(lead, token, spreadsheetId);
+              currentNode = nextNode;
+              rawNodeType = currentNode.data?.nodeType || currentNode.type || '';
+              if (rawNodeType.endsWith('Node')) {
+                rawNodeType = rawNodeType.replace('Node', '');
+              }
+              advancedCount++;
             }
           }
         }
       }
 
       // --------------------------------------------------------------------
-      // STEP 5: EMAIL NODE
+      // STEP 6: EMAIL NODE
       // Confirm:
       // 1. Sender's daily send limit is respected
       // 2. Schedule node's allowed sending days/hours is respected
       // 3. And ONLY THEN executes the email send node!
       // --------------------------------------------------------------------
       if (rawNodeType === 'email') {
-        // 5.1 Determine sender account
+        // 6.1 Determine sender account
         const senderId =
           startNode?.data?.senderId ||
           currentNode.data?.senderId ||
@@ -417,7 +504,7 @@ export async function runDueCampaignsJob(
           senders.find((s: any) => s.isPrimary) ||
           senders[0];
 
-        // 5.2 Respect connected sender's daily send limit
+        // 6.2 Respect connected sender's daily send limit
         if (sender) {
           const dailyLimit = typeof sender.dailySendLimit === 'number' ? sender.dailySendLimit : 150;
           const sendsToday = typeof sender.sendsToday === 'number' ? sender.sendsToday : 0;
@@ -429,7 +516,7 @@ export async function runDueCampaignsJob(
           }
         }
 
-        // 5.3 Respect Schedule node's allowed sending days and hours
+        // 6.3 Respect Schedule node's allowed sending days and hours
         const allowedSchedule = startNode?.data?.schedule;
         const scheduleCheck = isWithinSendingSchedule(allowedSchedule);
         if (!scheduleCheck.allowed) {
@@ -439,13 +526,13 @@ export async function runDueCampaignsJob(
           continue; // Postpone; do not send!
         }
 
-        // 5.4 Check if send already occurred today for this lead
+        // 6.4 Check if send already occurred today for this lead
         if (lead.lastEmailSentDate === todayStr) {
           logs.push(`Lead ${lead.name} already received an email today (${todayStr}). Skipping duplicate send.`);
           continue;
         }
 
-        // 5.5 ONLY THEN EXECUTE THE SEND:
+        // 6.5 ONLY THEN EXECUTE THE SEND:
         const stageNum = currentNode.data?.templateStage || (lead.currentStage + 1);
         const sendFromAccount = sender ? sender.email : (currentNode.data?.senderEmail || userEmail || 'Default Inbox');
         const template = DEFAULT_STAGE_TEMPLATES.find(t => t.stage === stageNum) || DEFAULT_STAGE_TEMPLATES[0];
@@ -483,11 +570,20 @@ export async function runDueCampaignsJob(
           const nextNode = nodes.find((n: any) => n.id === outgoingEdge.target);
           if (nextNode) {
             lead.currentNodeId = nextNode.id;
-            lead.nodeEnteredDate = todayStr;
+            lead.nodeEnteredDate = new Date().toISOString();
+            const nextDelayMs = getStepDelayMs(nextNode.data?.stepDelayValue, nextNode.data?.stepDelayUnit);
+            if (nextDelayMs > 0) {
+              lead.nextSendDate = new Date(nowMs + nextDelayMs).toISOString().split('T')[0];
+              logs.push(
+                `Dispatched Email Stage ${stageNum} to ${lead.name} (${lead.email}) from "${sender?.name || sendFromAccount}". Advanced to next node: "${nextNode.data?.label || nextNode.id}" (due after ${nextNode.data?.stepDelayValue} ${nextNode.data?.stepDelayUnit}).`
+              );
+            } else {
+              lead.nextSendDate = todayStr;
+              logs.push(
+                `Dispatched Email Stage ${stageNum} to ${lead.name} (${lead.email}) from "${sender?.name || sendFromAccount}". Advanced to next node: "${nextNode.data?.label || nextNode.id}".`
+              );
+            }
             advancedCount++;
-            logs.push(
-              `Dispatched Email Stage ${stageNum} to ${lead.name} (${lead.email}) from "${sender?.name || sendFromAccount}". Advanced to next node: "${nextNode.data?.label || nextNode.id}".`
-            );
           } else {
             lead.status = 'Completed';
             lead.nextSendDate = '';
@@ -510,17 +606,24 @@ export async function runDueCampaignsJob(
       }
 
       // --------------------------------------------------------------------
-      // STEP 6: MERGE OR START NODE PASSTHROUGH
+      // STEP 7: MERGE OR START NODE PASSTHROUGH
       // --------------------------------------------------------------------
       const outgoingEdge = edges.find((e: any) => e.source === currentNode.id);
       if (outgoingEdge) {
         const nextNode = nodes.find((n: any) => n.id === outgoingEdge.target);
         if (nextNode) {
           lead.currentNodeId = nextNode.id;
-          lead.nodeEnteredDate = todayStr;
+          lead.nodeEnteredDate = new Date().toISOString();
+          const nextDelayMs = getStepDelayMs(nextNode.data?.stepDelayValue, nextNode.data?.stepDelayUnit);
+          if (nextDelayMs > 0) {
+            lead.nextSendDate = new Date(nowMs + nextDelayMs).toISOString().split('T')[0];
+            logs.push(`Transitioned ${lead.name} from "${currentNode.data?.label || currentNode.id}" to "${nextNode.data?.label || nextNode.id}" (due after ${nextNode.data?.stepDelayValue} ${nextNode.data?.stepDelayUnit}).`);
+          } else {
+            lead.nextSendDate = todayStr;
+            logs.push(`Transitioned ${lead.name} from "${currentNode.data?.label || currentNode.id}" to "${nextNode.data?.label || nextNode.id}".`);
+          }
           await updateLead(lead, token, spreadsheetId);
           advancedCount++;
-          logs.push(`Transitioned ${lead.name} from "${currentNode.data?.label || currentNode.id}" to "${nextNode.data?.label || nextNode.id}".`);
         }
       }
     }

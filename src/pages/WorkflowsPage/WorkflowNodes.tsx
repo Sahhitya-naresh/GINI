@@ -22,6 +22,18 @@ import { WorkflowNodeData } from '../../types';
 
 type CustomNodeProps = NodeProps<Node<WorkflowNodeData>>;
 
+const formatStepDelay = (data: WorkflowNodeData): string | null => {
+  if (typeof data.stepDelayValue !== 'number' || data.stepDelayValue <= 0) return null;
+  const val = data.stepDelayValue;
+  const unit = data.stepDelayUnit || 'minutes';
+  const unitLabel = 
+    unit === 'seconds' ? (val === 1 ? 'second' : 'seconds') :
+    unit === 'minutes' ? (val === 1 ? 'minute' : 'minutes') :
+    unit === 'hours' ? (val === 1 ? 'hour' : 'hours') :
+    (val === 1 ? 'day' : 'days');
+  return `Starts ${val} ${unitLabel} after previous step`;
+};
+
 // --------------------------------------------------------------------------
 // 1. START NODE
 // --------------------------------------------------------------------------
@@ -30,6 +42,7 @@ export const StartNode = memo(({ id, data, selected }: CustomNodeProps) => {
   const schedule = data.schedule || { allowedDays: [1, 2, 3, 4, 5], startHour: 9, endHour: 18, timezone: 'local' };
   const daysSummary = schedule.allowedDays?.length === 5 ? 'Mon–Fri' : `${schedule.allowedDays?.length || 5} Days/Wk`;
   const timeSummary = `${schedule.startHour || 9}:00 - ${schedule.endHour || 18}:00`;
+  const delayText = formatStepDelay(data);
 
   return (
     <div className={`w-72 bg-white rounded-xl border-2 transition-all shadow-sm ${
@@ -64,7 +77,7 @@ export const StartNode = memo(({ id, data, selected }: CustomNodeProps) => {
       <div className="p-3.5 space-y-2.5 text-xs">
         <div>
           <h4 className="font-bold text-slate-900 text-sm">{data.label || 'Campaign Start'}</h4>
-          <p className="text-[11px] text-slate-500 line-clamp-1 mt-0.5">{data.description || 'Enrolls new leads'}</p>
+          <p className="text-[11px] text-slate-500 line-clamp-1 mt-0.5">{delayText || data.description || 'Enrolls new leads'}</p>
         </div>
 
         {/* Sender & Schedule Pills */}
@@ -103,6 +116,7 @@ export const EmailNode = memo(({ id, data, selected }: CustomNodeProps) => {
   const { deleteElements } = useReactFlow();
   const stageNum = data.templateStage;
   const isCustom = data.useCustomTemplate;
+  const delayText = formatStepDelay(data);
 
   return (
     <div className={`w-72 bg-white rounded-xl border-2 transition-all shadow-sm ${
@@ -146,7 +160,7 @@ export const EmailNode = memo(({ id, data, selected }: CustomNodeProps) => {
       <div className="p-3 space-y-1.5 text-xs">
         <h4 className="font-bold text-slate-900 line-clamp-1">{data.label}</h4>
         <p className="text-[11px] text-slate-500 line-clamp-2">
-          {data.description || (isCustom ? data.customSubject : 'Direct outreach email step')}
+          {delayText || data.description || (isCustom ? data.customSubject : 'Direct outreach email step')}
         </p>
 
         {/* Sender Column Indicator */}
@@ -183,6 +197,7 @@ export const WaitNode = memo(({ id, data, selected }: CustomNodeProps) => {
   const { deleteElements } = useReactFlow();
   const duration = data.waitDuration || 1;
   const unit = data.waitUnit || 'days';
+  const delayText = formatStepDelay(data);
 
   return (
     <div className={`w-64 bg-white rounded-xl border-2 transition-all shadow-sm ${
@@ -217,7 +232,7 @@ export const WaitNode = memo(({ id, data, selected }: CustomNodeProps) => {
             Wait {duration} {unit === 'days' ? (duration === 1 ? 'Day' : 'Days') : (duration === 1 ? 'Hour' : 'Hours')}
           </h4>
           <p className="text-[10px] text-slate-500 truncate mt-0.5">
-            Pauses automated sequence
+            {delayText || 'Pauses automated sequence'}
           </p>
         </div>
       </div>
@@ -239,6 +254,7 @@ WaitNode.displayName = 'WaitNode';
 export const ConditionNode = memo(({ id, data, selected }: CustomNodeProps) => {
   const { deleteElements } = useReactFlow();
   const condType = data.conditionType || 'email_opened';
+  const delayText = formatStepDelay(data);
   
   const getConditionTitle = () => {
     switch (condType) {
@@ -290,7 +306,7 @@ export const ConditionNode = memo(({ id, data, selected }: CustomNodeProps) => {
       <div className="p-3 text-xs space-y-2">
         <div>
           <h4 className="font-bold text-slate-900">{getConditionTitle()}</h4>
-          <p className="text-[11px] text-slate-500 mt-0.5 line-clamp-1">{data.description || 'Evaluates lead telemetry'}</p>
+          <p className="text-[11px] text-slate-500 mt-0.5 line-clamp-1">{delayText || data.description || 'Evaluates lead telemetry'}</p>
         </div>
 
         {/* Dual Branch Output Footers with Direct Handle Anchors */}
@@ -335,6 +351,7 @@ ConditionNode.displayName = 'ConditionNode';
 export const ManualTaskNode = memo(({ id, data, selected }: CustomNodeProps) => {
   const { deleteElements } = useReactFlow();
   const priority = data.taskPriority || 'medium';
+  const delayText = formatStepDelay(data);
 
   return (
     <div className={`w-72 bg-white rounded-xl border-2 transition-all shadow-sm ${
@@ -377,7 +394,7 @@ export const ManualTaskNode = memo(({ id, data, selected }: CustomNodeProps) => 
       <div className="p-3 text-xs space-y-1.5">
         <h4 className="font-bold text-slate-900">{data.taskTitle || data.label || 'Phone Call to Decision Maker'}</h4>
         <p className="text-[11px] text-slate-500 line-clamp-2">
-          {data.taskDescription || 'Creates an action item in your Tasks dashboard'}
+          {delayText || data.taskDescription || 'Creates an action item in your Tasks dashboard'}
         </p>
         <div className="pt-1 text-[10px] text-slate-400 flex items-center justify-between border-t border-slate-100">
           <span>Due: Within {data.taskDueDateOffsetDays || 1} day(s)</span>
@@ -400,6 +417,7 @@ ManualTaskNode.displayName = 'ManualTaskNode';
 // --------------------------------------------------------------------------
 export const LinkedinInviteNode = memo(({ id, data, selected }: CustomNodeProps) => {
   const { deleteElements } = useReactFlow();
+  const delayText = formatStepDelay(data);
   return (
     <div className={`w-72 bg-white rounded-xl border-2 transition-all shadow-sm opacity-85 ${
       selected ? 'border-[#0a66c2] ring-4 ring-blue-100 shadow-md' : 'border-slate-300'
@@ -437,7 +455,7 @@ export const LinkedinInviteNode = memo(({ id, data, selected }: CustomNodeProps)
       <div className="p-3 text-xs space-y-1">
         <h4 className="font-bold text-slate-900">{data.label || 'Connect on LinkedIn'}</h4>
         <p className="text-[11px] text-slate-500">
-          Automated connection invite with custom message. Inert until integration is configured.
+          {delayText || 'Automated connection invite with custom message. Inert until integration is configured.'}
         </p>
       </div>
 
@@ -456,6 +474,7 @@ LinkedinInviteNode.displayName = 'LinkedinInviteNode';
 // --------------------------------------------------------------------------
 export const LinkedinMessageNode = memo(({ id, data, selected }: CustomNodeProps) => {
   const { deleteElements } = useReactFlow();
+  const delayText = formatStepDelay(data);
   return (
     <div className={`w-72 bg-white rounded-xl border-2 transition-all shadow-sm opacity-85 ${
       selected ? 'border-[#0a66c2] ring-4 ring-blue-100 shadow-md' : 'border-slate-300'
@@ -493,7 +512,7 @@ export const LinkedinMessageNode = memo(({ id, data, selected }: CustomNodeProps
       <div className="p-3 text-xs space-y-1">
         <h4 className="font-bold text-slate-900">{data.label || 'Send Direct InMail'}</h4>
         <p className="text-[11px] text-slate-500">
-          Follow up message after connection acceptance. Inert until integration is enabled.
+          {delayText || 'Follow up message after connection acceptance. Inert until integration is enabled.'}
         </p>
       </div>
 
@@ -512,6 +531,7 @@ LinkedinMessageNode.displayName = 'LinkedinMessageNode';
 // --------------------------------------------------------------------------
 export const MergeNode = memo(({ id, data, selected }: CustomNodeProps) => {
   const { deleteElements } = useReactFlow();
+  const delayText = formatStepDelay(data);
   return (
     <div className={`w-60 bg-white rounded-xl border-2 transition-all shadow-sm ${
       selected ? 'border-slate-800 ring-4 ring-slate-100 shadow-md' : 'border-slate-300 hover:border-slate-500'
@@ -530,7 +550,7 @@ export const MergeNode = memo(({ id, data, selected }: CustomNodeProps) => {
           </div>
           <div className="min-w-0">
             <h4 className="font-bold text-slate-900 text-xs truncate">{data.label || 'Merge Branches'}</h4>
-            <p className="text-[10px] text-slate-400 truncate">Rejoins flows to single step</p>
+            <p className="text-[10px] text-slate-400 truncate">{delayText || 'Rejoins flows to single step'}</p>
           </div>
         </div>
 
