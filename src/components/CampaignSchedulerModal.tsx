@@ -306,9 +306,74 @@ export const CampaignSchedulerModal: React.FC<CampaignSchedulerModalProps> = ({
           return val * 60 * 1000;
         };
 
-        // Check step delay timer on current node
+        // Step 2.03: Check for retroactive condition re-route from an unexecuted NO-branch
+        const incomingNoEdge = assignedWorkflow.edges?.find(
+          (e: any) => e.target === currentNode.id && (e.sourceHandle === 'no' || (e as any).data?.conditionOutcome === 'no')
+        );
+        if (incomingNoEdge) {
+          const condNode = assignedWorkflow.nodes?.find((n: any) => n.id === incomingNoEdge.source);
+          if (condNode) {
+            const condType = condNode.data?.conditionType || 'has_replied';
+            let isNowSatisfied = false;
+            if (condType === 'has_replied') {
+              isNowSatisfied = targetLead.status === 'Replied' || Boolean((targetLead as any).hasReplied);
+            } else if (condType === 'email_opened') {
+              isNowSatisfied = (targetLead.opensCount || 0) > 0;
+            } else if (condType === 'link_clicked') {
+              isNowSatisfied = (targetLead.clicksCount || 0) > 0;
+            } else if (condType === 'has_linkedin_url') {
+              isNowSatisfied = Boolean(targetLead.linkedinUrl && String(targetLead.linkedinUrl).trim().length > 0);
+            }
+
+            if (isNowSatisfied) {
+              let alreadyExecuted = false;
+              if (isEmailNode(currentNode)) {
+                const stageNum = currentNode.data?.templateStage || (targetLead.currentStage + 1);
+                if (targetLead.currentStage >= stageNum) {
+                  alreadyExecuted = true;
+                }
+              }
+
+              if (!alreadyExecuted) {
+                const yesEdge = assignedWorkflow.edges?.find(
+                  (e: any) => e.source === condNode.id && (e.sourceHandle === 'yes' || (e as any).data?.conditionOutcome === 'yes')
+                );
+                if (yesEdge) {
+                  const yesTarget = assignedWorkflow.nodes?.find((n: any) => n.id === yesEdge.target);
+                  if (yesTarget) {
+                    const prevLabel = currentNode.data?.label || currentNode.id;
+                    targetLead.currentNodeId = yesTarget.id;
+                    targetLead.nodeEnteredDate = targetLead.lastOpenedDate || targetLead.lastClickedDate || new Date().toISOString();
+                    const nextDelayMs = getDelayMs(yesTarget.data?.stepDelayValue, yesTarget.data?.stepDelayUnit);
+                    if (nextDelayMs > 0) {
+                      targetLead.nextSendDate = new Date(Date.now() + nextDelayMs).toISOString().split('T')[0];
+                    } else {
+                      targetLead.nextSendDate = today;
+                    }
+                    await updateLead(targetLead, token || undefined, spreadsheetId);
+                    const idx = updatedLeadsList.findIndex(l => l.leadId === targetLead.leadId);
+                    if (idx !== -1) updatedLeadsList[idx] = { ...targetLead };
+                    newLogs.push({
+                      id: `${Date.now()}-${i}-cond-reroute`,
+                      timestamp: new Date().toLocaleTimeString(),
+                      leadId: targetLead.leadId,
+                      leadName: targetLead.name,
+                      leadEmail: targetLead.email,
+                      stage: targetLead.currentStage,
+                      status: 'advanced',
+                      details: `Lead satisfied condition "${condType}" (event recorded) while queued on NO path at "${prevLabel}". Retroactively switched to YES branch: "${yesTarget.data?.label || yesTarget.id}".`
+                    });
+                    currentNode = yesTarget;
+                  }
+                }
+              }
+            }
+          }
+        }
+
+        // Check step delay timer on current node (condition nodes evaluate delay as an evaluation window in Step 2.07)
         const nodeDelayMs = getDelayMs(currentNode?.data?.stepDelayValue, currentNode?.data?.stepDelayUnit);
-        if (nodeDelayMs > 0) {
+        if (!isConditionNode(currentNode) && nodeDelayMs > 0) {
           const enteredMs = targetLead.nodeEnteredDate ? Date.parse(targetLead.nodeEnteredDate) : Date.now();
           const elapsedMs = Date.now() - (isNaN(enteredMs) ? Date.now() : enteredMs);
           if (elapsedMs < nodeDelayMs) {
@@ -395,13 +460,35 @@ export const CampaignSchedulerModal: React.FC<CampaignSchedulerModalProps> = ({
           const condType = currentNode.data?.conditionType || 'has_replied';
           let conditionMet = false;
           if (condType === 'has_replied') {
-            conditionMet = targetLead.status === 'Replied';
+            conditionMet = targetLead.status === 'Replied' || Boolean((targetLead as any).hasReplied);
           } else if (condType === 'email_opened') {
             conditionMet = (targetLead.opensCount || 0) > 0;
           } else if (condType === 'link_clicked') {
             conditionMet = (targetLead.clicksCount || 0) > 0;
           } else if (condType === 'has_linkedin_url') {
             conditionMet = Boolean(targetLead.linkedinUrl && String(targetLead.linkedinUrl).trim().length > 0);
+          }
+
+          const condDelayMs = getDelayMs(currentNode?.data?.stepDelayValue, currentNode?.data?.stepDelayUnit);
+          const enteredMs = targetLead.nodeEnteredDate ? Date.parse(targetLead.nodeEnteredDate) : Date.now();
+          const elapsedMs = Date.now() - (isNaN(enteredMs) ? Date.now() : enteredMs);
+
+          // If condition is MET: immediately branch YES!
+          // If NOT met: keep waiting if evaluation window has not elapsed; otherwise take NO!
+          if (!conditionMet && condDelayMs > 0 && elapsedMs < condDelayMs) {
+            const remSec = Math.ceil((condDelayMs - elapsedMs) / 1000);
+            newLogs.push({
+              id: `${Date.now()}-${i}-cond-window`,
+              timestamp: new Date().toLocaleTimeString(),
+              leadId: targetLead.leadId,
+              leadName: targetLead.name,
+              leadEmail: targetLead.email,
+              stage: targetLead.currentStage,
+              status: 'skipped',
+              details: `Condition "${condType}" evaluation window active (${remSec}s remaining). Waiting for event before routing.`
+            });
+            setExecutionLogs([...newLogs]);
+            continue;
           }
 
           const handleId = conditionMet ? 'yes' : 'no';

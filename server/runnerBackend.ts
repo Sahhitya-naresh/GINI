@@ -29,13 +29,19 @@ export interface RunnerManualTask {
   leadName: string;
   leadEmail?: string;
   leadCompany: string;
+  company?: string;
   campaignId: string;
+  campaignName?: string;
   nodeId: string;
   title: string;
   instruction: string;
-  type: 'call' | 'review' | 'custom';
+  description?: string;
+  type: 'call' | 'review' | 'custom' | string;
+  dueDate?: string;
+  priority?: 'low' | 'medium' | 'high';
   createdAt: string;
   isCompleted: boolean;
+  completedAt?: string;
 }
 
 /**
@@ -252,6 +258,75 @@ export async function runDueCampaignsJob(
       }
 
       // --------------------------------------------------------------------
+      // STEP 0.5: RETROACTIVE CONDITION RE-EVALUATION
+      // If lead was previously routed down the NO path of a condition node
+      // (e.g. Email Was Opened?), but the condition is now satisfied (lead opened
+      // the email while waiting for next step or before stage 2 was sent),
+      // re-route the lead to the YES branch of that condition!
+      // --------------------------------------------------------------------
+      const incomingNoEdge = edges.find(
+        (e: any) => e.target === currentNode.id && (e.sourceHandle === 'no' || (e as any).data?.conditionOutcome === 'no')
+      );
+      if (incomingNoEdge) {
+        const condNode = nodes.find((n: any) => n.id === incomingNoEdge.source);
+        if (condNode) {
+          const condType = condNode.data?.conditionType || 'has_replied';
+          let isNowSatisfied = false;
+          if (condType === 'has_replied') {
+            isNowSatisfied = lead.status === 'Replied' || Boolean((lead as any).hasReplied);
+          } else if (condType === 'email_opened') {
+            isNowSatisfied = (lead.opensCount || 0) > 0;
+          } else if (condType === 'link_clicked') {
+            isNowSatisfied = (lead.clicksCount || 0) > 0;
+          } else if (condType === 'has_linkedin_url') {
+            isNowSatisfied = Boolean(lead.linkedinUrl && String(lead.linkedinUrl).trim().length > 0);
+          }
+
+          if (isNowSatisfied) {
+            // Check if currentNode has already executed its action (e.g. email already sent)
+            let alreadyExecuted = false;
+            if (rawNodeType === 'email') {
+              const stageNum = currentNode.data?.templateStage || (lead.currentStage + 1);
+              if (lead.currentStage >= stageNum) {
+                alreadyExecuted = true;
+              }
+            }
+
+            if (!alreadyExecuted) {
+              const yesEdge = edges.find(
+                (e: any) => e.source === condNode.id && (e.sourceHandle === 'yes' || (e as any).data?.conditionOutcome === 'yes')
+              );
+              if (yesEdge) {
+                const yesTarget = nodes.find((n: any) => n.id === yesEdge.target);
+                if (yesTarget) {
+                  const prevLabel = currentNode.data?.label || currentNode.id;
+                  lead.currentNodeId = yesTarget.id;
+                  // Use lead's last opened/clicked date or now
+                  lead.nodeEnteredDate = lead.lastOpenedDate || lead.lastClickedDate || new Date().toISOString();
+                  const nextDelayMs = getStepDelayMs(yesTarget.data?.stepDelayValue, yesTarget.data?.stepDelayUnit);
+                  if (nextDelayMs > 0) {
+                    lead.nextSendDate = new Date(nowMs + nextDelayMs).toISOString().split('T')[0];
+                  } else {
+                    lead.nextSendDate = todayStr;
+                  }
+                  await updateLead(lead, token, spreadsheetId);
+                  logs.push(
+                    `Lead ${lead.name} satisfied condition "${condType}" (event recorded) while queued on NO path at "${prevLabel}". Retroactively switched to YES branch: "${yesTarget.data?.label || yesTarget.id}".`
+                  );
+                  currentNode = yesTarget;
+                  rawNodeType = currentNode.data?.nodeType || currentNode.type || '';
+                  if (rawNodeType.endsWith('Node')) {
+                    rawNodeType = rawNodeType.replace('Node', '');
+                  }
+                  advancedCount++;
+                }
+              }
+            }
+          }
+        }
+      }
+
+      // --------------------------------------------------------------------
       // STEP 1: CHECK FOR REPLY FIRST
       // If found, pulls the lead to Needs Reply (status: Replied) instead of sending!
       // Look up sender record for this lead to use correct provider instance
@@ -278,19 +353,22 @@ export async function runDueCampaignsJob(
       // STEP 2: CUSTOM STEP DELAY TIMER (WAIT TIME AFTER PREVIOUS NODE)
       // Check if current node has a custom delay configured before executing.
       // If elapsed time since nodeEnteredDate < delay, postpone execution!
+      // NOTE: Condition nodes handle their delay as an evaluation window in Step 4.
       // --------------------------------------------------------------------
-      const stepDelayMs = getStepDelayMs(currentNode.data?.stepDelayValue, currentNode.data?.stepDelayUnit);
-      if (stepDelayMs > 0) {
-        const enteredMs = parseNodeEnteredTime(lead.nodeEnteredDate, nowMs);
-        const elapsedMs = nowMs - enteredMs;
-        if (elapsedMs < stepDelayMs) {
-          const remainingSec = Math.ceil((stepDelayMs - elapsedMs) / 1000);
-          const unit = currentNode.data?.stepDelayUnit || 'minutes';
-          const val = currentNode.data?.stepDelayValue;
-          logs.push(
-            `Step delay active on node "${currentNode.data?.label || currentNode.id}" for ${lead.name} (${val} ${unit}). Elapsed: ${Math.max(0, Math.floor(elapsedMs / 1000))}s / Required: ${Math.floor(stepDelayMs / 1000)}s (${remainingSec}s remaining). Postponing execution.`
-          );
-          continue; // Custom step delay has not elapsed yet; postpone execution of this node
+      if (rawNodeType !== 'condition') {
+        const stepDelayMs = getStepDelayMs(currentNode.data?.stepDelayValue, currentNode.data?.stepDelayUnit);
+        if (stepDelayMs > 0) {
+          const enteredMs = parseNodeEnteredTime(lead.nodeEnteredDate, nowMs);
+          const elapsedMs = nowMs - enteredMs;
+          if (elapsedMs < stepDelayMs) {
+            const remainingSec = Math.ceil((stepDelayMs - elapsedMs) / 1000);
+            const unit = currentNode.data?.stepDelayUnit || 'minutes';
+            const val = currentNode.data?.stepDelayValue;
+            logs.push(
+              `Step delay active on node "${currentNode.data?.label || currentNode.id}" for ${lead.name} (${val} ${unit}). Elapsed: ${Math.max(0, Math.floor(elapsedMs / 1000))}s / Required: ${Math.floor(stepDelayMs / 1000)}s (${remainingSec}s remaining). Postponing execution.`
+            );
+            continue; // Custom step delay has not elapsed yet; postpone execution of this node
+          }
         }
       }
 
@@ -368,13 +446,31 @@ export async function runDueCampaignsJob(
         let conditionMet = false;
 
         if (conditionType === 'has_replied') {
-          conditionMet = lead.status === 'Replied';
+          conditionMet = lead.status === 'Replied' || Boolean((lead as any).hasReplied);
         } else if (conditionType === 'email_opened') {
           conditionMet = (lead.opensCount || 0) > 0;
         } else if (conditionType === 'link_clicked') {
           conditionMet = (lead.clicksCount || 0) > 0;
         } else if (conditionType === 'has_linkedin_url') {
           conditionMet = Boolean(lead.linkedinUrl && String(lead.linkedinUrl).trim().length > 0);
+        }
+
+        const stepDelayMs = getStepDelayMs(currentNode.data?.stepDelayValue, currentNode.data?.stepDelayUnit);
+        const enteredMs = parseNodeEnteredTime(lead.nodeEnteredDate, nowMs);
+        const elapsedMs = nowMs - enteredMs;
+
+        // If condition is MET: immediately branch YES!
+        // If condition is NOT met:
+        //   - If evaluation window has not elapsed: keep waiting for the event!
+        //   - If evaluation window has elapsed (or no delay configured): take NO branch!
+        if (!conditionMet && stepDelayMs > 0 && elapsedMs < stepDelayMs) {
+          const remainingSec = Math.ceil((stepDelayMs - elapsedMs) / 1000);
+          const unit = currentNode.data?.stepDelayUnit || 'minutes';
+          const val = currentNode.data?.stepDelayValue;
+          logs.push(
+            `Condition "${conditionType}" evaluation window active for ${lead.name} (${val} ${unit}). Elapsed: ${Math.max(0, Math.floor(elapsedMs / 1000))}s / Window: ${Math.floor(stepDelayMs / 1000)}s (${remainingSec}s remaining). Waiting for event before routing.`
+          );
+          continue; // Keep waiting at condition node
         }
 
         const handleId = conditionMet ? 'yes' : 'no';
@@ -432,17 +528,28 @@ export async function runDueCampaignsJob(
             .replace(/\{\{company\}\}/gi, lead.company || '')
             .replace(/\{\{pain_point\}\}/gi, lead.painPoint || '');
 
+          const dueDateOffset = typeof currentNode.data?.taskDueDateOffsetDays === 'number'
+            ? currentNode.data.taskDueDateOffsetDays
+            : 1;
+          const dueDateTime = new Date(Date.now() + dueDateOffset * 86400 * 1000);
+          const dueDateStr = dueDateTime.toISOString().split('T')[0];
+
           const newTask: RunnerManualTask = {
             id: `task-${Date.now()}-${lead.leadId}`,
             leadId: lead.leadId,
             leadName: lead.name,
             leadEmail: lead.email,
-            leadCompany: lead.company,
+            company: lead.company || '',
+            leadCompany: lead.company || '',
             campaignId: campaign.id,
+            campaignName: campaign.name,
             nodeId: currentNode.id,
             title,
             instruction,
+            description: instruction,
             type: currentNode.data?.taskType || 'call',
+            dueDate: dueDateStr,
+            priority: currentNode.data?.taskPriority || 'medium',
             createdAt: new Date().toISOString(),
             isCompleted: false
           };

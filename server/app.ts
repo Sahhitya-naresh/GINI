@@ -278,6 +278,10 @@ const handleOpenTracking = async (req: express.Request, res: express.Response) =
 
     try {
       await recordTrackingEvent(newEvent);
+      // Asynchronously trigger workflow runner to evaluate condition branches immediately upon open
+      runDueCampaignsJob(undefined, undefined, undefined, undefined).catch(err => {
+        console.warn('[Track Open] Background campaign run error:', err);
+      });
     } catch (err: any) {
       console.error('Failed to record open event:', err);
     }
@@ -326,6 +330,10 @@ app.get('/api/track/click', async (req, res) => {
 
     try {
       await recordTrackingEvent(newEvent);
+      // Asynchronously trigger workflow runner to evaluate condition branches immediately upon click
+      runDueCampaignsJob(undefined, undefined, undefined, undefined).catch(err => {
+        console.warn('[Track Click] Background campaign run error:', err);
+      });
     } catch (err: any) {
       console.error('Failed to record click event:', err);
     }

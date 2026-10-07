@@ -2473,6 +2473,63 @@ async function runDueCampaignsJob(targetCampaignId, token, spreadsheetId, userEm
       if (rawNodeType.endsWith("Node")) {
         rawNodeType = rawNodeType.replace("Node", "");
       }
+      const incomingNoEdge = edges.find(
+        (e) => e.target === currentNode.id && (e.sourceHandle === "no" || e.data?.conditionOutcome === "no")
+      );
+      if (incomingNoEdge) {
+        const condNode = nodes.find((n) => n.id === incomingNoEdge.source);
+        if (condNode) {
+          const condType = condNode.data?.conditionType || "has_replied";
+          let isNowSatisfied = false;
+          if (condType === "has_replied") {
+            isNowSatisfied = lead.status === "Replied" || Boolean(lead.hasReplied);
+          } else if (condType === "email_opened") {
+            isNowSatisfied = (lead.opensCount || 0) > 0;
+          } else if (condType === "link_clicked") {
+            isNowSatisfied = (lead.clicksCount || 0) > 0;
+          } else if (condType === "has_linkedin_url") {
+            isNowSatisfied = Boolean(lead.linkedinUrl && String(lead.linkedinUrl).trim().length > 0);
+          }
+          if (isNowSatisfied) {
+            let alreadyExecuted = false;
+            if (rawNodeType === "email") {
+              const stageNum = currentNode.data?.templateStage || lead.currentStage + 1;
+              if (lead.currentStage >= stageNum) {
+                alreadyExecuted = true;
+              }
+            }
+            if (!alreadyExecuted) {
+              const yesEdge = edges.find(
+                (e) => e.source === condNode.id && (e.sourceHandle === "yes" || e.data?.conditionOutcome === "yes")
+              );
+              if (yesEdge) {
+                const yesTarget = nodes.find((n) => n.id === yesEdge.target);
+                if (yesTarget) {
+                  const prevLabel = currentNode.data?.label || currentNode.id;
+                  lead.currentNodeId = yesTarget.id;
+                  lead.nodeEnteredDate = lead.lastOpenedDate || lead.lastClickedDate || (/* @__PURE__ */ new Date()).toISOString();
+                  const nextDelayMs = getStepDelayMs(yesTarget.data?.stepDelayValue, yesTarget.data?.stepDelayUnit);
+                  if (nextDelayMs > 0) {
+                    lead.nextSendDate = new Date(nowMs + nextDelayMs).toISOString().split("T")[0];
+                  } else {
+                    lead.nextSendDate = todayStr;
+                  }
+                  await updateLead(lead, token, spreadsheetId);
+                  logs.push(
+                    `Lead ${lead.name} satisfied condition "${condType}" (event recorded) while queued on NO path at "${prevLabel}". Retroactively switched to YES branch: "${yesTarget.data?.label || yesTarget.id}".`
+                  );
+                  currentNode = yesTarget;
+                  rawNodeType = currentNode.data?.nodeType || currentNode.type || "";
+                  if (rawNodeType.endsWith("Node")) {
+                    rawNodeType = rawNodeType.replace("Node", "");
+                  }
+                  advancedCount++;
+                }
+              }
+            }
+          }
+        }
+      }
       const leadSender = senders.find((s) => s.email === lead.senderUsed || s.id === lead.senderUsed) || senders.find((s) => s.isPrimary) || senders[0];
       const replyCheck = await checkLeadForReply(lead, token, userEmail, leadSender);
       if (replyCheck.hasReplied) {
@@ -2484,18 +2541,20 @@ async function runDueCampaignsJob(targetCampaignId, token, spreadsheetId, userEm
         );
         continue;
       }
-      const stepDelayMs = getStepDelayMs(currentNode.data?.stepDelayValue, currentNode.data?.stepDelayUnit);
-      if (stepDelayMs > 0) {
-        const enteredMs = parseNodeEnteredTime(lead.nodeEnteredDate, nowMs);
-        const elapsedMs = nowMs - enteredMs;
-        if (elapsedMs < stepDelayMs) {
-          const remainingSec = Math.ceil((stepDelayMs - elapsedMs) / 1e3);
-          const unit = currentNode.data?.stepDelayUnit || "minutes";
-          const val = currentNode.data?.stepDelayValue;
-          logs.push(
-            `Step delay active on node "${currentNode.data?.label || currentNode.id}" for ${lead.name} (${val} ${unit}). Elapsed: ${Math.max(0, Math.floor(elapsedMs / 1e3))}s / Required: ${Math.floor(stepDelayMs / 1e3)}s (${remainingSec}s remaining). Postponing execution.`
-          );
-          continue;
+      if (rawNodeType !== "condition") {
+        const stepDelayMs = getStepDelayMs(currentNode.data?.stepDelayValue, currentNode.data?.stepDelayUnit);
+        if (stepDelayMs > 0) {
+          const enteredMs = parseNodeEnteredTime(lead.nodeEnteredDate, nowMs);
+          const elapsedMs = nowMs - enteredMs;
+          if (elapsedMs < stepDelayMs) {
+            const remainingSec = Math.ceil((stepDelayMs - elapsedMs) / 1e3);
+            const unit = currentNode.data?.stepDelayUnit || "minutes";
+            const val = currentNode.data?.stepDelayValue;
+            logs.push(
+              `Step delay active on node "${currentNode.data?.label || currentNode.id}" for ${lead.name} (${val} ${unit}). Elapsed: ${Math.max(0, Math.floor(elapsedMs / 1e3))}s / Required: ${Math.floor(stepDelayMs / 1e3)}s (${remainingSec}s remaining). Postponing execution.`
+            );
+            continue;
+          }
         }
       }
       if (rawNodeType === "wait") {
@@ -2558,13 +2617,25 @@ async function runDueCampaignsJob(targetCampaignId, token, spreadsheetId, userEm
         const conditionType = currentNode.data?.conditionType || "has_replied";
         let conditionMet = false;
         if (conditionType === "has_replied") {
-          conditionMet = lead.status === "Replied";
+          conditionMet = lead.status === "Replied" || Boolean(lead.hasReplied);
         } else if (conditionType === "email_opened") {
           conditionMet = (lead.opensCount || 0) > 0;
         } else if (conditionType === "link_clicked") {
           conditionMet = (lead.clicksCount || 0) > 0;
         } else if (conditionType === "has_linkedin_url") {
           conditionMet = Boolean(lead.linkedinUrl && String(lead.linkedinUrl).trim().length > 0);
+        }
+        const stepDelayMs = getStepDelayMs(currentNode.data?.stepDelayValue, currentNode.data?.stepDelayUnit);
+        const enteredMs = parseNodeEnteredTime(lead.nodeEnteredDate, nowMs);
+        const elapsedMs = nowMs - enteredMs;
+        if (!conditionMet && stepDelayMs > 0 && elapsedMs < stepDelayMs) {
+          const remainingSec = Math.ceil((stepDelayMs - elapsedMs) / 1e3);
+          const unit = currentNode.data?.stepDelayUnit || "minutes";
+          const val = currentNode.data?.stepDelayValue;
+          logs.push(
+            `Condition "${conditionType}" evaluation window active for ${lead.name} (${val} ${unit}). Elapsed: ${Math.max(0, Math.floor(elapsedMs / 1e3))}s / Window: ${Math.floor(stepDelayMs / 1e3)}s (${remainingSec}s remaining). Waiting for event before routing.`
+          );
+          continue;
         }
         const handleId = conditionMet ? "yes" : "no";
         const branchEdge = edges.find(
@@ -2605,17 +2676,25 @@ async function runDueCampaignsJob(targetCampaignId, token, spreadsheetId, userEm
           const rawDesc = currentNode.data?.taskDescription || "Direct outreach call regarding {{pain_point}}";
           const title = rawTitle.replace(/\{\{first_name\}\}/gi, firstName).replace(/\{\{name\}\}/gi, lead.name || "").replace(/\{\{company\}\}/gi, lead.company || "").replace(/\{\{pain_point\}\}/gi, lead.painPoint || "");
           const instruction = rawDesc.replace(/\{\{first_name\}\}/gi, firstName).replace(/\{\{name\}\}/gi, lead.name || "").replace(/\{\{company\}\}/gi, lead.company || "").replace(/\{\{pain_point\}\}/gi, lead.painPoint || "");
+          const dueDateOffset = typeof currentNode.data?.taskDueDateOffsetDays === "number" ? currentNode.data.taskDueDateOffsetDays : 1;
+          const dueDateTime = new Date(Date.now() + dueDateOffset * 86400 * 1e3);
+          const dueDateStr = dueDateTime.toISOString().split("T")[0];
           const newTask = {
             id: `task-${Date.now()}-${lead.leadId}`,
             leadId: lead.leadId,
             leadName: lead.name,
             leadEmail: lead.email,
-            leadCompany: lead.company,
+            company: lead.company || "",
+            leadCompany: lead.company || "",
             campaignId: campaign.id,
+            campaignName: campaign.name,
             nodeId: currentNode.id,
             title,
             instruction,
+            description: instruction,
             type: currentNode.data?.taskType || "call",
+            dueDate: dueDateStr,
+            priority: currentNode.data?.taskPriority || "medium",
             createdAt: (/* @__PURE__ */ new Date()).toISOString(),
             isCompleted: false
           };
@@ -2985,6 +3064,9 @@ var handleOpenTracking = async (req, res) => {
     };
     try {
       await recordTrackingEvent(newEvent);
+      runDueCampaignsJob(void 0, void 0, void 0, void 0).catch((err) => {
+        console.warn("[Track Open] Background campaign run error:", err);
+      });
     } catch (err) {
       console.error("Failed to record open event:", err);
     }
@@ -3024,6 +3106,9 @@ app.get("/api/track/click", async (req, res) => {
     };
     try {
       await recordTrackingEvent(newEvent);
+      runDueCampaignsJob(void 0, void 0, void 0, void 0).catch((err) => {
+        console.warn("[Track Click] Background campaign run error:", err);
+      });
     } catch (err) {
       console.error("Failed to record click event:", err);
     }
