@@ -76,6 +76,12 @@ export const CampaignSchedulerModal: React.FC<CampaignSchedulerModalProps> = ({
       );
       const isWfActive = Boolean(assignedWf?.isActive ?? (assignedWf as any)?.is_active ?? true);
       if (assignedWf && !isWfActive) return false;
+
+      // Condition nodes are automated routing points and are always due for evaluation
+      const currentLeadNode = assignedWf?.nodes?.find(n => n.id === l.currentNodeId);
+      const isCond = currentLeadNode?.type === 'conditionNode' || currentLeadNode?.type === 'condition' || currentLeadNode?.data?.nodeType === 'condition';
+      if (isCond) return true;
+
       return isLeadDueForNextSend(l.nextSendDate);
     });
   }, [leads, workflows]);
@@ -280,6 +286,43 @@ export const CampaignSchedulerModal: React.FC<CampaignSchedulerModalProps> = ({
           return t === 'waitNode' || t === 'wait' || nt === 'wait';
         };
 
+        const isConditionNode = (node: any) => {
+          if (!node) return false;
+          const t = node.type || '';
+          const nt = node.data?.nodeType || '';
+          return t === 'conditionNode' || t === 'condition' || nt === 'condition';
+        };
+
+        const getDelayMs = (val?: number, unit?: string) => {
+          if (!val || val <= 0) return 0;
+          if (unit === 'seconds') return val * 1000;
+          if (unit === 'hours') return val * 3600 * 1000;
+          if (unit === 'days') return val * 86400 * 1000;
+          return val * 60 * 1000;
+        };
+
+        // Check step delay timer on current node
+        const nodeDelayMs = getDelayMs(currentNode?.data?.stepDelayValue, currentNode?.data?.stepDelayUnit);
+        if (nodeDelayMs > 0) {
+          const enteredMs = targetLead.nodeEnteredDate ? Date.parse(targetLead.nodeEnteredDate) : Date.now();
+          const elapsedMs = Date.now() - (isNaN(enteredMs) ? Date.now() : enteredMs);
+          if (elapsedMs < nodeDelayMs) {
+            const remSec = Math.ceil((nodeDelayMs - elapsedMs) / 1000);
+            newLogs.push({
+              id: `${Date.now()}-${i}-delay`,
+              timestamp: new Date().toLocaleTimeString(),
+              leadId: targetLead.leadId,
+              leadName: targetLead.name,
+              leadEmail: targetLead.email,
+              stage: targetLead.currentStage,
+              status: 'skipped',
+              details: `Step delay active on "${currentNode.data?.label || currentNode.id}" (${currentNode.data?.stepDelayValue} ${currentNode.data?.stepDelayUnit || 'minutes'}). ${remSec}s remaining before execution. Postponed.`
+            });
+            setExecutionLogs([...newLogs]);
+            continue;
+          }
+        }
+
         // Step 2.05: Check if current node is a Wait node
         if (isWaitNode(currentNode)) {
           const waitDuration = currentNode.data?.waitDuration ?? currentNode.data?.waitDays ?? 1;
@@ -329,6 +372,131 @@ export const CampaignSchedulerModal: React.FC<CampaignSchedulerModalProps> = ({
             });
             setExecutionLogs([...newLogs]);
             continue;
+          }
+        }
+
+        // Step 2.07: Check if current node is a Condition node
+        if (isConditionNode(currentNode)) {
+          const condType = currentNode.data?.conditionType || 'has_replied';
+          let conditionMet = false;
+          if (condType === 'has_replied') {
+            conditionMet = targetLead.status === 'Replied';
+          } else if (condType === 'email_opened') {
+            conditionMet = (targetLead.opensCount || 0) > 0;
+          } else if (condType === 'link_clicked') {
+            conditionMet = (targetLead.clicksCount || 0) > 0;
+          }
+
+          const handleId = conditionMet ? 'yes' : 'no';
+          const outgoingEdge = assignedWorkflow.edges?.find(
+            e => e.source === currentNode.id && (e.sourceHandle === handleId || !e.sourceHandle)
+          );
+
+          if (outgoingEdge) {
+            const nextNode = assignedWorkflow.nodes?.find(n => n.id === outgoingEdge.target);
+            if (nextNode) {
+              targetLead.currentNodeId = nextNode.id;
+              targetLead.nodeEnteredDate = new Date().toISOString();
+              const nextDelayMs = getDelayMs(nextNode.data?.stepDelayValue, nextNode.data?.stepDelayUnit);
+              if (nextDelayMs > 0) {
+                targetLead.nextSendDate = new Date(Date.now() + nextDelayMs).toISOString().split('T')[0];
+              } else {
+                targetLead.nextSendDate = today;
+              }
+
+              newLogs.push({
+                id: `${Date.now()}-${i}-cond`,
+                timestamp: new Date().toLocaleTimeString(),
+                leadId: targetLead.leadId,
+                leadName: targetLead.name,
+                leadEmail: targetLead.email,
+                stage: targetLead.currentStage,
+                status: 'skipped',
+                details: `Condition "${condType}" evaluated to ${conditionMet ? 'YES' : 'NO'}. Routed to "${nextNode.data?.label || nextNode.id}".`
+              });
+
+              if (isTaskNode(nextNode)) {
+                if (nextDelayMs > 0) {
+                  await updateLead(targetLead, token || undefined, spreadsheetId);
+                  const idx = updatedLeadsList.findIndex(l => l.leadId === targetLead.leadId);
+                  if (idx !== -1) updatedLeadsList[idx] = { ...targetLead };
+                  newLogs.push({
+                    id: `${Date.now()}-${i}-task-delay`,
+                    timestamp: new Date().toLocaleTimeString(),
+                    leadId: targetLead.leadId,
+                    leadName: targetLead.name,
+                    leadEmail: targetLead.email,
+                    stage: targetLead.currentStage,
+                    status: 'skipped',
+                    details: `Task node has ${nextNode.data?.stepDelayValue} ${nextNode.data?.stepDelayUnit || 'minutes'} timer. Task creation will occur once timer elapses.`
+                  });
+                  setExecutionLogs([...newLogs]);
+                  continue;
+                } else {
+                  const firstName = targetLead.firstName || targetLead.name?.split(' ')[0] || targetLead.name || 'prospect';
+                  const rawTitle = nextNode.data?.taskTitle || nextNode.data?.label || 'Call {{first_name}}';
+                  const rawDesc = nextNode.data?.taskDescription || 'Direct outreach call regarding {{pain_point}}';
+
+                  const populatedTitle = rawTitle
+                    .replace(/\{\{first_name\}\}/gi, firstName)
+                    .replace(/\{\{name\}\}/gi, targetLead.name || '')
+                    .replace(/\{\{company\}\}/gi, targetLead.company || '')
+                    .replace(/\{\{pain_point\}\}/gi, targetLead.painPoint || '');
+
+                  const populatedDesc = rawDesc
+                    .replace(/\{\{first_name\}\}/gi, firstName)
+                    .replace(/\{\{name\}\}/gi, targetLead.name || '')
+                    .replace(/\{\{company\}\}/gi, targetLead.company || '')
+                    .replace(/\{\{pain_point\}\}/gi, targetLead.painPoint || '');
+
+                  const offsetDays = nextNode.data?.taskDueDateOffsetDays ?? 1;
+                  const dueDate = addBusinessDays(today, offsetDays);
+
+                  const newTask: LeadManualTask = {
+                    id: `task-${Date.now()}-${i}-${Math.random().toString(36).substring(2, 6)}`,
+                    leadId: targetLead.leadId,
+                    leadName: targetLead.name,
+                    leadEmail: targetLead.email,
+                    company: targetLead.company,
+                    campaignId: assignedWorkflow.id,
+                    campaignName: assignedWorkflow.name,
+                    nodeId: nextNode.id,
+                    title: populatedTitle,
+                    description: populatedDesc,
+                    dueDate,
+                    priority: nextNode.data?.taskPriority || 'high',
+                    isCompleted: false,
+                    createdAt: new Date().toISOString()
+                  };
+
+                  currentTasksList.push(newTask);
+                  if (onTasksCreated) {
+                    onTasksCreated([newTask]);
+                  }
+                  await updateLead(targetLead, token || undefined, spreadsheetId);
+                  const idx = updatedLeadsList.findIndex(l => l.leadId === targetLead.leadId);
+                  if (idx !== -1) updatedLeadsList[idx] = { ...targetLead };
+                  newLogs.push({
+                    id: `${Date.now()}-${i}-task-created`,
+                    timestamp: new Date().toLocaleTimeString(),
+                    leadId: targetLead.leadId,
+                    leadName: targetLead.name,
+                    leadEmail: targetLead.email,
+                    stage: targetLead.currentStage,
+                    status: 'skipped',
+                    details: `Task created: "${newTask.title}". Outreach paused until marked completed in Tasks tab.`
+                  });
+                  setExecutionLogs([...newLogs]);
+                  continue;
+                }
+              }
+
+              await updateLead(targetLead, token || undefined, spreadsheetId);
+              const idx = updatedLeadsList.findIndex(l => l.leadId === targetLead.leadId);
+              if (idx !== -1) updatedLeadsList[idx] = { ...targetLead };
+              setExecutionLogs([...newLogs]);
+              continue;
+            }
           }
         }
 
@@ -567,7 +735,8 @@ export const CampaignSchedulerModal: React.FC<CampaignSchedulerModalProps> = ({
         const nextNodeId = nextDownstream ? nextDownstream.id : (assignedWorkflow ? `node-email-${nextStageNum}` : undefined);
 
         const isCompleted = !nextDownstream && nextStageNum >= maxWorkflowStages;
-        const newNextSendDate = isCompleted ? '' : (nextStageNum < maxWorkflowStages ? addBusinessDays(today, gapDays) : '');
+        const isNextNonEmail = nextDownstream && (isTaskNode(nextDownstream) || isWaitNode(nextDownstream) || isConditionNode(nextDownstream));
+        const newNextSendDate = isCompleted ? '' : (isNextNonEmail ? today : (nextStageNum < maxWorkflowStages ? addBusinessDays(today, gapDays) : ''));
 
         const updatedLead: Lead = {
           ...targetLead,
@@ -576,7 +745,7 @@ export const CampaignSchedulerModal: React.FC<CampaignSchedulerModalProps> = ({
           campaignId: assignedWorkflow?.id,
           campaign: assignedWorkflow?.name || targetLead.campaign,
           senderUsed: senderObj?.email || userEmail,
-          nodeEnteredDate: today,
+          nodeEnteredDate: new Date().toISOString(),
           threadId: sendResult.threadId,
           lastEmailSentDate: today,
           nextSendDate: newNextSendDate,
