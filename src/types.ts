@@ -1,4 +1,4 @@
-export type LeadStatus = 'Active' | 'Replied' | 'Paused' | 'Completed' | 'Broke Up';
+export type LeadStatus = 'Active' | 'Replied' | 'Paused' | 'Completed' | 'Broke Up' | 'Negative Reply';
 
 export interface Lead {
   leadId: string;
@@ -36,6 +36,20 @@ export interface Lead {
   nodeEnteredDate?: string;
   senderUsed?: string;
   taskPending?: boolean;
+
+  // Sentiment and classification fields
+  replySentiment?: 'positive' | 'negative' | 'neutral';
+  replyClassifiedBy?: 'auto' | 'manual';
+  replyClassifiedAt?: string;
+  replyMatchedPhrases?: string[];
+  replyReason?: string;
+  stoppedReason?: string;
+  stoppedByLeadId?: string;
+  pendingCompanyPause?: {
+    candidateLeadIds: string[];
+    companyName?: string;
+    count: number;
+  };
 }
 
 // Senders Management
@@ -166,6 +180,20 @@ export interface LeadManualTask {
   createdAt: string;
 }
 
+export interface TaskAlertItem {
+  id: string; // e.g. `${taskId}:${state}`
+  taskId: string;
+  state: 'new' | 'due_today' | 'overdue';
+  title: string;
+  leadName: string;
+  leadCompany?: string;
+  leadEmail?: string;
+  leadId?: string;
+  priority: 'low' | 'medium' | 'high';
+  dueDate: string;
+  createdAt: string;
+}
+
 export interface TrackingEvent {
   id: string;
   type: 'open' | 'click';
@@ -246,6 +274,7 @@ export interface AppSettings {
   senderEmail: string;
   customLogoUrl?: string;
   appName?: string;
+  positiveReplyAction?: 'pause_automatically' | 'ask_first';
 }
 
 export interface SendLogEntry {
@@ -255,6 +284,6 @@ export interface SendLogEntry {
   leadName: string;
   leadEmail: string;
   stage: number;
-  status: 'sent' | 'reply_detected' | 'failed' | 'skipped';
+  status: 'sent' | 'reply_detected' | 'failed' | 'skipped' | 'advanced';
   details: string;
 }

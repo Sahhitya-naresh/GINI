@@ -262,12 +262,16 @@ export const LeadsTable: React.FC<LeadsTableProps> = ({
   };
 
   const activeCount = leads.filter(l => l.status === 'Active').length;
-  const repliedCount = leads.filter(l => l.status === 'Replied').length;
+  const repliedCount = leads.filter(l => l.status === 'Replied' && l.replySentiment !== 'negative').length;
+  const negativeReplyCount = leads.filter(l => l.status === 'Negative Reply' || l.replySentiment === 'negative').length;
   const pausedCount = leads.filter(l => l.status === 'Paused').length;
   const completedCount = leads.filter(l => l.status === 'Completed').length;
   const closedCount = leads.filter(l => l.status === 'Completed' || l.status === 'Broke Up').length;
 
-  const renderStatusBadge = (status: Lead['status']) => {
+  const renderStatusBadge = (status: Lead['status'], sentiment?: string) => {
+    if (status === 'Negative Reply' || sentiment === 'negative') {
+      return <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold bg-red-100 text-red-700 border border-red-200 font-bold">Negative Reply</span>;
+    }
     switch (status) {
       case 'Active':
         return <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">Active</span>;
@@ -295,8 +299,8 @@ export const LeadsTable: React.FC<LeadsTableProps> = ({
   return (
     <div className="space-y-3.5 w-full pb-8">
       
-      {/* Metric Stat Strips with Top Color Accent Lines */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+      {/* Metric Stat Strips with Top Color Accent Lines - All 5 tabs aligned in the same single line on desktop */}
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
         {/* Total Leads - Blue #1976D2 */}
         <div 
           onClick={() => setStatusFilter('ALL')}
@@ -345,6 +349,29 @@ export const LeadsTable: React.FC<LeadsTableProps> = ({
             <p className="text-xl font-bold text-amber-600">{repliedCount}</p>
             {repliedCount > 0 && (
               <span className="text-[11px] font-semibold text-amber-700">Needs Reply</span>
+            )}
+          </div>
+        </div>
+
+        {/* Negative Replies - Light Red Accent */}
+        <div 
+          onClick={() => setStatusFilter('Negative Reply')}
+          className={`relative overflow-hidden p-3.5 bg-white rounded-xl border transition-all cursor-pointer ${
+            statusFilter === 'Negative Reply' 
+              ? 'border-red-400 shadow-xs ring-1 ring-red-400 bg-red-50/40' 
+              : 'border-slate-200 hover:border-red-300'
+          }`}
+        >
+          <div className="absolute top-0 inset-x-0 h-1 bg-red-500" />
+          <span className="text-xs font-medium text-slate-500">Negative Replies</span>
+          <div className="flex items-baseline gap-2 mt-0.5">
+            <p className="text-xl font-bold text-red-600">{negativeReplyCount}</p>
+            {negativeReplyCount > 0 ? (
+              <span className="text-[11px] font-semibold text-red-700 bg-red-100/80 px-1.5 py-0.2 rounded border border-red-200">
+                Do Not Contact
+              </span>
+            ) : (
+              <span className="text-[11px] font-medium text-slate-400">0</span>
             )}
           </div>
         </div>
@@ -461,15 +488,15 @@ export const LeadsTable: React.FC<LeadsTableProps> = ({
         </div>
 
         {/* Filter Toolbar: Status Pills + Advanced Filters Strip */}
-        <div className="flex flex-wrap items-center justify-between gap-2.5 pt-2 border-t border-slate-100 text-xs">
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-2.5 pt-2 border-t border-slate-100 text-xs">
           {/* Status Pills */}
-          <div className="flex items-center gap-1.5 flex-wrap">
-            <span className="text-slate-400 text-[11px] font-semibold uppercase tracking-wider mr-1">Status:</span>
-            {(['ALL', 'Active', 'Replied', 'Paused', 'Completed', 'Broke Up'] as const).map((st) => (
+          <div className="flex items-center gap-1.5 flex-nowrap overflow-x-auto pb-1 lg:pb-0 shrink-0">
+            <span className="text-slate-400 text-[11px] font-semibold uppercase tracking-wider mr-1 shrink-0">Status:</span>
+            {(['ALL', 'Active', 'Replied', 'Negative Reply', 'Paused', 'Completed', 'Broke Up'] as const).map((st) => (
               <button
                 key={st}
                 onClick={() => setStatusFilter(st)}
-                className={`px-2.5 py-1 rounded-md font-semibold transition-colors ${
+                className={`px-2.5 py-1 rounded-md font-semibold whitespace-nowrap transition-colors shrink-0 cursor-pointer ${
                   statusFilter === st
                     ? 'bg-red-600 text-white shadow-2xs'
                     : 'text-slate-600 hover:bg-red-50 hover:text-red-700'
@@ -481,7 +508,7 @@ export const LeadsTable: React.FC<LeadsTableProps> = ({
           </div>
 
           {/* Advanced Filters Strip */}
-          <div className="flex items-center gap-2 flex-wrap">
+          <div className="flex items-center gap-2 flex-wrap lg:flex-nowrap shrink-0">
             {/* Engagement Filter */}
             <div className="flex items-center gap-1 bg-slate-50 border border-slate-300 rounded-lg px-2 py-1 text-xs w-[138px]">
               <Eye className="w-3 h-3 text-slate-400 shrink-0" />
@@ -671,20 +698,23 @@ export const LeadsTable: React.FC<LeadsTableProps> = ({
               ) : (
                 filteredLeads.map((lead, idx) => {
                   const isDue = lead.status === 'Active' && isLeadDueForNextSend(lead.nextSendDate);
-                  const isReplied = lead.status === 'Replied';
+                  const isNegative = lead.status === 'Negative Reply' || lead.replySentiment === 'negative';
+                  const isReplied = lead.status === 'Replied' && !isNegative;
                   const isCompleted = lead.status === 'Completed';
 
                   const assignedCampaign = campaigns.find(w => w.id === lead.campaignId || (lead.campaign && w.name.toLowerCase() === lead.campaign.toLowerCase()));
                   const emailNodes = assignedCampaign ? (assignedCampaign.nodes || (assignedCampaign as any).workflow_graph?.nodes || []).filter((n: any) => n.type === 'emailNode' || n.data?.nodeType === 'email') : [];
                   const maxStages = assignedCampaign && emailNodes.length > 0 ? emailNodes.length : (assignedCampaign ? 0 : 7);
                   const nextStageNum = lead.currentStage + 1;
-                  const hasMoreStages = nextStageNum <= maxStages && !isCompleted && !isReplied && lead.status !== 'Broke Up';
+                  const hasMoreStages = nextStageNum <= maxStages && !isCompleted && !isReplied && !isNegative && lead.status !== 'Broke Up';
 
                   return (
                     <tr
                       key={lead.leadId || `lead-${lead.email || ''}-${idx}`}
                       className={`transition-colors ${
-                        isReplied
+                        isNegative
+                          ? 'bg-red-50/70 hover:bg-red-100/60 border-l-4 border-l-red-500'
+                          : isReplied
                           ? 'bg-amber-50/80 hover:bg-amber-100/70'
                           : isCompleted
                           ? 'hover:bg-[#E3F2FD]'
@@ -754,7 +784,7 @@ export const LeadsTable: React.FC<LeadsTableProps> = ({
 
                       {/* Status */}
                       <td className="py-2.5 px-3 whitespace-nowrap">
-                        {renderStatusBadge(lead.status)}
+                        {renderStatusBadge(lead.status, lead.replySentiment)}
                       </td>
 
                       {/* Next Send Date */}

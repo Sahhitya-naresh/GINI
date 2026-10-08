@@ -467,12 +467,531 @@ MONGODB_DB_NAME="${dbName}"
   }
 }
 
+// server/replyRules.ts
+var AUTO_REPLY_PHRASES = [
+  "out of office",
+  "out of the office",
+  "automatic reply",
+  "auto-reply",
+  "auto reply",
+  "autoreply",
+  "automated response",
+  "on vacation",
+  "annual leave",
+  "maternity leave",
+  "paternity leave",
+  "undeliverable",
+  "delivery failure",
+  "delivery status notification",
+  "failure notice",
+  "mailer-daemon",
+  "mail delivery subsystem",
+  "i am away",
+  "currently away",
+  "away from my desk",
+  "away from the office",
+  "no longer with the company",
+  "no longer works at",
+  "no longer work at",
+  "has left the company",
+  "mailbox is full",
+  "undelivered mail",
+  "system administrator",
+  "this is an automated message"
+];
+var DEFERRAL_PHRASES = [
+  "not now",
+  "maybe later",
+  "next quarter",
+  "circle back",
+  "reach out in",
+  "not at this time",
+  "bad timing",
+  "check back in",
+  "follow up next",
+  "ping me in",
+  "touch base next quarter",
+  "revisit this in",
+  "revisit later",
+  "busy right now",
+  "swamped right now",
+  "too busy at the moment",
+  "touch base in",
+  "reach out again in",
+  "ping us in",
+  "next year",
+  "in a few months",
+  "reach out next month"
+];
+var STRONG_NEGATIVE_PHRASES = [
+  "unsubscribe",
+  "remove me",
+  "remove my email",
+  "stop emailing",
+  "stop sending",
+  "do not contact",
+  "don't contact",
+  "don't email",
+  "do not email",
+  "take me off",
+  "take us off",
+  "opt out",
+  "not interested",
+  "no thanks",
+  "no thank you",
+  "no longer interested",
+  "leave me alone",
+  "please stop",
+  "not a fit",
+  "not relevant",
+  "this is spam",
+  "report spam",
+  "reported as spam",
+  "delete my info",
+  "never contact",
+  "cease and desist",
+  "stop contacting",
+  "wrong person",
+  "not looking for"
+];
+var STRONG_POSITIVE_PHRASES = [
+  "interested",
+  "let's talk",
+  "lets talk",
+  "let's chat",
+  "lets chat",
+  "let's connect",
+  "lets connect",
+  "sounds good",
+  "sounds great",
+  "sounds interesting",
+  "tell me more",
+  "send me more info",
+  "send more info",
+  "send me more details",
+  "send more details",
+  "send me more pricing",
+  "send pricing",
+  "send over pricing",
+  "schedule a call",
+  "schedule a demo",
+  "schedule a meeting",
+  "book a call",
+  "book a demo",
+  "book a meeting",
+  "book a time",
+  "happy to chat",
+  "happy to connect",
+  "happy to talk",
+  "would love to",
+  "please call",
+  "call me",
+  "give me a call",
+  "available on",
+  "available this",
+  "available next",
+  "set up a call",
+  "set up a time",
+  "set up a meeting",
+  "set up a demo",
+  "let's do it",
+  "free to chat",
+  "free to talk",
+  "send over a calendar",
+  "send your calendar",
+  "send your link",
+  "yes"
+];
+var DEFAULT_KEYWORD_LISTS = {
+  autoReplyPhrases: [...AUTO_REPLY_PHRASES],
+  deferralPhrases: [...DEFERRAL_PHRASES],
+  negativePhrases: [...STRONG_NEGATIVE_PHRASES],
+  positivePhrases: [...STRONG_POSITIVE_PHRASES]
+};
+var COMMON_SHORT_WORDS = /* @__PURE__ */ new Set([
+  "no",
+  "stop",
+  "yes",
+  "not",
+  "ok",
+  "okay",
+  "thanks",
+  "thank",
+  "sure",
+  "hi",
+  "hello",
+  "bye",
+  "please",
+  "help"
+]);
+function validatePhrase(phrase, existingList = []) {
+  if (typeof phrase !== "string") {
+    return { valid: false, normalized: "", error: "Phrase must be a string" };
+  }
+  const normalized = phrase.trim().toLowerCase().replace(/\s+/g, " ");
+  if (!normalized) {
+    return { valid: false, normalized: "", error: "Phrase cannot be empty" };
+  }
+  if (normalized.length < 2 || normalized.length > 80) {
+    return { valid: false, normalized, error: "Phrase length must be between 2 and 80 characters" };
+  }
+  const isDuplicate = existingList.some((item) => item.trim().toLowerCase().replace(/\s+/g, " ") === normalized);
+  if (isDuplicate) {
+    return { valid: false, normalized, error: `Phrase "${normalized}" already exists in this list (case-insensitive duplicate)` };
+  }
+  let warning;
+  const words = normalized.split(/\s+/);
+  if (words.length === 1 && COMMON_SHORT_WORDS.has(normalized)) {
+    warning = `"${normalized}" is a single very common word. It may match unintended replies (e.g. in casual phrasing). Are you sure you want to add it?`;
+  }
+  return { valid: true, normalized, warning };
+}
+var cachedKeywords = null;
+var cacheExpiryTime = 0;
+var CACHE_TTL_MS = 60 * 1e3;
+async function getActiveKeywords(forceRefresh = false) {
+  const now = Date.now();
+  if (!forceRefresh && cachedKeywords && now < cacheExpiryTime) {
+    return cachedKeywords;
+  }
+  try {
+    const db = await getDb();
+    const col = db.collection(COLLECTIONS.SETTINGS);
+    let doc = await col.findOne({ id: "reply_keywords" });
+    if (!doc) {
+      const seedDoc = {
+        id: "reply_keywords",
+        autoReplyPhrases: [...DEFAULT_KEYWORD_LISTS.autoReplyPhrases],
+        deferralPhrases: [...DEFAULT_KEYWORD_LISTS.deferralPhrases],
+        negativePhrases: [...DEFAULT_KEYWORD_LISTS.negativePhrases],
+        positivePhrases: [...DEFAULT_KEYWORD_LISTS.positivePhrases],
+        createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+        updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+      };
+      await col.updateOne({ id: "reply_keywords" }, { $set: seedDoc }, { upsert: true });
+      doc = seedDoc;
+    }
+    cachedKeywords = {
+      autoReplyPhrases: Array.isArray(doc.autoReplyPhrases) ? doc.autoReplyPhrases : [...DEFAULT_KEYWORD_LISTS.autoReplyPhrases],
+      deferralPhrases: Array.isArray(doc.deferralPhrases) ? doc.deferralPhrases : [...DEFAULT_KEYWORD_LISTS.deferralPhrases],
+      negativePhrases: Array.isArray(doc.negativePhrases) ? doc.negativePhrases : [...DEFAULT_KEYWORD_LISTS.negativePhrases],
+      positivePhrases: Array.isArray(doc.positivePhrases) ? doc.positivePhrases : [...DEFAULT_KEYWORD_LISTS.positivePhrases]
+    };
+    cacheExpiryTime = now + CACHE_TTL_MS;
+    return cachedKeywords;
+  } catch (err) {
+    console.warn("Failed to load active keywords from MongoDB, using built-in defaults:", err);
+    return {
+      autoReplyPhrases: [...DEFAULT_KEYWORD_LISTS.autoReplyPhrases],
+      deferralPhrases: [...DEFAULT_KEYWORD_LISTS.deferralPhrases],
+      negativePhrases: [...DEFAULT_KEYWORD_LISTS.negativePhrases],
+      positivePhrases: [...DEFAULT_KEYWORD_LISTS.positivePhrases]
+    };
+  }
+}
+async function saveActiveKeywords(lists) {
+  const current = await getActiveKeywords(true);
+  const updated = {
+    autoReplyPhrases: lists.autoReplyPhrases || current.autoReplyPhrases,
+    deferralPhrases: lists.deferralPhrases || current.deferralPhrases,
+    negativePhrases: lists.negativePhrases || current.negativePhrases,
+    positivePhrases: lists.positivePhrases || current.positivePhrases
+  };
+  const db = await getDb();
+  const col = db.collection(COLLECTIONS.SETTINGS);
+  await col.updateOne(
+    { id: "reply_keywords" },
+    {
+      $set: {
+        id: "reply_keywords",
+        ...updated,
+        updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+      }
+    },
+    { upsert: true }
+  );
+  cachedKeywords = { ...updated };
+  cacheExpiryTime = Date.now() + CACHE_TTL_MS;
+  return cachedKeywords;
+}
+async function resetKeywordsToDefault(category) {
+  const current = await getActiveKeywords(true);
+  let updated;
+  if (!category || category === "all") {
+    updated = {
+      autoReplyPhrases: [...DEFAULT_KEYWORD_LISTS.autoReplyPhrases],
+      deferralPhrases: [...DEFAULT_KEYWORD_LISTS.deferralPhrases],
+      negativePhrases: [...DEFAULT_KEYWORD_LISTS.negativePhrases],
+      positivePhrases: [...DEFAULT_KEYWORD_LISTS.positivePhrases]
+    };
+  } else {
+    updated = {
+      ...current,
+      [category]: [...DEFAULT_KEYWORD_LISTS[category]]
+    };
+  }
+  return await saveActiveKeywords(updated);
+}
+var FREE_EMAIL_PROVIDERS = /* @__PURE__ */ new Set([
+  "gmail.com",
+  "outlook.com",
+  "hotmail.com",
+  "yahoo.com",
+  "icloud.com",
+  "aol.com",
+  "live.com",
+  "msn.com",
+  "proton.me",
+  "protonmail.com",
+  "zoho.com",
+  "yandex.com",
+  "mail.com",
+  "gmx.com"
+]);
+function cleanReplyText(text) {
+  if (!text || typeof text !== "string") return "";
+  const lines = text.split(/\r?\n/);
+  const keptLines = [];
+  for (let i = 0; i < lines.length; i++) {
+    const rawLine = lines[i];
+    const trimmed = rawLine.trim();
+    if (trimmed.startsWith(">") || trimmed.startsWith("&gt;") || trimmed.startsWith("|")) {
+      continue;
+    }
+    if (/^on\s.+wrote:$/i.test(trimmed) || /^on\s.+at\s.+wrote:$/i.test(trimmed) || /^-----original message-----/i.test(trimmed) || /^-----forwarded message-----/i.test(trimmed) || /^________________________________/i.test(trimmed) || /^from:\s*.+$/i.test(trimmed)) {
+      break;
+    }
+    if (/^sent from my (iphone|ipad|android|galaxy|pixel|phone)/i.test(trimmed) || /^sent with re\/max/i.test(trimmed) || /^get outlook for (ios|android)/i.test(trimmed) || trimmed === "--" || trimmed === "-- ") {
+      break;
+    }
+    keptLines.push(rawLine);
+  }
+  let cleaned = keptLines.join("\n").trim();
+  cleaned = cleaned.replace(/on\s+[\s\S]+?wrote:[\s\S]*$/i, "").trim();
+  return cleaned;
+}
+function isNegatedAtPosition(text, matchIndex) {
+  const precedingText = text.substring(0, matchIndex).trim();
+  const words = precedingText.split(/\s+/).filter(Boolean);
+  const precedingWords = words.slice(-3);
+  const negationRegex = /\b(not|never|no|hardly|scarcely|neither|nor)\b|n['’]t$/i;
+  return precedingWords.some((w) => negationRegex.test(w));
+}
+function buildPhraseRegex(phrase) {
+  const lower = phrase.trim().toLowerCase();
+  const escaped = lower.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const startBoundary = /^\w/.test(lower) ? "\\b" : "(?:^|\\s|[^\\w])";
+  const endBoundary = /\w$/.test(lower) ? "\\b" : "(?=$|\\s|[^\\w])";
+  return new RegExp(`${startBoundary}${escaped}${endBoundary}`, "gi");
+}
+function findMatchingPhrases(text, phraseList) {
+  const matches = [];
+  const lowerText = text.toLowerCase();
+  for (const phrase of phraseList) {
+    if (!phrase || !phrase.trim()) continue;
+    const regex = buildPhraseRegex(phrase);
+    let m;
+    while ((m = regex.exec(lowerText)) !== null) {
+      matches.push({ phrase, index: m.index });
+    }
+  }
+  return matches;
+}
+function classifyReply(subject, body, keywordOverrides) {
+  const keywords = keywordOverrides || cachedKeywords || DEFAULT_KEYWORD_LISTS;
+  const cleanSub = (subject || "").trim();
+  const cleanBodyText = cleanReplyText(body || "");
+  const combinedText = `${cleanSub}
+${cleanBodyText}`.toLowerCase();
+  const autoMatches = findMatchingPhrases(combinedText, keywords.autoReplyPhrases);
+  const matchedAutoPhrases = Array.from(new Set(autoMatches.map((m) => m.phrase)));
+  if (matchedAutoPhrases.length > 0) {
+    return {
+      sentiment: "neutral",
+      confidence: 1,
+      matchedPhrases: matchedAutoPhrases,
+      reason: `Auto-reply / system notice detected: ${matchedAutoPhrases.slice(0, 3).join(", ")}`,
+      isAutoReply: true
+    };
+  }
+  if (!cleanBodyText && !cleanSub) {
+    return {
+      sentiment: "neutral",
+      confidence: 0.5,
+      matchedPhrases: [],
+      reason: "Empty reply content"
+    };
+  }
+  const deferralMatches = findMatchingPhrases(cleanBodyText, keywords.deferralPhrases);
+  const matchedDeferrals = Array.from(new Set(deferralMatches.map((m) => m.phrase)));
+  const negativeMatches = findMatchingPhrases(cleanBodyText, keywords.negativePhrases);
+  const validNegativePhrases = [];
+  for (const match of negativeMatches) {
+    if (match.phrase === "not interested") {
+      const snippetAfter = cleanBodyText.substring(match.index + match.phrase.length, match.index + match.phrase.length + 20).toLowerCase();
+      if (/^\s+in\s+(waiting|delaying|postponing|holding)/i.test(snippetAfter)) {
+        continue;
+      }
+    }
+    validNegativePhrases.push(match.phrase);
+  }
+  const matchedNegatives = Array.from(new Set(validNegativePhrases));
+  const positiveMatches = findMatchingPhrases(cleanBodyText, keywords.positivePhrases);
+  const survivingPositives = [];
+  for (const match of positiveMatches) {
+    const isNegated = isNegatedAtPosition(cleanBodyText, match.index);
+    if (!isNegated) {
+      survivingPositives.push(match.phrase);
+    }
+  }
+  const matchedPositives = Array.from(new Set(survivingPositives));
+  if (matchedNegatives.length > 0 && matchedPositives.length === 0) {
+    return {
+      sentiment: "negative",
+      confidence: 0.95,
+      matchedPhrases: matchedNegatives,
+      reason: `Negative phrase(s) detected: ${matchedNegatives.join(", ")}`
+    };
+  }
+  if (matchedPositives.length > 0 && matchedNegatives.length === 0 && matchedDeferrals.length === 0) {
+    return {
+      sentiment: "positive",
+      confidence: 0.95,
+      matchedPhrases: matchedPositives,
+      reason: `Positive phrase(s) detected: ${matchedPositives.join(", ")}`
+    };
+  }
+  if (matchedDeferrals.length > 0 && matchedPositives.length === 0) {
+    return {
+      sentiment: "neutral",
+      confidence: 0.85,
+      matchedPhrases: matchedDeferrals,
+      reason: `Deferral / timing phrase detected: ${matchedDeferrals.join(", ")}`
+    };
+  }
+  if (matchedPositives.length > 0 && (matchedNegatives.length > 0 || matchedDeferrals.length > 0)) {
+    const allMatches = [...matchedPositives, ...matchedNegatives, ...matchedDeferrals];
+    return {
+      sentiment: "neutral",
+      confidence: 0.6,
+      matchedPhrases: allMatches,
+      reason: `Mixed signals detected: positive (${matchedPositives.join(", ")}), negative/deferral (${[...matchedNegatives, ...matchedDeferrals].join(", ")})`
+    };
+  }
+  return {
+    sentiment: "neutral",
+    confidence: 0.5,
+    matchedPhrases: [],
+    reason: "No conclusive positive or negative sentiment phrases detected"
+  };
+}
+function normalizeCompanyName(company) {
+  if (!company) return "";
+  let norm = company.toLowerCase().trim();
+  norm = norm.replace(/[.,\/#!$%\^&\*;:{}=\-_`~()'"?]/g, " ");
+  const suffixes = [
+    "inc",
+    "incorporated",
+    "ltd",
+    "limited",
+    "llc",
+    "pvt",
+    "private",
+    "corp",
+    "corporation",
+    "co",
+    "company",
+    "gmbh",
+    "sa",
+    "sarl",
+    "bv",
+    "pty"
+  ];
+  const regex = new RegExp(`\\b(${suffixes.join("|")})\\b`, "gi");
+  norm = norm.replace(regex, " ");
+  norm = norm.replace(/\s+/g, " ").trim();
+  return norm;
+}
+function extractCompanyDomain(email) {
+  if (!email || !email.includes("@")) return "";
+  const domain = email.split("@")[1].trim().toLowerCase();
+  if (FREE_EMAIL_PROVIDERS.has(domain)) return "";
+  return domain;
+}
+function areSameCompany(leadA, leadB) {
+  const normA = normalizeCompanyName(leadA.company);
+  const normB = normalizeCompanyName(leadB.company);
+  if (normA && normB && normA === normB) {
+    return true;
+  }
+  const domA = extractCompanyDomain(leadA.email);
+  const domB = extractCompanyDomain(leadB.email);
+  if (domA && domB && domA === domB) {
+    return true;
+  }
+  return false;
+}
+
 // server/mongoBackend.ts
 async function listLeads(token, spreadsheetId) {
   const db = await getDb();
   const leads = await db.collection(COLLECTIONS.LEADS).find({}, { projection: { _id: 0 } }).toArray();
+  const activeKeywords = await getActiveKeywords().catch(() => void 0);
+  for (const l of leads) {
+    let changed = false;
+    const updatePayload = {};
+    if ((l.hasReplied || l.status === "Replied" || l.status === "Negative Reply") && !l.replySentiment) {
+      try {
+        const cleanEmail = (l.email || "").trim().toLowerCase();
+        const inb = await db.collection(COLLECTIONS.INBOUND_REPLIES).findOne({
+          $or: [
+            ...cleanEmail ? [{ leadEmail: cleanEmail }, { from: { $regex: cleanEmail, $options: "i" } }] : [],
+            ...l.threadId ? [{ threadId: l.threadId }] : [],
+            ...l.leadId ? [{ leadId: l.leadId }] : []
+          ]
+        });
+        if (inb) {
+          const classification = classifyReply(inb.subject, inb.body, activeKeywords);
+          l.replySentiment = classification.sentiment;
+          l.replyClassifiedBy = "auto";
+          l.replyClassifiedAt = (/* @__PURE__ */ new Date()).toISOString();
+          l.replyMatchedPhrases = classification.matchedPhrases;
+          l.replyReason = classification.reason;
+          updatePayload.replySentiment = l.replySentiment;
+          updatePayload.replyClassifiedBy = l.replyClassifiedBy;
+          updatePayload.replyClassifiedAt = l.replyClassifiedAt;
+          updatePayload.replyMatchedPhrases = l.replyMatchedPhrases;
+          updatePayload.replyReason = l.replyReason;
+          if (classification.sentiment === "negative") {
+            l.status = "Negative Reply";
+            l.stoppedReason = "Negative reply received";
+            updatePayload.status = "Negative Reply";
+            updatePayload.stoppedReason = "Negative reply received";
+          }
+          changed = true;
+        }
+      } catch (_) {
+      }
+    }
+    if (l.replySentiment === "negative" && l.status !== "Negative Reply") {
+      l.status = "Negative Reply";
+      l.stoppedReason = l.stoppedReason || "Negative reply received";
+      updatePayload.status = "Negative Reply";
+      updatePayload.stoppedReason = l.stoppedReason;
+      changed = true;
+    }
+    if (changed && Object.keys(updatePayload).length > 0) {
+      updatePayload.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+      await db.collection(COLLECTIONS.LEADS).updateOne(
+        { leadId: l.leadId },
+        { $set: updatePayload }
+      ).catch(() => {
+      });
+    }
+  }
   return leads.map((l) => ({
     ...l,
+    notes: cleanLeadNotes(l.notes),
     campaign: l.campaign && l.campaign.trim() ? l.campaign.trim() : "Default",
     campaignId: l.campaignId || ""
   }));
@@ -635,8 +1154,15 @@ async function updateLead(leadData, token, spreadsheetId) {
   const updated = {
     ...existing,
     ...leadData,
+    notes: cleanLeadNotes(leadData.notes !== void 0 ? leadData.notes : existing.notes),
     updatedAt: (/* @__PURE__ */ new Date()).toISOString()
   };
+  if ((existing.replySentiment === "negative" || leadData.replySentiment === "negative") && updated.status === "Replied") {
+    updated.status = "Negative Reply";
+    updated.replySentiment = "negative";
+  } else if (updated.status === "Negative Reply" && !updated.replySentiment) {
+    updated.replySentiment = "negative";
+  }
   await col.updateOne({ leadId: leadData.leadId }, { $set: updated });
   return updated;
 }
@@ -899,6 +1425,32 @@ async function deleteLocalTask(taskId) {
   const result = await col.deleteOne({ id: taskId });
   return result.deletedCount > 0;
 }
+async function loadTaskAlertsState() {
+  const db = await getDb();
+  const doc = await db.collection(COLLECTIONS.SETTINGS).findOne({ id: "task_alerts_state" });
+  return {
+    dismissedAlertIds: Array.isArray(doc?.dismissedAlertIds) ? doc.dismissedAlertIds : []
+  };
+}
+async function saveDismissedTaskAlerts(alertIds) {
+  const db = await getDb();
+  const existing = await loadTaskAlertsState();
+  const merged = Array.from(/* @__PURE__ */ new Set([...existing.dismissedAlertIds, ...alertIds]));
+  await db.collection(COLLECTIONS.SETTINGS).updateOne(
+    { id: "task_alerts_state" },
+    { $set: { id: "task_alerts_state", dismissedAlertIds: merged, updatedAt: (/* @__PURE__ */ new Date()).toISOString() } },
+    { upsert: true }
+  );
+  return merged;
+}
+async function clearTaskAlertsState() {
+  const db = await getDb();
+  await db.collection(COLLECTIONS.SETTINGS).updateOne(
+    { id: "task_alerts_state" },
+    { $set: { id: "task_alerts_state", dismissedAlertIds: [], updatedAt: (/* @__PURE__ */ new Date()).toISOString() } },
+    { upsert: true }
+  );
+}
 async function loadLocalSettings() {
   const db = await getDb();
   const settings = await db.collection(COLLECTIONS.SETTINGS).findOne({ id: "app_settings" }, { projection: { _id: 0 } });
@@ -1030,6 +1582,36 @@ async function getSystemStatsSummary() {
     }
   };
 }
+function cleanLeadNotes(existingNotes) {
+  if (!existingNotes || !existingNotes.trim()) return "";
+  const parts = existingNotes.split("|").map((p) => p.trim()).filter(Boolean);
+  const seen = /* @__PURE__ */ new Set();
+  const cleaned = [];
+  for (const part of parts) {
+    if (/Reply detected on \d{4}-\d{2}-\d{2}: Incoming reply flag detected/i.test(part)) {
+      continue;
+    }
+    const normalized = part.toLowerCase();
+    if (seen.has(normalized)) {
+      continue;
+    }
+    seen.add(normalized);
+    cleaned.push(part);
+  }
+  const hasSpecificSentiment = cleaned.some((p) => /\[(?:Negative|Positive|Neutral) reply detected/i.test(p));
+  const finalParts = hasSpecificSentiment ? cleaned.filter((p) => p !== "Reply detected" && p !== "[Reply detected]") : cleaned;
+  return finalParts.join(" | ");
+}
+function appendLeadNote(existingNotes, newTag) {
+  const cleaned = cleanLeadNotes(existingNotes);
+  if (!cleaned) return newTag;
+  if (!newTag || !newTag.trim()) return cleaned;
+  const tagBase = newTag.replace(/\s+by\s+(auto|manual).*/i, "").trim();
+  if (cleaned.toLowerCase().includes(tagBase.toLowerCase()) || cleaned.toLowerCase().includes(newTag.toLowerCase())) {
+    return cleaned;
+  }
+  return `${cleaned} | ${newTag}`;
+}
 async function applyLeadReply(params) {
   const db = await getDb();
   const leadsCol = db.collection(COLLECTIONS.LEADS);
@@ -1045,9 +1627,30 @@ async function applyLeadReply(params) {
       { projection: { _id: 0 } }
     );
   }
-  const replyId = params.messageId || `inbound-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
-  const receivedAt = params.receivedDateTime || (/* @__PURE__ */ new Date()).toISOString();
-  const replyDoc = {
+  const isDummySystemBody = !params.body || params.body.includes("Incoming reply flag detected on lead record") || params.body.includes("Status already marked Replied") || params.body.includes("Status marked Negative Reply");
+  const repliesCol = db.collection(COLLECTIONS.INBOUND_REPLIES);
+  let existingReply = null;
+  if (params.messageId) {
+    existingReply = await repliesCol.findOne({ id: params.messageId });
+  }
+  if (!existingReply && cleanEmail && params.body && !isDummySystemBody) {
+    const normalizedBody = params.body.trim().replace(/\s+/g, " ").toLowerCase();
+    const candidateQuery = {
+      $or: [
+        { leadEmail: cleanEmail },
+        ...cleanThreadId ? [{ threadId: cleanThreadId }] : []
+      ]
+    };
+    const candidateReplies = await repliesCol.find(candidateQuery).toArray();
+    existingReply = candidateReplies.find((r) => {
+      const rBody = (r.body || r.snippet || "").trim().replace(/\s+/g, " ").toLowerCase();
+      if (!rBody) return false;
+      return rBody === normalizedBody || rBody.length > 30 && normalizedBody.length > 30 && (rBody.startsWith(normalizedBody.slice(0, 50)) || normalizedBody.startsWith(rBody.slice(0, 50)));
+    });
+  }
+  const replyId = existingReply?.id || params.messageId || `inbound-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+  const receivedAt = existingReply?.receivedDateTime || params.receivedDateTime || (/* @__PURE__ */ new Date()).toISOString();
+  const replyDoc = existingReply || {
     id: replyId,
     leadEmail: cleanEmail || matchedLead?.email || "",
     leadId: matchedLead?.leadId,
@@ -1058,15 +1661,16 @@ async function applyLeadReply(params) {
     receivedDateTime: receivedAt,
     source: params.source || "Webhook"
   };
-  try {
-    const repliesCol = db.collection(COLLECTIONS.INBOUND_REPLIES);
-    await repliesCol.updateOne(
-      { id: replyId },
-      { $set: replyDoc },
-      { upsert: true }
-    );
-  } catch (err) {
-    console.warn("[MongoDB] Could not persist inbound reply document:", err);
+  if (!existingReply && !isDummySystemBody) {
+    try {
+      await repliesCol.updateOne(
+        { id: replyId },
+        { $set: replyDoc },
+        { upsert: true }
+      );
+    } catch (err) {
+      console.warn("[MongoDB] Could not persist inbound reply document:", err);
+    }
   }
   if (!matchedLead) {
     return {
@@ -1076,23 +1680,248 @@ async function applyLeadReply(params) {
       message: `No lead matched email "${cleanEmail}" or thread "${cleanThreadId}". Inbound reply stored.`
     };
   }
-  const existingNotes = matchedLead.notes || "";
-  const noteTag = `[Reply detected${params.source ? ` via ${params.source}` : ""}]`;
-  const updatedNotes = existingNotes.includes(noteTag) ? existingNotes : existingNotes ? `${existingNotes} | ${noteTag}` : noteTag;
+  const activeKeywords = await getActiveKeywords().catch(() => void 0);
+  const classification = classifyReply(params.subject, params.body, activeKeywords);
+  const now = (/* @__PURE__ */ new Date()).toISOString();
   const updateFields = {
-    status: "Replied",
     hasReplied: true,
     hasUnreadReply: true,
     lastReplyReceivedDate: receivedAt,
-    notes: updatedNotes,
-    updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+    replySentiment: classification.sentiment,
+    replyClassifiedBy: params.classifiedBy || "auto",
+    replyClassifiedAt: now,
+    replyMatchedPhrases: classification.matchedPhrases,
+    replyReason: classification.reason,
+    updatedAt: now
   };
+  let pausedCompanyLeadsCount = 0;
+  let pendingConfirmation = void 0;
+  if (classification.sentiment === "negative") {
+    updateFields.status = "Negative Reply";
+    updateFields.stoppedReason = "Negative reply received";
+    updateFields.stoppedByLeadId = void 0;
+    const noteTag = `[Negative reply detected (${classification.matchedPhrases.join(", ") || "disinterest"}) by ${params.classifiedBy || "auto"}: Sequence stopped]`;
+    updateFields.notes = appendLeadNote(matchedLead.notes, noteTag);
+  } else if (classification.sentiment === "positive") {
+    updateFields.status = "Replied";
+    const noteTag = `[Positive reply detected (${classification.matchedPhrases.join(", ") || "interest"}) by ${params.classifiedBy || "auto"}]`;
+    updateFields.notes = appendLeadNote(matchedLead.notes, noteTag);
+    const settings = await loadLocalSettings().catch(() => null);
+    const positiveAction = settings?.positiveReplyAction || "pause_automatically";
+    const otherActiveLeads = await leadsCol.find(
+      {
+        leadId: { $ne: matchedLead.leadId },
+        status: "Active"
+      },
+      { projection: { _id: 0 } }
+    ).toArray();
+    const sameCompanyLeads = otherActiveLeads.filter((other) => areSameCompany(matchedLead, other));
+    if (positiveAction === "ask_first") {
+      if (sameCompanyLeads.length > 0) {
+        pendingConfirmation = {
+          candidateLeadIds: sameCompanyLeads.map((l) => l.leadId),
+          companyName: matchedLead.company,
+          count: sameCompanyLeads.length
+        };
+        updateFields.pendingCompanyPause = pendingConfirmation;
+      }
+    } else {
+      for (const other of sameCompanyLeads) {
+        const stopReason = `Positive reply from ${matchedLead.name} at the same company`;
+        await leadsCol.updateOne(
+          { leadId: other.leadId },
+          {
+            $set: {
+              status: "Paused",
+              stoppedReason: stopReason,
+              stoppedByLeadId: matchedLead.leadId,
+              notes: appendLeadNote(other.notes, `[Paused: ${stopReason}]`),
+              updatedAt: now
+            }
+          }
+        );
+        pausedCompanyLeadsCount++;
+      }
+    }
+  } else {
+    updateFields.status = "Replied";
+    const autoTag = classification.isAutoReply ? " (auto-reply)" : "";
+    const noteTag = `[Neutral reply detected${autoTag} by ${params.classifiedBy || "auto"}: Manual follow-up needed]`;
+    updateFields.notes = appendLeadNote(matchedLead.notes, noteTag);
+  }
   await leadsCol.updateOne({ leadId: matchedLead.leadId }, { $set: updateFields });
+  const updatedLeadDoc = await leadsCol.findOne({ leadId: matchedLead.leadId }, { projection: { _id: 0 } });
   return {
     success: true,
     applied: true,
-    lead: { ...matchedLead, ...updateFields },
-    reply: replyDoc
+    lead: updatedLeadDoc || { ...matchedLead, ...updateFields },
+    reply: replyDoc,
+    classification,
+    pausedCompanyLeadsCount,
+    pendingConfirmation
+  };
+}
+async function manualOverrideSentiment(leadId, newSentiment, reason) {
+  const db = await getDb();
+  const leadsCol = db.collection(COLLECTIONS.LEADS);
+  const lead = await leadsCol.findOne({ leadId }, { projection: { _id: 0 } });
+  if (!lead) {
+    return { success: false, pausedCount: 0, resumedCount: 0 };
+  }
+  let resumedCount = 0;
+  let pausedCount = 0;
+  const now = (/* @__PURE__ */ new Date()).toISOString();
+  if (lead.replySentiment === "positive") {
+    const leadsToResume = await leadsCol.find(
+      { stoppedByLeadId: leadId, status: "Paused" },
+      { projection: { _id: 0 } }
+    ).toArray();
+    for (const pausedLead of leadsToResume) {
+      await leadsCol.updateOne(
+        { leadId: pausedLead.leadId },
+        {
+          $set: {
+            status: "Active",
+            notes: appendLeadNote(pausedLead.notes, `[Resumed: Positive reply from ${lead.name} overridden]`),
+            updatedAt: now
+          },
+          $unset: {
+            stoppedReason: "",
+            stoppedByLeadId: ""
+          }
+        }
+      );
+      resumedCount++;
+    }
+  }
+  const overrideReason = reason || `Manual override to ${newSentiment}`;
+  const noteTag = `[Sentiment manually updated to ${newSentiment} by user: ${overrideReason}]`;
+  const updateFields = {
+    replySentiment: newSentiment,
+    replyClassifiedBy: "manual",
+    replyClassifiedAt: now,
+    replyReason: overrideReason,
+    notes: appendLeadNote(lead.notes, noteTag),
+    updatedAt: now
+  };
+  if (newSentiment === "positive") {
+    updateFields.status = "Replied";
+    updateFields.stoppedReason = void 0;
+    const otherActiveLeads = await leadsCol.find(
+      {
+        leadId: { $ne: leadId },
+        status: "Active"
+      },
+      { projection: { _id: 0 } }
+    ).toArray();
+    const sameCompanyLeads = otherActiveLeads.filter((other) => areSameCompany(lead, other));
+    for (const other of sameCompanyLeads) {
+      const stopReason = `Positive reply from ${lead.name} at the same company`;
+      await leadsCol.updateOne(
+        { leadId: other.leadId },
+        {
+          $set: {
+            status: "Paused",
+            stoppedReason: stopReason,
+            stoppedByLeadId: lead.leadId,
+            notes: appendLeadNote(other.notes, `[Paused: ${stopReason}]`),
+            updatedAt: now
+          }
+        }
+      );
+      pausedCount++;
+    }
+  } else if (newSentiment === "negative") {
+    updateFields.status = "Negative Reply";
+    updateFields.stoppedReason = "Negative reply (manual override)";
+    updateFields.stoppedByLeadId = void 0;
+  } else {
+    updateFields.status = "Replied";
+    updateFields.stoppedReason = void 0;
+  }
+  await leadsCol.updateOne({ leadId }, { $set: updateFields });
+  const updatedLead = await leadsCol.findOne({ leadId }, { projection: { _id: 0 } });
+  return {
+    success: true,
+    lead: updatedLead || void 0,
+    pausedCount,
+    resumedCount
+  };
+}
+async function resumeCompanyLeads(replyingLeadId) {
+  const db = await getDb();
+  const leadsCol = db.collection(COLLECTIONS.LEADS);
+  const leadsToResume = await leadsCol.find(
+    { stoppedByLeadId: replyingLeadId, status: "Paused" },
+    { projection: { _id: 0 } }
+  ).toArray();
+  let resumedCount = 0;
+  const now = (/* @__PURE__ */ new Date()).toISOString();
+  for (const lead of leadsToResume) {
+    await leadsCol.updateOne(
+      { leadId: lead.leadId },
+      {
+        $set: {
+          status: "Active",
+          notes: appendLeadNote(lead.notes, `[Resumed company outreach by user from lead ${replyingLeadId}]`),
+          updatedAt: now
+        },
+        $unset: {
+          stoppedReason: "",
+          stoppedByLeadId: ""
+        }
+      }
+    );
+    resumedCount++;
+  }
+  return {
+    success: true,
+    resumedCount
+  };
+}
+async function confirmCompanyPause(replyingLeadId) {
+  const db = await getDb();
+  const leadsCol = db.collection(COLLECTIONS.LEADS);
+  const replyingLead = await leadsCol.findOne({ leadId: replyingLeadId }, { projection: { _id: 0 } });
+  if (!replyingLead) {
+    return { success: false, pausedCount: 0 };
+  }
+  const otherActiveLeads = await leadsCol.find(
+    {
+      leadId: { $ne: replyingLeadId },
+      status: "Active"
+    },
+    { projection: { _id: 0 } }
+  ).toArray();
+  const sameCompanyLeads = otherActiveLeads.filter((other) => areSameCompany(replyingLead, other));
+  let pausedCount = 0;
+  const now = (/* @__PURE__ */ new Date()).toISOString();
+  for (const other of sameCompanyLeads) {
+    const stopReason = `Positive reply from ${replyingLead.name} at the same company`;
+    await leadsCol.updateOne(
+      { leadId: other.leadId },
+      {
+        $set: {
+          status: "Paused",
+          stoppedReason: stopReason,
+          stoppedByLeadId: replyingLead.leadId,
+          notes: appendLeadNote(other.notes, `[Paused: ${stopReason}]`),
+          updatedAt: now
+        }
+      }
+    );
+    pausedCount++;
+  }
+  await leadsCol.updateOne(
+    { leadId: replyingLeadId },
+    {
+      $unset: { pendingCompanyPause: "" },
+      $set: { updatedAt: now }
+    }
+  );
+  return {
+    success: true,
+    pausedCount
   };
 }
 
@@ -2325,6 +3154,9 @@ async function checkLeadForReply(lead, _token, _userEmail, _sender) {
   if (lead.status === "Replied") {
     return { hasReplied: true, reason: "Status already marked Replied" };
   }
+  if (lead.status === "Negative Reply") {
+    return { hasReplied: true, reason: "Status marked Negative Reply (do not contact)" };
+  }
   if (lead.hasReplied === true || lead.hasUnreadReply === true || lead.lastReplyReceivedDate) {
     return { hasReplied: true, reason: "Incoming reply flag detected on lead record" };
   }
@@ -2341,7 +3173,8 @@ async function checkLeadForReply(lead, _token, _userEmail, _sender) {
       const fromInfo = res.replyMessage?.from ? ` (${res.replyMessage.from})` : "";
       return {
         hasReplied: true,
-        reason: `Lead reply detected in Microsoft Graph service account mailbox${fromInfo}`
+        reason: `Lead reply detected in Microsoft Graph service account mailbox${fromInfo}`,
+        replyMessage: res.replyMessage
       };
     }
   } catch (err) {
@@ -2433,7 +3266,7 @@ async function runDueCampaignsJob(targetCampaignId, token, spreadsheetId, userEm
     }
     const startNode = nodes.find((n) => n.data?.nodeType === "start" || n.type === "start" || n.type === "startNode");
     const campaignLeads = leads.filter((l) => {
-      if (l.status === "Paused" || l.status === "Completed" || l.status === "Broke Up" || l.status === "Replied") {
+      if (l.status === "Paused" || l.status === "Completed" || l.status === "Broke Up" || l.status === "Replied" || l.status === "Negative Reply") {
         return false;
       }
       return l.campaignId === campaign.id || l.campaign === campaign.name;
@@ -2533,11 +3366,27 @@ async function runDueCampaignsJob(targetCampaignId, token, spreadsheetId, userEm
       const leadSender = senders.find((s) => s.email === lead.senderUsed || s.id === lead.senderUsed) || senders.find((s) => s.isPrimary) || senders[0];
       const replyCheck = await checkLeadForReply(lead, token, userEmail, leadSender);
       if (replyCheck.hasReplied) {
-        lead.status = "Replied";
-        lead.notes = lead.notes ? `${lead.notes} | [Reply detected on ${todayStr}: ${replyCheck.reason}]` : `Reply detected on ${todayStr}: ${replyCheck.reason}`;
+        if (replyCheck.replyMessage) {
+          const applyRes = await applyLeadReply({
+            leadEmail: lead.email,
+            threadId: lead.threadId,
+            messageId: replyCheck.replyMessage?.id,
+            subject: replyCheck.replyMessage?.subject || "Re: Outreach Flow follow-up",
+            body: replyCheck.replyMessage?.bodyPreview || "",
+            from: replyCheck.replyMessage?.from || lead.email,
+            receivedDateTime: replyCheck.replyMessage?.receivedDateTime,
+            source: "Campaign Runner Check"
+          });
+          if (applyRes.lead) {
+            Object.assign(lead, applyRes.lead);
+          }
+        }
+        if (lead.status !== "Negative Reply") {
+          lead.status = "Replied";
+        }
         await updateLead(lead, token, spreadsheetId);
         logs.push(
-          `Reply check for lead ${lead.name} (${lead.email}): Reply detected! Pulled lead to "Needs Reply" (status: Replied) instead of sending.`
+          `Reply check for lead ${lead.name} (${lead.email}): Reply detected (sentiment: ${lead.replySentiment || "neutral"}). Sequence halted.`
         );
         continue;
       }
@@ -2738,6 +3587,10 @@ async function runDueCampaignsJob(targetCampaignId, token, spreadsheetId, userEm
         }
       }
       if (rawNodeType === "email") {
+        if (lead.status === "Negative Reply") {
+          logs.push(`Safety Refusal: Refusing to email lead ${lead.name} (${lead.email}) - status is "Negative Reply" (do not contact).`);
+          continue;
+        }
         const senderId = startNode?.data?.senderId || currentNode.data?.senderId || currentNode.data?.senderEmail || "sender-primary";
         const sender = senders.find((s) => s.id === senderId || s.email === senderId) || senders.find((s) => s.isPrimary) || senders[0];
         if (sender) {
@@ -2783,6 +3636,35 @@ async function runDueCampaignsJob(targetCampaignId, token, spreadsheetId, userEm
             baseUrl
           });
           lead.threadId = sendResult.threadId;
+          try {
+            const db = await getDb().catch(() => null);
+            if (db) {
+              const cleanBody = (template.bodyHtml || "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+              await db.collection("sent_emails").updateOne(
+                { id: sendResult.messageId },
+                {
+                  $set: {
+                    id: sendResult.messageId,
+                    leadId: lead.leadId,
+                    leadEmail: lead.email.toLowerCase(),
+                    threadId: sendResult.threadId || lead.threadId || "",
+                    from: sender?.name ? `"${sender.name}" <${sendFromAccount}>` : `Outreach Flow <${sendFromAccount}>`,
+                    to: lead.email,
+                    subject: sendResult.subject || template.subject,
+                    bodyHtml: template.bodyHtml,
+                    bodyText: cleanBody,
+                    snippet: cleanBody.substring(0, 160),
+                    date: (/* @__PURE__ */ new Date()).toISOString(),
+                    stage: stageNum,
+                    campaign: lead.campaign || "",
+                    isFromLead: false
+                  }
+                },
+                { upsert: true }
+              );
+            }
+          } catch (_) {
+          }
         } catch (sendErr) {
           logs.push(`Email dispatch to ${lead.name} failed via Graph: ${sendErr.message}. Skipping advance.`);
           continue;
@@ -3322,7 +4204,7 @@ app.post("/api/leads/delete", async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 });
-app.all(["/api/campaigns", "/api/campaigns/list"], async (_req, res) => {
+app.get(["/api/campaigns", "/api/campaigns/list"], async (_req, res) => {
   try {
     const campaigns = await listCampaigns();
     res.json({ success: true, count: campaigns.length, campaigns });
@@ -3331,9 +4213,9 @@ app.all(["/api/campaigns", "/api/campaigns/list"], async (_req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 });
-app.post("/api/campaigns/save", async (req, res) => {
+app.post(["/api/campaigns", "/api/campaigns/save"], async (req, res) => {
   try {
-    const campaign = req.body.campaign;
+    const campaign = req.body.campaign || req.body;
     if (!campaign || !campaign.id) {
       return res.status(400).json({ success: false, error: "Missing campaign or campaign.id" });
     }
@@ -3465,6 +4347,31 @@ app.post("/api/tasks/delete", async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 });
+app.get("/api/tasks/alerts-state", async (_req, res) => {
+  try {
+    const state2 = await loadTaskAlertsState();
+    res.json({ success: true, dismissedAlertIds: state2.dismissedAlertIds });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+app.post("/api/tasks/alerts-state/dismiss", async (req, res) => {
+  try {
+    const alertIds = Array.isArray(req.body.alertIds) ? req.body.alertIds : req.body.alertId ? [req.body.alertId] : [];
+    const updated = await saveDismissedTaskAlerts(alertIds);
+    res.json({ success: true, dismissedAlertIds: updated });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+app.post("/api/tasks/alerts-state/clear", async (_req, res) => {
+  try {
+    await clearTaskAlertsState();
+    res.json({ success: true, dismissedAlertIds: [] });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
 app.get("/api/system/stats", async (_req, res) => {
   try {
     const stats = await getSystemStatsSummary();
@@ -3512,6 +4419,24 @@ app.post("/api/email/send-stage", async (req, res) => {
     if (!lead || !lead.email) {
       return res.status(400).json({ success: false, error: "Lead with email is required" });
     }
+    if (lead.status === "Negative Reply") {
+      return res.status(400).json({
+        success: false,
+        error: `Cannot email lead ${lead.name || lead.email}: Lead status is "Negative Reply" (do not contact).`
+      });
+    }
+    const db = await getDb().catch(() => null);
+    if (db) {
+      const dbLead = await db.collection(COLLECTIONS.LEADS).findOne({
+        $or: [{ leadId: lead.leadId }, { email: lead.email }]
+      });
+      if (dbLead && dbLead.status === "Negative Reply") {
+        return res.status(400).json({
+          success: false,
+          error: `Cannot email lead ${lead.name || lead.email}: Lead status is "Negative Reply" (do not contact).`
+        });
+      }
+    }
     if (!template || !template.subject || !template.bodyHtml) {
       return res.status(400).json({ success: false, error: "Stage template is required" });
     }
@@ -3523,63 +4448,233 @@ app.post("/api/email/send-stage", async (req, res) => {
       senderDisplayName: customSenderName,
       baseUrl
     });
+    const effectiveSender = customSenderName ? `"${customSenderName}" <${lead.senderUsed || "care@giniiris.ai"}>` : lead.senderUsed ? `Outreach Flow <${lead.senderUsed}>` : "You <care@giniiris.ai>";
+    await recordSentEmail({
+      id: result.messageId,
+      leadId: lead.leadId,
+      leadEmail: lead.email,
+      threadId: result.threadId || lead.threadId,
+      from: effectiveSender,
+      to: lead.email,
+      subject: result.subject || template.subject,
+      bodyHtml: template.bodyHtml,
+      stage: stageNum || template.stage || 1,
+      campaign: lead.campaign
+    });
     res.json(result);
   } catch (err) {
     console.error("API /api/email/send-stage error:", err);
     res.status(500).json({ success: false, error: err.message });
   }
 });
+function stripHtmlTags(html) {
+  return (html || "").replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "").replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "").replace(/<[^>]+>/g, " ").replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/\s+/g, " ").trim();
+}
+async function recordSentEmail(entry) {
+  const db = await getDb().catch(() => null);
+  const cleanEmail = (entry.leadEmail || entry.to || "").trim().toLowerCase();
+  const doc = {
+    id: entry.id || `sent-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+    leadId: entry.leadId || "",
+    leadEmail: cleanEmail,
+    threadId: entry.threadId || "",
+    from: entry.from || "You <care@giniiris.ai>",
+    to: entry.to || cleanEmail,
+    subject: entry.subject || "Outreach email",
+    bodyHtml: entry.bodyHtml || "",
+    bodyText: entry.bodyText || stripHtmlTags(entry.bodyHtml),
+    snippet: stripHtmlTags(entry.bodyHtml).substring(0, 160),
+    date: entry.date || (/* @__PURE__ */ new Date()).toISOString(),
+    stage: entry.stage || 1,
+    campaign: entry.campaign || "",
+    isFromLead: false
+  };
+  if (db) {
+    try {
+      await db.collection("sent_emails").updateOne(
+        { id: doc.id },
+        { $set: doc },
+        { upsert: true }
+      );
+    } catch (e) {
+      console.warn("Could not persist sent_email doc to DB:", e);
+    }
+  }
+  return doc;
+}
 var inMemoryInboundReplies = [];
 app.get("/api/email/thread", async (req, res) => {
   try {
-    const threadId = req.query.threadId;
-    const leadEmail = req.query.leadEmail;
-    const result = await getAppConversationThread(threadId, leadEmail);
-    const cleanEmail = (leadEmail || "").trim().toLowerCase();
-    let matchingInbound = inMemoryInboundReplies.filter(
-      (r) => cleanEmail && r.leadEmail === cleanEmail || threadId && r.threadId === threadId
-    );
+    const threadId = req.query.threadId || "";
+    const leadEmail = req.query.leadEmail || "";
+    const cleanEmail = leadEmail.trim().toLowerCase();
+    const graphResult = await getAppConversationThread(threadId, leadEmail).catch(() => ({ messages: [], subject: "" }));
     const db = await getDb().catch(() => null);
+    let sentMessages = [];
+    let leadDoc = null;
     if (db) {
       try {
-        const query = {};
+        const sentQuery = {};
         if (cleanEmail && threadId) {
-          query.$or = [{ leadEmail: cleanEmail }, { threadId }];
+          sentQuery.$or = [{ leadEmail: cleanEmail }, { threadId }];
         } else if (cleanEmail) {
-          query.leadEmail = cleanEmail;
+          sentQuery.leadEmail = cleanEmail;
         } else if (threadId) {
-          query.threadId = threadId;
+          sentQuery.threadId = threadId;
         }
-        const dbReplies = await db.collection("inbound_replies").find(query).toArray();
-        for (const r of dbReplies) {
-          if (!matchingInbound.some((m) => m.id === r.id)) {
-            matchingInbound.push(r);
-          }
+        sentMessages = await db.collection("sent_emails").find(sentQuery).toArray();
+        const leadQuery = {};
+        if (cleanEmail && threadId) {
+          leadQuery.$or = [{ email: cleanEmail }, { threadId }];
+        } else if (cleanEmail) {
+          leadQuery.email = cleanEmail;
+        } else if (threadId) {
+          leadQuery.threadId = threadId;
         }
+        leadDoc = await db.collection(COLLECTIONS.LEADS).findOne(leadQuery);
       } catch (_) {
       }
     }
-    if (matchingInbound.length > 0) {
-      const messages = [...result.messages];
-      for (const inb of matchingInbound) {
-        if (!messages.some((m) => m.id === inb.id)) {
-          messages.push({
-            id: inb.id,
-            threadId: inb.threadId || threadId || "",
-            from: inb.from || cleanEmail,
-            to: "",
-            date: inb.receivedDateTime,
-            subject: inb.subject,
-            snippet: inb.body,
-            bodyHtml: `<p>${inb.body}</p>`,
-            bodyText: inb.body,
-            isFromLead: true
-          });
+    if (sentMessages.length === 0 && leadDoc && (leadDoc.lastEmailSentDate || (leadDoc.currentStage || 0) >= 1)) {
+      try {
+        let campaignDoc = null;
+        if (leadDoc.campaignId) {
+          campaignDoc = await db.collection(COLLECTIONS.CAMPAIGNS).findOne({ id: leadDoc.campaignId }).catch(() => null);
+        } else if (leadDoc.campaign) {
+          campaignDoc = await db.collection(COLLECTIONS.CAMPAIGNS).findOne({ name: leadDoc.campaign }).catch(() => null);
+        }
+        const senderDisplayName = leadDoc.senderUsed || "Care";
+        const senderEmail = leadDoc.senderUsed || "care@giniiris.ai";
+        const maxStage = Math.max(1, leadDoc.currentStage || 1);
+        for (let st = 1; st <= maxStage; st++) {
+          let subject2 = "";
+          let bodyHtml = "";
+          if (campaignDoc) {
+            const nodes = campaignDoc.workflow_graph?.nodes || campaignDoc.nodes || [];
+            const emailNodes = nodes.filter((n) => n.type === "emailNode" || n.data?.nodeType === "email");
+            const emailNode = emailNodes[st - 1];
+            if (emailNode?.data) {
+              subject2 = emailNode.data.customSubject || "";
+              bodyHtml = (emailNode.data.customBody || "").replace(/\n/g, "<br/>");
+            }
+          }
+          if (!subject2 || !bodyHtml) {
+            const defaultTpl = DEFAULT_STAGE_TEMPLATES.find((t) => t.stage === st) || DEFAULT_STAGE_TEMPLATES[0];
+            subject2 = subject2 || defaultTpl.subject;
+            bodyHtml = bodyHtml || defaultTpl.bodyHtml;
+          }
+          const renderedSubject = renderEmailMergeTags(subject2, leadDoc, senderDisplayName);
+          const renderedBody = renderEmailMergeTags(bodyHtml, leadDoc, senderDisplayName);
+          const backfilledDoc = {
+            id: `sent-${leadDoc.leadId}-stage-${st}`,
+            leadId: leadDoc.leadId,
+            leadEmail: cleanEmail || leadDoc.email.toLowerCase(),
+            threadId: threadId || leadDoc.threadId || "",
+            from: `"${senderDisplayName}" <${senderEmail}>`,
+            to: leadDoc.email,
+            date: leadDoc.lastEmailSentDate || leadDoc.createdAt || (/* @__PURE__ */ new Date()).toISOString(),
+            subject: renderedSubject,
+            snippet: stripHtmlTags(renderedBody).substring(0, 160),
+            bodyHtml: renderedBody,
+            bodyText: stripHtmlTags(renderedBody),
+            stage: st,
+            campaign: leadDoc.campaign || "",
+            isFromLead: false
+          };
+          sentMessages.push(backfilledDoc);
+          if (db) {
+            await db.collection("sent_emails").updateOne(
+              { id: backfilledDoc.id },
+              { $set: backfilledDoc },
+              { upsert: true }
+            ).catch(() => {
+            });
+          }
+        }
+      } catch (backfillErr) {
+        console.warn("Error backfilling sent stage emails:", backfillErr);
+      }
+    }
+    let inboundReplies = [];
+    if (db) {
+      try {
+        const inbQuery = {};
+        if (cleanEmail && threadId) {
+          inbQuery.$or = [{ leadEmail: cleanEmail }, { threadId }];
+        } else if (cleanEmail) {
+          inbQuery.leadEmail = cleanEmail;
+        } else if (threadId) {
+          inbQuery.threadId = threadId;
+        }
+        inboundReplies = await db.collection("inbound_replies").find(inbQuery).toArray();
+      } catch (_) {
+      }
+    }
+    for (const inb of inMemoryInboundReplies) {
+      if (cleanEmail && inb.leadEmail === cleanEmail || threadId && inb.threadId === threadId) {
+        if (!inboundReplies.some((m) => m.id === inb.id)) {
+          inboundReplies.push(inb);
         }
       }
-      return res.json({ success: true, messages, subject: result.subject || matchingInbound[0].subject });
     }
-    res.json({ success: true, ...result });
+    const messageMap = /* @__PURE__ */ new Map();
+    for (const msg of graphResult.messages || []) {
+      messageMap.set(msg.id, msg);
+    }
+    for (const sent of sentMessages) {
+      messageMap.set(sent.id, {
+        id: sent.id,
+        threadId: sent.threadId || threadId,
+        from: sent.from || "You <care@giniiris.ai>",
+        to: sent.to || cleanEmail,
+        date: sent.date,
+        subject: sent.subject,
+        snippet: sent.snippet || stripHtmlTags(sent.bodyHtml),
+        bodyHtml: sent.bodyHtml,
+        bodyText: sent.bodyText || stripHtmlTags(sent.bodyHtml),
+        isFromLead: false
+      });
+    }
+    for (const inb of inboundReplies) {
+      if (!inb) continue;
+      const rawBody = inb.body || inb.bodyText || inb.snippet || "";
+      if (rawBody.includes("Incoming reply flag detected on lead record") || rawBody.includes("Status already marked Replied") || rawBody.includes("Status marked Negative Reply")) {
+        continue;
+      }
+      messageMap.set(inb.id, {
+        id: inb.id,
+        threadId: inb.threadId || threadId,
+        from: inb.from || cleanEmail,
+        to: inb.to || "",
+        date: inb.receivedDateTime || inb.date || (/* @__PURE__ */ new Date()).toISOString(),
+        subject: inb.subject || "Re: Outreach Flow follow-up",
+        snippet: inb.snippet || rawBody,
+        bodyHtml: inb.bodyHtml || (rawBody ? `<p>${rawBody.replace(/\n/g, "<br/>")}</p>` : ""),
+        bodyText: rawBody,
+        isFromLead: true
+      });
+    }
+    const allRaw = Array.from(messageMap.values());
+    const seenSignatures = /* @__PURE__ */ new Set();
+    const deduplicatedMessages = [];
+    for (const msg of allRaw) {
+      const isFromLead = Boolean(msg.isFromLead);
+      const cleanBody = (msg.bodyText || msg.snippet || msg.bodyHtml || "").trim().replace(/\s+/g, " ").toLowerCase().substring(0, 100);
+      const dateDay = (msg.date || "").slice(0, 10);
+      const signature = isFromLead ? `inbound_${(msg.from || cleanEmail).toLowerCase().trim()}_${cleanBody}` : `outbound_${msg.stage || 0}_${dateDay}_${(msg.subject || "").trim().toLowerCase()}`;
+      if (cleanBody && seenSignatures.has(signature)) {
+        continue;
+      }
+      seenSignatures.add(signature);
+      deduplicatedMessages.push(msg);
+    }
+    deduplicatedMessages.sort((a, b) => new Date(a.date || 0).getTime() - new Date(b.date || 0).getTime());
+    const subject = graphResult.subject || sentMessages[0]?.subject || inboundReplies[0]?.subject || (threadId ? `Conversation ${threadId}` : "Email Thread");
+    res.json({
+      success: true,
+      messages: deduplicatedMessages,
+      subject
+    });
   } catch (err) {
     console.error("API /api/email/thread error:", err);
     res.status(500).json({ success: false, error: err.message });
@@ -3597,7 +4692,25 @@ app.post("/api/email/check-reply", async (req, res) => {
       lastSentDate
     });
     if (result.hasReplied) {
-      return res.json({ success: true, ...result });
+      const applyResult = await applyLeadReply({
+        leadEmail,
+        threadId,
+        messageId: result.replyMessage?.id,
+        subject: result.replyMessage?.subject || "Re: Outreach Flow follow-up",
+        body: result.replyMessage?.bodyPreview || result.reason || "",
+        from: result.replyMessage?.from || leadEmail,
+        receivedDateTime: result.replyMessage?.receivedDateTime,
+        source: "Microsoft Graph Reply Check"
+      });
+      return res.json({
+        success: true,
+        ...result,
+        applied: applyResult.applied,
+        updatedLead: applyResult.lead,
+        classification: applyResult.classification,
+        pausedCompanyLeadsCount: applyResult.pausedCompanyLeadsCount,
+        pendingConfirmation: applyResult.pendingConfirmation
+      });
     }
     if (process.env.NODE_ENV !== "production") {
       if (!lastSentDate && !threadId) {
@@ -3627,6 +4740,16 @@ app.post("/api/email/check-reply", async (req, res) => {
             return res.json({ success: true, hasReplied: false, reason: "Stored reply is older than outreach dispatch date" });
           }
         }
+        const applyResult = await applyLeadReply({
+          leadEmail: cleanEmail,
+          threadId: reply.threadId || threadId,
+          messageId: reply.id,
+          subject: reply.subject || "Re: Outreach Flow follow-up",
+          body: reply.body || "",
+          from: reply.from || cleanEmail,
+          receivedDateTime: reply.receivedDateTime,
+          source: "Simulated Inbound Reply"
+        });
         return res.json({
           success: true,
           hasReplied: true,
@@ -3637,13 +4760,174 @@ app.post("/api/email/check-reply", async (req, res) => {
             subject: reply.subject,
             receivedDateTime: reply.receivedDateTime,
             bodyPreview: reply.body
-          }
+          },
+          applied: applyResult.applied,
+          updatedLead: applyResult.lead,
+          classification: applyResult.classification,
+          pausedCompanyLeadsCount: applyResult.pausedCompanyLeadsCount,
+          pendingConfirmation: applyResult.pendingConfirmation
         });
       }
     }
     res.json({ success: true, ...result });
   } catch (err) {
     console.error("API /api/email/check-reply error:", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+app.post("/api/leads/override-sentiment", async (req, res) => {
+  try {
+    const { leadId, sentiment, reason } = req.body;
+    if (!leadId || !sentiment) {
+      return res.status(400).json({ success: false, error: "leadId and sentiment are required" });
+    }
+    const result = await manualOverrideSentiment(leadId, sentiment, reason);
+    res.json(result);
+  } catch (err) {
+    console.error("API /api/leads/override-sentiment error:", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+app.post("/api/leads/resume-company", async (req, res) => {
+  try {
+    const replyingLeadId = req.body.replyingLeadId || req.body.leadId;
+    if (!replyingLeadId) {
+      return res.status(400).json({ success: false, error: "replyingLeadId is required" });
+    }
+    const result = await resumeCompanyLeads(replyingLeadId);
+    res.json(result);
+  } catch (err) {
+    console.error("API /api/leads/resume-company error:", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+app.post("/api/leads/confirm-company-pause", async (req, res) => {
+  try {
+    const replyingLeadId = req.body.replyingLeadId || req.body.leadId;
+    if (!replyingLeadId) {
+      return res.status(400).json({ success: false, error: "replyingLeadId is required" });
+    }
+    const result = await confirmCompanyPause(replyingLeadId);
+    res.json(result);
+  } catch (err) {
+    console.error("API /api/leads/confirm-company-pause error:", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+app.get("/api/reply-rules", async (_req, res) => {
+  try {
+    const lists = await getActiveKeywords();
+    res.json({
+      success: true,
+      lists,
+      defaults: DEFAULT_KEYWORD_LISTS
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+app.post("/api/reply-rules", async (req, res) => {
+  try {
+    const { negativePhrases, positivePhrases, deferralPhrases, autoReplyPhrases } = req.body;
+    const sanitizeList = (raw, categoryName) => {
+      if (raw === void 0) return void 0;
+      if (!Array.isArray(raw)) throw new Error(`${categoryName} must be an array of strings`);
+      const sanitized = [];
+      const seen = /* @__PURE__ */ new Set();
+      for (const item of raw) {
+        const str = String(item || "");
+        const v = validatePhrase(str, sanitized);
+        if (!v.valid) {
+          throw new Error(`[${categoryName}] ${v.error}`);
+        }
+        if (!seen.has(v.normalized)) {
+          seen.add(v.normalized);
+          sanitized.push(v.normalized);
+        }
+      }
+      return sanitized;
+    };
+    const updated = await saveActiveKeywords({
+      negativePhrases: sanitizeList(negativePhrases, "Negative phrases"),
+      positivePhrases: sanitizeList(positivePhrases, "Positive phrases"),
+      deferralPhrases: sanitizeList(deferralPhrases, "Deferral phrases"),
+      autoReplyPhrases: sanitizeList(autoReplyPhrases, "Auto-reply phrases")
+    });
+    res.json({
+      success: true,
+      lists: updated,
+      defaults: DEFAULT_KEYWORD_LISTS
+    });
+  } catch (err) {
+    res.status(400).json({ success: false, error: err.message });
+  }
+});
+app.post("/api/reply-rules/reset", async (req, res) => {
+  try {
+    const { category } = req.body;
+    const updated = await resetKeywordsToDefault(category);
+    res.json({
+      success: true,
+      lists: updated,
+      defaults: DEFAULT_KEYWORD_LISTS
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+app.post("/api/reply-rules/test", async (req, res) => {
+  try {
+    const { text, subject } = req.body;
+    const activeKeywords = await getActiveKeywords();
+    const classification = classifyReply(subject || "", text || "", activeKeywords);
+    res.json({
+      success: true,
+      classification
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+app.get("/api/reply-rules/preview-recent", async (_req, res) => {
+  try {
+    const db = await getDb();
+    const activeKeywords = await getActiveKeywords();
+    const leads = await db.collection(COLLECTIONS.LEADS).find({
+      $or: [
+        { status: "Replied" },
+        { status: "Negative Reply" },
+        { hasReplied: true },
+        { lastReplyReceivedDate: { $exists: true, $ne: "" } }
+      ]
+    }).sort({ lastReplyReceivedDate: -1, updatedAt: -1 }).limit(10).toArray();
+    const inboundReplies = await db.collection(COLLECTIONS.INBOUND_REPLIES).find({}).sort({ receivedDateTime: -1, createdAt: -1 }).limit(20).toArray();
+    const previews = leads.map((l) => {
+      const matchingReply = inboundReplies.find(
+        (r) => l.email && r.leadEmail && r.leadEmail.toLowerCase() === l.email.toLowerCase() || l.threadId && r.threadId && r.threadId === l.threadId
+      );
+      const replyBody = matchingReply?.body || l.notes || "";
+      const replySubject = matchingReply?.subject || "";
+      const currentSentiment = l.replySentiment || (l.status === "Negative Reply" ? "negative" : "neutral");
+      const sim = classifyReply(replySubject, replyBody, activeKeywords);
+      return {
+        leadId: l.leadId,
+        name: l.name,
+        email: l.email,
+        company: l.company,
+        replySnippet: replyBody.slice(0, 150),
+        currentSentiment,
+        simulatedSentiment: sim.sentiment,
+        matchedPhrases: sim.matchedPhrases,
+        reason: sim.reason,
+        sentimentChanged: currentSentiment !== sim.sentiment
+      };
+    });
+    res.json({
+      success: true,
+      count: previews.length,
+      previews
+    });
+  } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
 });

@@ -203,7 +203,7 @@ export const CampaignSchedulerModal: React.FC<CampaignSchedulerModalProps> = ({
               ...targetLead,
               status: 'Replied',
               notes: targetLead.notes 
-                ? `${targetLead.notes} | [Reply detected on ${today}]`
+                ? (targetLead.notes.toLowerCase().includes('reply detected') ? targetLead.notes : `${targetLead.notes} | [Reply detected on ${today}]`)
                 : `Reply detected on ${today}`
             };
 
@@ -289,6 +289,13 @@ export const CampaignSchedulerModal: React.FC<CampaignSchedulerModalProps> = ({
           const t = node.type || '';
           const nt = node.data?.nodeType || '';
           return t === 'waitNode' || t === 'wait' || nt === 'wait';
+        };
+
+        const isEmailNode = (node: any) => {
+          if (!node) return false;
+          const t = node.type || '';
+          const nt = node.data?.nodeType || '';
+          return t === 'emailNode' || t === 'email' || nt === 'email';
         };
 
         const isConditionNode = (node: any) => {

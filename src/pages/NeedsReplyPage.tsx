@@ -13,12 +13,14 @@ interface NeedsManualReplyViewProps {
   leads: Lead[];
   onSelectLead: (lead: Lead) => void;
   onUpdateStatus: (lead: Lead, newStatus: Lead['status']) => void;
+  onOverrideSentiment?: (lead: Lead, sentiment: 'positive' | 'negative' | 'neutral') => void;
 }
 
 export const NeedsManualReplyView: React.FC<NeedsManualReplyViewProps> = ({
   leads,
   onSelectLead,
-  onUpdateStatus
+  onUpdateStatus,
+  onOverrideSentiment
 }) => {
   const repliedLeads = leads.filter(l => l.status === 'Replied');
 
@@ -55,7 +57,9 @@ export const NeedsManualReplyView: React.FC<NeedsManualReplyViewProps> = ({
           {repliedLeads.map((lead, idx) => (
             <div
               key={lead.leadId || `replied-lead-${lead.email || ''}-${idx}`}
-              className="bg-white rounded-xl border border-red-200 shadow-2xs hover:shadow-md transition-all p-5 flex flex-col justify-between"
+              className={`rounded-xl border shadow-2xs hover:shadow-md transition-all p-5 flex flex-col justify-between ${
+                lead.replySentiment === 'negative' ? 'bg-red-50/50 border-red-300' : 'bg-white border-red-200'
+              }`}
             >
               <div className="space-y-3">
                 <div className="flex items-start justify-between gap-3">
@@ -98,6 +102,68 @@ export const NeedsManualReplyView: React.FC<NeedsManualReplyViewProps> = ({
                     {lead.notes}
                   </p>
                 )}
+
+                {/* Detected Sentiment & Matched Phrases */}
+                <div className="p-3 bg-slate-50 border border-slate-200 rounded-lg text-xs space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="font-semibold text-slate-600 text-[11px] uppercase tracking-wider">Detected Sentiment:</span>
+                    <span className={`px-2 py-0.5 rounded-full text-[11px] font-bold ${
+                      lead.replySentiment === 'positive'
+                        ? 'bg-emerald-100 text-emerald-800 border border-emerald-200'
+                        : lead.replySentiment === 'negative'
+                        ? 'bg-red-100 text-red-700 border border-red-200'
+                        : 'bg-slate-200 text-slate-800'
+                    }`}>
+                      {lead.replySentiment ? lead.replySentiment.toUpperCase() : 'NEUTRAL'} ({lead.replyClassifiedBy || 'auto'})
+                    </span>
+                  </div>
+
+                  {lead.replyMatchedPhrases && lead.replyMatchedPhrases.length > 0 && (
+                    <div className="text-[11px] text-slate-600">
+                      <span className="text-slate-400 font-medium">Phrases: </span>
+                      <span className="font-mono bg-white px-1.5 py-0.5 rounded border border-slate-200 text-slate-800">
+                        {lead.replyMatchedPhrases.join(', ')}
+                      </span>
+                    </div>
+                  )}
+
+                  {/* Manual Override Buttons */}
+                  <div className="pt-2 border-t border-slate-200 flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => onOverrideSentiment?.(lead, 'positive')}
+                      className={`flex-1 py-1 px-1.5 rounded text-[11px] font-semibold transition-colors border ${
+                        lead.replySentiment === 'positive'
+                          ? 'bg-emerald-600 text-white border-emerald-600 shadow-2xs'
+                          : 'bg-white hover:bg-emerald-50 text-emerald-700 border-emerald-200'
+                      }`}
+                    >
+                      Mark Positive
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => onOverrideSentiment?.(lead, 'negative')}
+                      className={`flex-1 py-1 px-1.5 rounded text-[11px] font-semibold transition-colors border ${
+                        lead.replySentiment === 'negative'
+                          ? 'bg-rose-600 text-white border-rose-600 shadow-2xs'
+                          : 'bg-white hover:bg-rose-50 text-rose-700 border-rose-200'
+                      }`}
+                    >
+                      Mark Negative
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => onOverrideSentiment?.(lead, 'neutral')}
+                      className={`flex-1 py-1 px-1.5 rounded text-[11px] font-semibold transition-colors border ${
+                        lead.replySentiment === 'neutral'
+                          ? 'bg-slate-700 text-white border-slate-700 shadow-2xs'
+                          : 'bg-white hover:bg-slate-100 text-slate-700 border-slate-200'
+                      }`}
+                    >
+                      Mark Neutral
+                    </button>
+                  </div>
+                </div>
               </div>
 
               {/* Action Buttons */}

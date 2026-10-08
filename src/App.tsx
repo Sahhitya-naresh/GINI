@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { Routes, Route, Navigate, useLocation, useNavigate } from 'react-router-dom';
-import { Lead, StageTemplate, AppSettings, SendLogEntry, CampaignWorkflow, ConnectedSender, LeadManualTask, TrackingEvent } from './types';
+import { Lead, StageTemplate, AppSettings, SendLogEntry, CampaignWorkflow, ConnectedSender, LeadManualTask, TrackingEvent, TaskAlertItem } from './types';
 import { 
   getOutlookProfile, 
   checkThreadForLeadReply, 
@@ -31,7 +31,12 @@ import {
   batchCreateLeads,
   fetchLeadsFromBackend,
   fetchSendersFromBackend,
-  saveSendersToBackend
+  saveSendersToBackend,
+  overrideLeadSentiment,
+  resumeCompanyLeads,
+  confirmCompanyPause,
+  getTaskAlertsState,
+  dismissTaskAlertsOnBackend
 } from './services/leadBackendService';
 import { addBusinessDays, getTodayDateString, isLeadDueForNextSend } from './utils/dateUtils';
 
@@ -254,6 +259,20 @@ const saveDismissedReplyAlerts = (keys: Set<string>) => {
   } catch (_) {}
 };
 
+const loadDismissedTaskAlerts = (): Set<string> => {
+  try {
+    const raw = localStorage.getItem('gini_dismissed_task_alerts');
+    if (raw) return new Set(JSON.parse(raw));
+  } catch (_) {}
+  return new Set();
+};
+
+const saveDismissedTaskAlertsToStorage = (keys: Set<string>) => {
+  try {
+    localStorage.setItem('gini_dismissed_task_alerts', JSON.stringify([...keys]));
+  } catch (_) {}
+};
+
 export default function App() {
   // Service account mailbox state
   const [userEmail, setUserEmail] = useState<string>('');
@@ -272,6 +291,14 @@ export default function App() {
   useEffect(() => {
     leadsRef.current = leads;
   }, [leads]);
+
+  // Toast / Feedback state
+  const [toastMessage, setToastMessage] = useState<{ text: string; type: 'success' | 'error' | 'info' } | null>(null);
+
+  const showToast = useCallback((text: string, type: 'success' | 'error' | 'info' = 'success') => {
+    setToastMessage({ text, type });
+    setTimeout(() => setToastMessage(null), 4000);
+  }, []);
 
   // Navigation & Routing
   const location = useLocation();
@@ -312,6 +339,29 @@ export default function App() {
   const [isBannerDismissed, setIsBannerDismissed] = useState(false);
   const [replyAlertLeads, setReplyAlertLeads] = useState<Lead[]>([]);
   const dismissedReplyAlertsRef = useRef<Set<string>>(loadDismissedReplyAlerts());
+
+  // Task Alerts dismissed state (persisted locally and synced with MongoDB)
+  const [dismissedTaskAlerts, setDismissedTaskAlerts] = useState<Set<string>>(() => loadDismissedTaskAlerts());
+  const dismissedTaskAlertsRef = useRef<Set<string>>(dismissedTaskAlerts);
+  useEffect(() => {
+    dismissedTaskAlertsRef.current = dismissedTaskAlerts;
+  }, [dismissedTaskAlerts]);
+
+  // Load backend task alerts state on initial startup
+  useEffect(() => {
+    getTaskAlertsState().then(backendDismissed => {
+      if (backendDismissed && backendDismissed.length > 0) {
+        setDismissedTaskAlerts(prev => {
+          const merged = new Set([...prev, ...backendDismissed]);
+          saveDismissedTaskAlertsToStorage(merged);
+          return merged;
+        });
+      }
+    });
+  }, []);
+
+  const knownTaskIdsRef = useRef<Set<string>>(new Set());
+  const hasInitializedTasksRef = useRef<boolean>(false);
 
   // Activity Log State for Notification Hub
   const [actionLogs, setActionLogs] = useState<AppActionLog[]>(() => {
@@ -407,6 +457,126 @@ export default function App() {
   const [leadNeedingCampaignSend, setLeadNeedingCampaignSend] = useState<Lead | null>(null);
   const [selectedCampaignForSend, setSelectedCampaignForSend] = useState<string>('');
 
+  // Process incoming tasks from backend / runner, detecting new tasks created while app is open
+  const processIncomingTasks = useCallback((incoming: LeadManualTask[]) => {
+    if (!hasInitializedTasksRef.current) {
+      knownTaskIdsRef.current = new Set(incoming.map(t => t.id));
+      hasInitializedTasksRef.current = true;
+      setManualTasks(incoming);
+      saveManualTasks(incoming);
+      return;
+    }
+
+    const currentKnown = knownTaskIdsRef.current;
+    const newlyCreatedTasks: LeadManualTask[] = [];
+
+    for (const t of incoming) {
+      if (!currentKnown.has(t.id)) {
+        currentKnown.add(t.id);
+        newlyCreatedTasks.push(t);
+      }
+    }
+
+    if (newlyCreatedTasks.length > 0) {
+      for (const t of newlyCreatedTasks) {
+        showToast(`New Task: "${t.title}" for ${t.leadName}`, 'info');
+        logAppAction(
+          'general',
+          'New Manual Task',
+          `Task "${t.title}" created for ${t.leadName}${t.company ? ` (${t.company})` : ''}. Priority: ${t.priority || 'medium'}.`
+        );
+      }
+    }
+
+    setManualTasks(incoming);
+    saveManualTasks(incoming);
+  }, [logAppAction, showToast]);
+
+  // Dedicated tasks sync from backend
+  const syncTasksFromBackend = useCallback(async () => {
+    try {
+      const res = await fetch('/api/tasks');
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data.tasks)) {
+          processIncomingTasks(data.tasks);
+        }
+      }
+    } catch (err) {
+      console.warn('Backend tasks background sync error:', err);
+    }
+  }, [processIncomingTasks]);
+
+  // Compute active task alerts displayed in Activity Hub Alerts tab
+  const activeTaskAlerts = useMemo<TaskAlertItem[]>(() => {
+    const todayStr = getTodayDateString();
+    const alerts: TaskAlertItem[] = [];
+
+    for (const t of manualTasks) {
+      // Rule 3: A completed task's alert disappears automatically!
+      if (t.isCompleted) continue;
+
+      // Determine task alert state: overdue, due_today, or new
+      let state: 'new' | 'due_today' | 'overdue' = 'new';
+      if (t.dueDate) {
+        if (t.dueDate < todayStr) {
+          state = 'overdue';
+        } else if (t.dueDate === todayStr) {
+          state = 'due_today';
+        } else {
+          state = 'new';
+        }
+      }
+
+      const alertId = `${t.id}:${state}`;
+      if (dismissedTaskAlerts.has(alertId)) {
+        continue;
+      }
+
+      alerts.push({
+        id: alertId,
+        taskId: t.id,
+        state,
+        title: t.title || 'Outreach Manual Task',
+        leadName: t.leadName || 'Prospect',
+        leadCompany: t.company || (t as any).leadCompany || '',
+        leadEmail: t.leadEmail || '',
+        leadId: t.leadId,
+        priority: t.priority || 'medium',
+        dueDate: t.dueDate || todayStr,
+        createdAt: t.createdAt || todayStr
+      });
+    }
+
+    return alerts;
+  }, [manualTasks, dismissedTaskAlerts]);
+
+  const handleDismissTaskAlert = useCallback((alertId: string) => {
+    setDismissedTaskAlerts(prev => {
+      const next = new Set<string>(prev);
+      next.add(alertId);
+      saveDismissedTaskAlertsToStorage(next);
+      return next;
+    });
+    dismissTaskAlertsOnBackend([alertId]).catch(() => {});
+  }, []);
+
+  const handleClearAllTaskAlerts = useCallback(() => {
+    if (activeTaskAlerts.length === 0) return;
+    const ids = activeTaskAlerts.map(a => a.id);
+    setDismissedTaskAlerts(prev => {
+      const next = new Set<string>([...prev, ...ids]);
+      saveDismissedTaskAlertsToStorage(next);
+      return next;
+    });
+    dismissTaskAlertsOnBackend(ids).catch(() => {});
+  }, [activeTaskAlerts]);
+
+  const handleClearAllAlerts = useCallback(() => {
+    handleDismissReplyAlerts(replyAlertLeads);
+    handleClearAllTaskAlerts();
+  }, [handleDismissReplyAlerts, replyAlertLeads, handleClearAllTaskAlerts]);
+
   // Automatically load connected senders from backend on startup
   useEffect(() => {
     let isCancelled = false;
@@ -434,8 +604,7 @@ export default function App() {
         if (res.ok) {
           const data = await res.json();
           if (!isCancelled && Array.isArray(data.tasks)) {
-            setManualTasks(data.tasks);
-            saveManualTasks(data.tasks);
+            processIncomingTasks(data.tasks);
           }
         }
       } catch (err) {
@@ -444,7 +613,7 @@ export default function App() {
     }
     loadTasks();
     return () => { isCancelled = true; };
-  }, []);
+  }, [processIncomingTasks]);
 
   // Sync authenticated user email with primary sender without deleting other accounts
   useEffect(() => {
@@ -850,6 +1019,18 @@ export default function App() {
   };
 
   const handleTasksCreated = async (newTasks: LeadManualTask[]) => {
+    for (const t of newTasks) {
+      if (!knownTaskIdsRef.current.has(t.id)) {
+        knownTaskIdsRef.current.add(t.id);
+        showToast(`New Task: "${t.title}" for ${t.leadName}`, 'info');
+        logAppAction(
+          'general',
+          'New Manual Task',
+          `Task "${t.title}" created for ${t.leadName}${t.company ? ` (${t.company})` : ''}. Priority: ${t.priority || 'medium'}.`
+        );
+      }
+    }
+
     setManualTasks(prev => {
       const existingIds = new Set(prev.map(t => t.id));
       const fresh = newTasks.filter(t => !existingIds.has(t.id));
@@ -869,9 +1050,6 @@ export default function App() {
     }
   };
 
-  // Toast / Feedback
-  const [toastMessage, setToastMessage] = useState<{ text: string; type: 'success' | 'error' | 'info' } | null>(null);
-
   // Confirmation Modal state for single send
   const [confirmDialog, setConfirmDialog] = useState<{
     isOpen: boolean;
@@ -885,11 +1063,6 @@ export default function App() {
     message: '',
     onConfirm: () => {}
   });
-
-  const showToast = (text: string, type: 'success' | 'error' | 'info' = 'success') => {
-    setToastMessage({ text, type });
-    setTimeout(() => setToastMessage(null), 4000);
-  };
 
   // Sync tracking stats from server.ts and merge with leads
   const syncTrackingMetrics = useCallback(async () => {
@@ -1015,8 +1188,7 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
         if (taskRes.ok) {
           const taskData = await taskRes.json();
           if (Array.isArray(taskData.tasks)) {
-            setManualTasks(taskData.tasks);
-            saveManualTasks(taskData.tasks);
+            processIncomingTasks(taskData.tasks);
           }
         }
       } catch (tErr) {
@@ -1028,7 +1200,7 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
     } finally {
       setIsSyncing(false);
     }
-  }, []);
+  }, [processIncomingTasks, showToast]);
 
   // Initial load from MongoDB backend
   useEffect(() => {
@@ -1258,8 +1430,18 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
           });
         }
 
-        logAppAction('reply_check', 'Inbound Reply Received', `Prospect reply detected from ${targetLead.name} (${targetLead.email})! Sequence halted.`);
-        showToast(`Reply detected from ${targetLead.name}! Sequence stopped.`, 'success');
+        if (res.pausedCompanyLeadsCount && res.pausedCompanyLeadsCount > 0) {
+          // Refresh all leads from DB so paused colleagues immediately reflect in state
+          syncData({ silent: true });
+          logAppAction('reply_check', 'Positive Reply Detected', `Positive reply from ${targetLead.name} (${targetLead.company || ''})! Automatically paused ${res.pausedCompanyLeadsCount} other active colleague(s).`);
+          showToast(`Positive reply from ${targetLead.name}! Paused ${res.pausedCompanyLeadsCount} other lead(s) at ${targetLead.company}.`, 'success');
+        } else if (savedLead.replySentiment === 'negative') {
+          logAppAction('reply_check', 'Negative Reply Detected', `Negative reply from ${targetLead.name} (${targetLead.email}). Marked "Negative Reply" (do not contact).`);
+          showToast(`Negative reply from ${targetLead.name}. Status marked "Negative Reply" (do not contact).`, 'info');
+        } else {
+          logAppAction('reply_check', 'Inbound Reply Received', `Prospect reply detected from ${targetLead.name} (${targetLead.email})! Sequence halted.`);
+          showToast(`Reply detected from ${targetLead.name}! Sequence stopped.`, 'success');
+        }
         return res;
       } else {
         if (options?.isManual && !options?.silent) {
@@ -1274,7 +1456,60 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
       }
       return { hasReplied: false };
     }
-  }, [userEmail, spreadsheetId]);
+  }, [userEmail, spreadsheetId, syncData]);
+
+  // Manual sentiment override handler
+  const handleOverrideSentiment = async (lead: Lead, sentiment: 'positive' | 'negative' | 'neutral') => {
+    try {
+      const res = await overrideLeadSentiment(lead.leadId, sentiment);
+      if (res.success) {
+        await syncData({ silent: true });
+        if (res.lead) {
+          setSelectedLead(res.lead);
+        }
+        const pausedMsg = res.pausedCount ? ` Paused ${res.pausedCount} other company lead(s).` : '';
+        const resumedMsg = res.resumedCount ? ` Resumed ${res.resumedCount} other company lead(s).` : '';
+        showToast(`Marked ${lead.name} as ${sentiment}.${pausedMsg}${resumedMsg}`, 'success');
+        logAppAction('reply_check', `Sentiment Override: ${sentiment}`, `Manually set ${lead.name} to ${sentiment}.${pausedMsg}${resumedMsg}`);
+      } else {
+        showToast('Failed to update sentiment', 'error');
+      }
+    } catch (err: any) {
+      showToast(`Error updating sentiment: ${err.message}`, 'error');
+    }
+  };
+
+  // Resume company leads handler
+  const handleResumeCompanyLeads = async (lead: Lead) => {
+    try {
+      const res = await resumeCompanyLeads(lead.leadId);
+      if (res.success) {
+        await syncData({ silent: true });
+        showToast(`Resumed ${res.resumedCount || 0} company lead(s) for ${lead.company}.`, 'success');
+        logAppAction('reply_check', 'Company Leads Resumed', `Resumed ${res.resumedCount || 0} company leads for ${lead.company}.`);
+      } else {
+        showToast('Failed to resume company leads', 'error');
+      }
+    } catch (err: any) {
+      showToast(`Error resuming company leads: ${err.message}`, 'error');
+    }
+  };
+
+  // Confirm company pause handler ("Ask me first" mode)
+  const handleConfirmCompanyPause = async (lead: Lead) => {
+    try {
+      const res = await confirmCompanyPause(lead.leadId);
+      if (res.success) {
+        await syncData({ silent: true });
+        showToast(`Confirmed! Paused ${res.pausedCount || 0} active lead(s) at ${lead.company}.`, 'success');
+        logAppAction('reply_check', 'Company Pause Confirmed', `Paused ${res.pausedCount || 0} leads at ${lead.company} after positive reply from ${lead.name}.`);
+      } else {
+        showToast('Failed to pause company leads', 'error');
+      }
+    } catch (err: any) {
+      showToast(`Error confirming company pause: ${err.message}`, 'error');
+    }
+  };
 
   // Check single lead for replies (manual button on lead detail modal)
   const handleCheckSingleReply = async (lead: Lead) => {
@@ -1285,7 +1520,14 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
 
   // Bulk check replies on all leads with email threads (manual button on table)
   const handleCheckAllReplies = async () => {
-    const leadsWithThreads = leads.filter(l => (l.threadId || l.email) && l.status !== 'Replied');
+    const leadsWithThreads = leads.filter(
+      l => (l.threadId || l.email) &&
+        l.status !== 'Replied' &&
+        l.status !== 'Negative Reply' &&
+        l.status !== 'Broke Up' &&
+        l.status !== 'Completed' &&
+        !l.hasReplied
+    );
     if (leadsWithThreads.length === 0) {
       showToast('No leads with active email threads to check.', 'info');
       setLastCheckedTime(new Date());
@@ -1329,7 +1571,12 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
     isBackgroundCheckingRef.current = true;
     try {
       const candidatesToCheck = leadsRef.current.filter(
-        l => (l.threadId || l.email) && l.status !== 'Replied'
+        l => (l.threadId || l.email) &&
+          l.status !== 'Replied' &&
+          l.status !== 'Negative Reply' &&
+          l.status !== 'Broke Up' &&
+          l.status !== 'Completed' &&
+          !l.hasReplied
       );
 
       const newlyReplied: Lead[] = [];
@@ -1364,9 +1611,13 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
   useEffect(() => {
     // Run once on initial app load
     runBackgroundReplyCheck();
+    syncTasksFromBackend();
 
     // Run every 30 seconds for quick reply detection
     const intervalId = setInterval(runBackgroundReplyCheck, 30 * 1000);
+
+    // Run every 3 minutes for background manual task detection
+    const taskIntervalId = setInterval(syncTasksFromBackend, 3 * 60 * 1000);
 
     // Periodically run due campaigns in the background so elapsed step timers execute automatically
     const runBackgroundDueWorkflows = async () => {
@@ -1392,6 +1643,7 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
       if (!document.hidden) {
         runBackgroundReplyCheck();
         runBackgroundDueWorkflows();
+        syncTasksFromBackend();
       }
     };
     document.addEventListener('visibilitychange', handleVisibilityChange);
@@ -1399,10 +1651,11 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
     // Clean up intervals and listener on unmount
     return () => {
       clearInterval(intervalId);
+      clearInterval(taskIntervalId);
       clearInterval(dueWorkflowIntervalId);
       document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
-  }, [runBackgroundReplyCheck, syncData, userEmail]);
+  }, [runBackgroundReplyCheck, syncData, syncTasksFromBackend, userEmail]);
 
   // Send single stage email (with confirmation dialog and campaign check)
   const handleInitiateSendNextStage = (lead: Lead) => {
@@ -1437,6 +1690,10 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
   };
 
   const startSendConfirmation = (lead: Lead) => {
+    if (lead.status === 'Negative Reply') {
+      showToast(`Cannot send email to ${lead.name}: Status is "Negative Reply" (do not contact).`, 'error');
+      return;
+    }
     if (lead.status === 'Completed') {
       showToast(`Campaign sequence is already completed for ${lead.name}.`, 'info');
       return;
@@ -1524,6 +1781,12 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
 
   const executeSendStageEmail = async (lead: Lead, template: StageTemplate, stageNum: number, customSenderName?: string) => {
     try {
+      // Hard safety check: refuse to email Negative Reply leads
+      if (lead.status === 'Negative Reply') {
+        showToast(`Cannot email ${lead.name}: Status is "Negative Reply" (do not contact).`, 'error');
+        return;
+      }
+
       showToast(`Sending Stage ${stageNum} to ${lead.name}...`, 'info');
 
       // 1. Reply check safety
@@ -1537,7 +1800,7 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
         );
 
         if (replyCheck.hasReplied) {
-          const updated: Lead = {
+          const updated: Lead = (replyCheck as any).updatedLead || {
             ...lead,
             status: 'Replied',
             notes: lead.notes ? `${lead.notes} | [Reply detected]` : 'Reply detected'
@@ -1737,6 +2000,7 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
                 leads={leads}
                 onSelectLead={handleSelectLead}
                 onUpdateStatus={handleUpdateLeadStatus}
+                onOverrideSentiment={handleOverrideSentiment}
               />
             } 
           />
@@ -1819,6 +2083,9 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
         onUpdateLead={handleUpdateLead}
         onDeleteLead={handleDeleteLead}
         onCheckReply={handleCheckSingleReply}
+        onOverrideSentiment={handleOverrideSentiment}
+        onResumeCompanyLeads={handleResumeCompanyLeads}
+        onConfirmCompanyPause={handleConfirmCompanyPause}
         campaigns={workflows}
       />
 
@@ -1945,11 +2212,16 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
       {/* Floating Bottom-Right Activity & Notification Hub (Alerts, Actions, Notes) */}
       <NotificationHub
         replyAlerts={replyAlertLeads}
+        taskAlerts={activeTaskAlerts}
+        leads={leads}
         onDismissReplyAlert={(leadId) => {
           const target = leads.find(l => l.leadId === leadId) || replyAlertLeads.find(l => l.leadId === leadId);
           if (target) handleDismissReplyAlerts([target]);
         }}
+        onDismissTaskAlert={handleDismissTaskAlert}
         onClearAllReplyAlerts={() => handleDismissReplyAlerts(replyAlertLeads)}
+        onClearAllTaskAlerts={handleClearAllTaskAlerts}
+        onClearAllAlerts={handleClearAllAlerts}
         onOpenLead={(targetLead) => {
           setSelectedLead(targetLead);
           setIsLeadDetailOpen(true);

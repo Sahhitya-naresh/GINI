@@ -17,10 +17,28 @@ import {
   Key,
   Send,
   RefreshCw,
-  AlertCircle
+  AlertCircle,
+  Building2,
+  Tag,
+  Edit2,
+  MessageSquare,
+  AlertTriangle,
+  ChevronDown,
+  ChevronUp,
+  Sparkles
 } from 'lucide-react';
 import { AppSettings, StageTemplate, ConnectedSender } from '../types';
 import { BrandLogo } from './BrandLogo';
+import {
+  getReplyKeywordRules,
+  saveReplyKeywordRules,
+  resetReplyKeywordRules,
+  testReplyClassification,
+  previewRecentReplyClassifications,
+  KeywordListsData,
+  ReplyPreviewItem,
+  ReplyClassificationTestResult
+} from '../services/leadBackendService';
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -70,11 +88,223 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     }
   };
 
+  // -------------------------------------------------------------------------
+  // Reply Classifier Keywords State & Handlers
+  // -------------------------------------------------------------------------
+  const [activeKeywordTab, setActiveKeywordTab] = useState<'negativePhrases' | 'positivePhrases' | 'deferralPhrases' | 'autoReplyPhrases'>('negativePhrases');
+  const [keywordLists, setKeywordLists] = useState<KeywordListsData>({
+    negativePhrases: [],
+    positivePhrases: [],
+    deferralPhrases: [],
+    autoReplyPhrases: []
+  });
+  const [defaultKeywordLists, setDefaultKeywordLists] = useState<KeywordListsData>({
+    negativePhrases: [],
+    positivePhrases: [],
+    deferralPhrases: [],
+    autoReplyPhrases: []
+  });
+  const [isSavingKeywords, setIsSavingKeywords] = useState(false);
+  const [keywordToastMsg, setKeywordToastMsg] = useState<string | null>(null);
+  const [newPhraseInput, setNewPhraseInput] = useState('');
+  const [phraseValidationMsg, setPhraseValidationMsg] = useState<{ type: 'error' | 'warning'; text: string; phraseToAdd?: string } | null>(null);
+  const [editingPhraseIndex, setEditingPhraseIndex] = useState<number | null>(null);
+  const [editingPhraseText, setEditingPhraseText] = useState('');
+
+  // Try-It Box ("Test a Reply")
+  const [testReplyText, setTestReplyText] = useState('');
+  const [isTestingReply, setIsTestingReply] = useState(false);
+  const [tryItResult, setTryItResult] = useState<ReplyClassificationTestResult | null>(null);
+
+  // Preview Last 10 Replies
+  const [previewReplies, setPreviewReplies] = useState<ReplyPreviewItem[]>([]);
+  const [isLoadingPreviews, setIsLoadingPreviews] = useState(false);
+  const [showPreviewsTable, setShowPreviewsTable] = useState(false);
+
+  const fetchKeywordRules = async () => {
+    try {
+      const data = await getReplyKeywordRules();
+      if (data && data.success) {
+        setKeywordLists(data.lists);
+        setDefaultKeywordLists(data.defaults);
+      }
+    } catch (err) {
+      console.warn('Error loading reply rules:', err);
+    }
+  };
+
   useEffect(() => {
     if (isOpen) {
       fetchGraphStatus();
+      fetchKeywordRules();
     }
   }, [isOpen]);
+
+  const showKeywordToast = (msg: string) => {
+    setKeywordToastMsg(msg);
+    setTimeout(() => setKeywordToastMsg(null), 3000);
+  };
+
+  const handleAddPhrase = async (phraseToAdd?: string, skipWarning = false) => {
+    const raw = phraseToAdd !== undefined ? phraseToAdd : newPhraseInput;
+    const normalized = raw.trim().toLowerCase().replace(/\s+/g, ' ');
+
+    if (!normalized) {
+      setPhraseValidationMsg({ type: 'error', text: 'Phrase cannot be empty' });
+      return;
+    }
+
+    if (normalized.length < 2 || normalized.length > 80) {
+      setPhraseValidationMsg({ type: 'error', text: 'Phrase length must be between 2 and 80 characters' });
+      return;
+    }
+
+    const currentList = keywordLists[activeKeywordTab] || [];
+    const isDup = currentList.some(p => p.toLowerCase().trim() === normalized);
+    if (isDup) {
+      setPhraseValidationMsg({ type: 'error', text: `Phrase "${normalized}" already exists in this list (duplicate)` });
+      return;
+    }
+
+    const COMMON_WORDS = new Set(['no', 'stop', 'yes', 'not', 'ok', 'okay', 'thanks', 'thank', 'sure', 'hi', 'hello', 'bye', 'please', 'help']);
+    if (!skipWarning && normalized.split(' ').length === 1 && COMMON_WORDS.has(normalized)) {
+      setPhraseValidationMsg({
+        type: 'warning',
+        text: `"${normalized}" is a single very common word. It may match unintended replies (e.g. in casual phrasing). Are you sure you want to add it?`,
+        phraseToAdd: normalized
+      });
+      return;
+    }
+
+    const updatedList = [...currentList, normalized];
+    const updatedLists: KeywordListsData = { ...keywordLists, [activeKeywordTab]: updatedList };
+    setKeywordLists(updatedLists);
+    setNewPhraseInput('');
+    setPhraseValidationMsg(null);
+
+    try {
+      setIsSavingKeywords(true);
+      await saveReplyKeywordRules({ [activeKeywordTab]: updatedList });
+      showKeywordToast(`Added "${normalized}"`);
+    } catch (err: any) {
+      setPhraseValidationMsg({ type: 'error', text: err.message || 'Failed to save phrase' });
+    } finally {
+      setIsSavingKeywords(false);
+    }
+  };
+
+  const handleRemovePhrase = async (phraseToRemove: string) => {
+    const currentList = keywordLists[activeKeywordTab] || [];
+    const updatedList = currentList.filter(p => p.toLowerCase().trim() !== phraseToRemove.toLowerCase().trim());
+    const updatedLists: KeywordListsData = { ...keywordLists, [activeKeywordTab]: updatedList };
+    setKeywordLists(updatedLists);
+
+    try {
+      setIsSavingKeywords(true);
+      await saveReplyKeywordRules({ [activeKeywordTab]: updatedList });
+      showKeywordToast(`Removed "${phraseToRemove}"`);
+    } catch (err: any) {
+      console.warn('Failed to remove phrase:', err);
+    } finally {
+      setIsSavingKeywords(false);
+    }
+  };
+
+  const handleSaveEditedPhrase = async () => {
+    if (editingPhraseIndex === null) return;
+    const currentList = keywordLists[activeKeywordTab] || [];
+    const normalized = editingPhraseText.trim().toLowerCase().replace(/\s+/g, ' ');
+
+    if (!normalized) {
+      alert('Phrase cannot be empty');
+      return;
+    }
+    if (normalized.length < 2 || normalized.length > 80) {
+      alert('Phrase length must be between 2 and 80 characters');
+      return;
+    }
+    const isDup = currentList.some((p, i) => i !== editingPhraseIndex && p.toLowerCase().trim() === normalized);
+    if (isDup) {
+      alert(`Phrase "${normalized}" already exists in this list (duplicate)`);
+      return;
+    }
+
+    const updatedList = [...currentList];
+    updatedList[editingPhraseIndex] = normalized;
+    const updatedLists: KeywordListsData = { ...keywordLists, [activeKeywordTab]: updatedList };
+    setKeywordLists(updatedLists);
+    setEditingPhraseIndex(null);
+    setEditingPhraseText('');
+
+    try {
+      setIsSavingKeywords(true);
+      await saveReplyKeywordRules({ [activeKeywordTab]: updatedList });
+      showKeywordToast(`Updated phrase to "${normalized}"`);
+    } catch (err: any) {
+      alert(err.message || 'Failed to update phrase');
+    } finally {
+      setIsSavingKeywords(false);
+    }
+  };
+
+  const handleResetCategory = async () => {
+    const categoryLabels: Record<string, string> = {
+      negativePhrases: 'Negative Phrases',
+      positivePhrases: 'Positive Phrases',
+      deferralPhrases: 'Deferral Phrases',
+      autoReplyPhrases: 'Auto-Reply Phrases'
+    };
+    const label = categoryLabels[activeKeywordTab] || 'phrases';
+    if (!window.confirm(`Are you sure you want to reset ${label} to built-in defaults? Any custom additions will be removed.`)) {
+      return;
+    }
+
+    try {
+      setIsSavingKeywords(true);
+      const res = await resetReplyKeywordRules(activeKeywordTab);
+      if (res && res.success) {
+        setKeywordLists(res.lists);
+        showKeywordToast(`Reset ${label} to defaults`);
+      }
+    } catch (err: any) {
+      alert(err.message || 'Failed to reset phrases');
+    } finally {
+      setIsSavingKeywords(false);
+    }
+  };
+
+  const handleRunTryItTest = async () => {
+    if (!testReplyText.trim()) return;
+    setIsTestingReply(true);
+    setTryItResult(null);
+    try {
+      const res = await testReplyClassification(testReplyText);
+      if (res && res.success && res.classification) {
+        setTryItResult(res.classification);
+      } else {
+        alert(res.error || 'Failed to test reply');
+      }
+    } catch (err: any) {
+      alert(err.message || 'Failed to test reply');
+    } finally {
+      setIsTestingReply(false);
+    }
+  };
+
+  const handleLoadRecentPreviews = async () => {
+    setIsLoadingPreviews(true);
+    try {
+      const res = await previewRecentReplyClassifications();
+      if (res && res.success) {
+        setPreviewReplies(res.previews || []);
+        setShowPreviewsTable(true);
+      }
+    } catch (err) {
+      console.warn('Failed to preview recent replies:', err);
+    } finally {
+      setIsLoadingPreviews(false);
+    }
+  };
 
   const handleSendTestEmail = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -574,6 +804,397 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   </div>
                 </div>
               ))}
+            </div>
+          </div>
+
+          {/* Positive Reply Company Policy */}
+          <div className="space-y-3 p-4 bg-emerald-50/40 rounded-xl border border-emerald-200/80">
+            <div className="flex items-center justify-between">
+              <h3 className="text-xs font-bold uppercase tracking-wider text-emerald-900 flex items-center gap-1.5">
+                <Building2 className="w-3.5 h-3.5 text-emerald-600" />
+                <span>When a positive reply is detected</span>
+              </h3>
+            </div>
+            <p className="text-xs text-slate-600">
+              Control what happens to other active leads at the same company when a prospect responds with positive interest:
+            </p>
+            <div className="space-y-2 pt-1 text-xs">
+              <label className="flex items-start gap-2.5 p-2.5 bg-white rounded-lg border border-slate-200 cursor-pointer hover:border-emerald-300 transition-colors">
+                <input
+                  type="radio"
+                  name="positiveReplyAction"
+                  value="pause_automatically"
+                  checked={(formData.positiveReplyAction || 'pause_automatically') === 'pause_automatically'}
+                  onChange={() => setFormData(f => ({ ...f, positiveReplyAction: 'pause_automatically' }))}
+                  className="mt-0.5 text-emerald-600 focus:ring-emerald-500 cursor-pointer"
+                />
+                <div>
+                  <span className="font-semibold text-slate-800 block">Pause the company automatically (Default)</span>
+                  <span className="text-[11px] text-slate-500">
+                    Immediately sets other active leads at that company to Paused so they aren't pitched twice.
+                  </span>
+                </div>
+              </label>
+
+              <label className="flex items-start gap-2.5 p-2.5 bg-white rounded-lg border border-slate-200 cursor-pointer hover:border-emerald-300 transition-colors">
+                <input
+                  type="radio"
+                  name="positiveReplyAction"
+                  value="ask_first"
+                  checked={formData.positiveReplyAction === 'ask_first'}
+                  onChange={() => setFormData(f => ({ ...f, positiveReplyAction: 'ask_first' }))}
+                  className="mt-0.5 text-emerald-600 focus:ring-emerald-500 cursor-pointer"
+                />
+                <div>
+                  <span className="font-semibold text-slate-800 block">Ask me first</span>
+                  <span className="text-[11px] text-slate-500">
+                    Creates a notification prompt with Confirm / Dismiss buttons before pausing colleagues.
+                  </span>
+                </div>
+              </label>
+            </div>
+          </div>
+
+          {/* Reply Keywords & Classifier Rules */}
+          <div className="space-y-4 p-4 bg-slate-50 rounded-xl border border-slate-200">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+              <div>
+                <h3 className="text-xs font-bold uppercase tracking-wider text-slate-800 flex items-center gap-1.5">
+                  <Tag className="w-3.5 h-3.5 text-purple-600" />
+                  <span>Reply Classifier Keywords & Rules</span>
+                </h3>
+                <p className="text-[11px] text-slate-500 mt-0.5">
+                  Add, edit, or remove phrases used by the local classifier. Stored in MongoDB and cached in-memory for instant lookups.
+                </p>
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                {keywordToastMsg && (
+                  <span className="text-[11px] font-semibold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200 animate-fade-in">
+                    {keywordToastMsg}
+                  </span>
+                )}
+                <button
+                  type="button"
+                  onClick={handleResetCategory}
+                  disabled={isSavingKeywords}
+                  className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-semibold text-slate-600 hover:text-slate-900 bg-white hover:bg-slate-100 border border-slate-200 rounded-lg transition-colors"
+                  title="Reset active category to built-in defaults"
+                >
+                  <RotateCcw className="w-3 h-3 text-slate-500" />
+                  <span>Reset Category</span>
+                </button>
+              </div>
+            </div>
+
+            {/* Keyword Category Tabs */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 p-1 bg-slate-200/60 rounded-lg">
+              {[
+                { id: 'negativePhrases', label: 'Negative', count: keywordLists.negativePhrases.length, color: 'text-rose-700' },
+                { id: 'positivePhrases', label: 'Positive', count: keywordLists.positivePhrases.length, color: 'text-emerald-700' },
+                { id: 'deferralPhrases', label: 'Deferral', count: keywordLists.deferralPhrases.length, color: 'text-amber-700' },
+                { id: 'autoReplyPhrases', label: 'Auto-Reply', count: keywordLists.autoReplyPhrases.length, color: 'text-blue-700' },
+              ].map(tab => (
+                <button
+                  key={tab.id}
+                  type="button"
+                  onClick={() => {
+                    setActiveKeywordTab(tab.id as any);
+                    setPhraseValidationMsg(null);
+                    setEditingPhraseIndex(null);
+                  }}
+                  className={`flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-md text-xs font-semibold transition-all ${
+                    activeKeywordTab === tab.id
+                      ? 'bg-white text-slate-900 shadow-xs'
+                      : 'text-slate-600 hover:text-slate-900 hover:bg-white/50'
+                  }`}
+                >
+                  <span>{tab.label}</span>
+                  <span className={`text-[10px] px-1.5 py-0.2 rounded-full font-bold ${
+                    activeKeywordTab === tab.id ? 'bg-slate-100 ' + tab.color : 'bg-slate-300/50 text-slate-600'
+                  }`}>
+                    {tab.count}
+                  </span>
+                </button>
+              ))}
+            </div>
+
+            {/* Category Explanation Banner */}
+            <div className="text-[11px] text-slate-600 bg-white p-2.5 rounded-lg border border-slate-200">
+              {activeKeywordTab === 'negativePhrases' && (
+                <span><strong>Negative Phrases:</strong> Unsubscribes, opt-outs, and clear refusals (e.g. "remove me", "not interested"). Sets status to <em>Negative Reply</em> and halts campaign.</span>
+              )}
+              {activeKeywordTab === 'positivePhrases' && (
+                <span><strong>Positive Phrases:</strong> Interest, demo bookings, and calls (e.g. "interested", "let's connect"). Sets <em>Replied</em> and pauses active colleagues at the same company.</span>
+              )}
+              {activeKeywordTab === 'deferralPhrases' && (
+                <span><strong>Deferral Phrases:</strong> Future timing or delay (e.g. "not now", "next quarter", "circle back"). Classified as <em>neutral</em> (Replied).</span>
+              )}
+              {activeKeywordTab === 'autoReplyPhrases' && (
+                <span><strong>Auto-Reply Phrases:</strong> Out-of-office, vacation, undeliverables, and bounces. Classified as <em>neutral</em> and flagged as automated response.</span>
+              )}
+            </div>
+
+            {/* Add Phrase Input Bar */}
+            <div className="space-y-2">
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={newPhraseInput}
+                  onChange={(e) => {
+                    setNewPhraseInput(e.target.value);
+                    if (phraseValidationMsg) setPhraseValidationMsg(null);
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault();
+                      handleAddPhrase();
+                    }
+                  }}
+                  placeholder={`Add ${activeKeywordTab === 'negativePhrases' ? 'negative' : activeKeywordTab === 'positivePhrases' ? 'positive' : activeKeywordTab === 'deferralPhrases' ? 'deferral' : 'auto-reply'} phrase (e.g. "we already have a vendor")...`}
+                  className="flex-1 text-xs px-3 py-2 bg-white border border-slate-200 rounded-lg focus:ring-1 focus:ring-purple-500 font-mono"
+                />
+                <button
+                  type="button"
+                  onClick={() => handleAddPhrase()}
+                  disabled={!newPhraseInput.trim() || isSavingKeywords}
+                  className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-purple-600 hover:bg-purple-700 disabled:opacity-50 text-white rounded-lg text-xs font-semibold shadow-xs transition-colors shrink-0"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  <span>Add Phrase</span>
+                </button>
+              </div>
+
+              {/* Inline Validation Error */}
+              {phraseValidationMsg && phraseValidationMsg.type === 'error' && (
+                <div className="p-2 bg-rose-50 border border-rose-200 rounded-lg text-xs text-rose-800 flex items-center gap-1.5">
+                  <AlertCircle className="w-3.5 h-3.5 text-rose-600 shrink-0" />
+                  <span>{phraseValidationMsg.text}</span>
+                </div>
+              )}
+
+              {/* Inline Warning for Common Words */}
+              {phraseValidationMsg && phraseValidationMsg.type === 'warning' && (
+                <div className="p-2.5 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-900 flex items-start justify-between gap-2">
+                  <div className="flex items-start gap-1.5">
+                    <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                    <span>{phraseValidationMsg.text}</span>
+                  </div>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => handleAddPhrase(phraseValidationMsg.phraseToAdd, true)}
+                      className="px-2.5 py-1 bg-amber-600 hover:bg-amber-700 text-white rounded text-[11px] font-semibold"
+                    >
+                      Add Anyway
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setPhraseValidationMsg(null)}
+                      className="px-2.5 py-1 bg-white border border-amber-300 text-amber-800 rounded text-[11px]"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Keyword Chips Container */}
+            <div className="bg-white p-3 rounded-lg border border-slate-200 max-h-56 overflow-y-auto">
+              <div className="flex flex-wrap gap-1.5">
+                {(keywordLists[activeKeywordTab] || []).length === 0 ? (
+                  <div className="text-xs text-slate-400 italic py-2">No phrases configured in this list.</div>
+                ) : (
+                  (keywordLists[activeKeywordTab] || []).map((phrase, idx) => {
+                    const isDefault = defaultKeywordLists[activeKeywordTab]?.some(
+                      d => d.toLowerCase().trim() === phrase.toLowerCase().trim()
+                    );
+                    const isEditing = editingPhraseIndex === idx;
+
+                    if (isEditing) {
+                      return (
+                        <div key={idx} className="flex items-center gap-1 p-1 bg-purple-50 border border-purple-300 rounded-md">
+                          <input
+                            type="text"
+                            value={editingPhraseText}
+                            onChange={(e) => setEditingPhraseText(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') {
+                                e.preventDefault();
+                                handleSaveEditedPhrase();
+                              } else if (e.key === 'Escape') {
+                                setEditingPhraseIndex(null);
+                              }
+                            }}
+                            className="text-[11px] px-1.5 py-0.5 bg-white border border-purple-200 rounded font-mono w-48 focus:outline-hidden"
+                            autoFocus
+                          />
+                          <button
+                            type="button"
+                            onClick={handleSaveEditedPhrase}
+                            className="p-1 hover:bg-purple-200 text-purple-700 rounded text-[10px] font-semibold"
+                            title="Save changes"
+                          >
+                            <Check className="w-3 h-3" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setEditingPhraseIndex(null)}
+                            className="p-1 hover:bg-purple-200 text-slate-500 rounded text-[10px]"
+                            title="Cancel edit"
+                          >
+                            <X className="w-3 h-3" />
+                          </button>
+                        </div>
+                      );
+                    }
+
+                    return (
+                      <span
+                        key={idx}
+                        className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs transition-colors ${
+                          isDefault
+                            ? 'bg-slate-100 text-slate-800 border border-slate-200 hover:border-slate-300'
+                            : 'bg-emerald-50 text-emerald-900 border border-emerald-300 hover:border-emerald-400 font-medium'
+                        }`}
+                      >
+                        <span className="font-mono text-[11px]">{phrase}</span>
+                        {!isDefault && (
+                          <span className="text-[9px] font-bold uppercase tracking-wider text-emerald-700 bg-emerald-100 px-1 py-0.2 rounded">
+                            Custom
+                          </span>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setEditingPhraseIndex(idx);
+                            setEditingPhraseText(phrase);
+                          }}
+                          className="text-slate-400 hover:text-purple-600 p-0.5 rounded transition-colors"
+                          title="Edit phrase"
+                        >
+                          <Edit2 className="w-2.5 h-2.5" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleRemovePhrase(phrase)}
+                          className="text-slate-400 hover:text-rose-600 p-0.5 rounded transition-colors"
+                          title="Remove phrase"
+                        >
+                          <X className="w-2.5 h-2.5" />
+                        </button>
+                      </span>
+                    );
+                  })
+                )}
+              </div>
+            </div>
+
+            {/* Try-It Box ("Test a Reply") */}
+            <div className="p-3.5 bg-white rounded-xl border border-slate-200 space-y-2.5">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-1.5 text-xs font-bold text-slate-800">
+                  <Sparkles className="w-3.5 h-3.5 text-purple-600" />
+                  <span>Test a Reply (Real Classifier)</span>
+                </div>
+                <span className="text-[10px] text-slate-400">Classifies text with active saved phrases</span>
+              </div>
+              <textarea
+                rows={2}
+                value={testReplyText}
+                onChange={(e) => setTestReplyText(e.target.value)}
+                placeholder="Paste a sample prospect reply here (e.g. 'we already have a vendor, please do not contact')..."
+                className="w-full text-xs p-2.5 bg-slate-50 border border-slate-200 rounded-lg focus:ring-1 focus:ring-purple-500 font-mono resize-none"
+              />
+              <div className="flex items-center justify-between">
+                <button
+                  type="button"
+                  onClick={handleRunTryItTest}
+                  disabled={isTestingReply || !testReplyText.trim()}
+                  className="inline-flex items-center gap-1.5 px-3.5 py-1.5 bg-slate-900 hover:bg-slate-800 disabled:opacity-50 text-white rounded-lg text-xs font-semibold shadow-xs transition-colors"
+                >
+                  <Sparkles className="w-3.5 h-3.5 text-purple-400" />
+                  <span>{isTestingReply ? 'Testing...' : 'Test Classification'}</span>
+                </button>
+                {tryItResult && (
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-[11px] text-slate-500 font-medium">Result:</span>
+                    <span className={`px-2.5 py-0.5 rounded-full text-xs font-bold uppercase tracking-wider ${
+                      tryItResult.sentiment === 'positive' ? 'bg-emerald-100 text-emerald-800 border border-emerald-300' :
+                      tryItResult.sentiment === 'negative' ? 'bg-rose-100 text-rose-800 border border-rose-300' :
+                      'bg-slate-100 text-slate-700 border border-slate-300'
+                    }`}>
+                      {tryItResult.sentiment}
+                    </span>
+                  </div>
+                )}
+              </div>
+              {tryItResult && (
+                <div className="p-2.5 bg-slate-50 border border-slate-200 rounded-lg text-xs space-y-1">
+                  <div className="text-slate-700"><strong>Reason:</strong> {tryItResult.reason}</div>
+                  <div className="text-slate-700"><strong>Matched Phrases:</strong> {tryItResult.matchedPhrases.length > 0 ? tryItResult.matchedPhrases.join(', ') : '(none)'}</div>
+                </div>
+              )}
+            </div>
+
+            {/* Re-check Last 10 Replies (Preview Only) */}
+            <div className="p-3.5 bg-white rounded-xl border border-slate-200 space-y-2">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-1.5 text-xs font-bold text-slate-800">
+                  <MessageSquare className="w-3.5 h-3.5 text-blue-600" />
+                  <span>Re-check Last 10 Replies (Preview Only)</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleLoadRecentPreviews}
+                  disabled={isLoadingPreviews}
+                  className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-semibold text-blue-700 bg-blue-50 hover:bg-blue-100 border border-blue-200 rounded-md transition-colors"
+                >
+                  <RefreshCw className={`w-3 h-3 ${isLoadingPreviews ? 'animate-spin' : ''}`} />
+                  <span>{isLoadingPreviews ? 'Simulating...' : 'Preview Last 10'}</span>
+                </button>
+              </div>
+              <p className="text-[11px] text-slate-500">
+                Preview how the last 10 replies would be classified with the current keyword lists. <strong>Safe preview only</strong> — this does not modify any lead records or statuses.
+              </p>
+              {showPreviewsTable && (
+                previewReplies.length === 0 ? (
+                  <div className="text-xs text-slate-400 italic py-2">No replies found in database.</div>
+                ) : (
+                  <div className="overflow-x-auto max-h-56 overflow-y-auto border border-slate-200 rounded-lg mt-2">
+                    <table className="w-full text-left text-[11px]">
+                      <thead className="bg-slate-100 text-slate-600 sticky top-0">
+                        <tr>
+                          <th className="p-2 font-semibold">Lead</th>
+                          <th className="p-2 font-semibold">Snippet</th>
+                          <th className="p-2 font-semibold">Current</th>
+                          <th className="p-2 font-semibold">Simulated</th>
+                          <th className="p-2 font-semibold">Matched Phrases</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100 bg-white">
+                        {previewReplies.map(p => (
+                          <tr key={p.leadId} className={p.sentimentChanged ? 'bg-amber-50/50' : ''}>
+                            <td className="p-2 font-medium text-slate-800">{p.name || p.email}</td>
+                            <td className="p-2 text-slate-600 max-w-xs truncate" title={p.replySnippet}>{p.replySnippet || '(empty)'}</td>
+                            <td className="p-2 font-semibold capitalize text-slate-700">{p.currentSentiment}</td>
+                            <td className="p-2">
+                              <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold uppercase ${
+                                p.simulatedSentiment === 'positive' ? 'bg-emerald-100 text-emerald-800' :
+                                p.simulatedSentiment === 'negative' ? 'bg-rose-100 text-rose-800' :
+                                'bg-slate-100 text-slate-700'
+                              }`}>
+                                {p.simulatedSentiment}
+                              </span>
+                            </td>
+                            <td className="p-2 text-slate-500">{p.matchedPhrases.join(', ') || '-'}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )
+              )}
             </div>
           </div>
 

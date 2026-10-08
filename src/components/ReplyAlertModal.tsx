@@ -35,9 +35,21 @@ export const ReplyAlertModal: React.FC<ReplyAlertModalProps> = ({
             <Mail className="w-6 h-6" />
           </div>
           <div className="flex-1 min-w-0">
-            <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-emerald-100 text-emerald-800 mb-1.5">
+            <div className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-semibold mb-1.5 ${
+              singleLead.replySentiment === 'positive'
+                ? 'bg-emerald-100 text-emerald-800'
+                : singleLead.replySentiment === 'negative'
+                ? 'bg-rose-100 text-rose-800'
+                : 'bg-amber-100 text-amber-800'
+            }`}>
               <CheckCircle className="w-3.5 h-3.5" />
-              <span>Inbound Prospect Reply</span>
+              <span>
+                {singleLead.replySentiment === 'positive'
+                  ? 'Positive Prospect Reply'
+                  : singleLead.replySentiment === 'negative'
+                  ? 'Negative Reply (Do Not Contact)'
+                  : 'Inbound Prospect Reply'}
+              </span>
             </div>
             <h3 className="text-lg font-bold text-slate-900 truncate">
               {isSingle 
@@ -46,8 +58,12 @@ export const ReplyAlertModal: React.FC<ReplyAlertModalProps> = ({
             </h3>
             <p className="text-xs text-slate-500 mt-0.5">
               {isSingle
-                ? 'Sequence has been paused and the lead was moved to "Needs Manual Reply".'
-                : 'Sequences have been paused and leads were moved to "Needs Manual Reply".'}
+                ? singleLead.replySentiment === 'positive'
+                  ? 'Positive interest detected! Sequence halted. Active colleagues at the same company paused.'
+                  : singleLead.replySentiment === 'negative'
+                  ? 'Prospect indicated opt-out or refusal. Status set to "Negative Reply" (do not contact).'
+                  : 'Sequence paused and the lead was moved to "Needs Manual Reply".'
+                : 'Sequences have been halted and incoming replies processed.'}
             </p>
           </div>
           <button

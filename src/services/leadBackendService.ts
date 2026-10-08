@@ -762,3 +762,210 @@ export async function saveSendersToBackend(senders: ConnectedSender[]): Promise<
   }
   return senders;
 }
+
+/**
+ * Manually overrides the reply sentiment of a lead ('positive' | 'negative' | 'neutral').
+ * Automatically executes side effects and undoes previous company pauses or negative status.
+ */
+export async function overrideLeadSentiment(
+  leadId: string,
+  sentiment: 'positive' | 'negative' | 'neutral',
+  reason?: string
+): Promise<{ success: boolean; lead?: Lead; pausedCount?: number; resumedCount?: number }> {
+  try {
+    const res = await fetch('/api/leads/override-sentiment', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ leadId, sentiment, reason })
+    });
+    if (res.ok) {
+      return await res.json();
+    }
+  } catch (err) {
+    console.warn('Backend overrideLeadSentiment error:', err);
+  }
+  return { success: false, pausedCount: 0, resumedCount: 0 };
+}
+
+/**
+ * Resumes company leads that were paused by a positive reply from a specific lead.
+ */
+export async function resumeCompanyLeads(
+  replyingLeadId: string
+): Promise<{ success: boolean; resumedCount?: number }> {
+  try {
+    const res = await fetch('/api/leads/resume-company', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ replyingLeadId })
+    });
+    if (res.ok) {
+      return await res.json();
+    }
+  } catch (err) {
+    console.warn('Backend resumeCompanyLeads error:', err);
+  }
+  return { success: false, resumedCount: 0 };
+}
+
+/**
+ * Confirms company pause for "Ask me first" mode.
+ */
+export async function confirmCompanyPause(
+  replyingLeadId: string
+): Promise<{ success: boolean; pausedCount?: number }> {
+  try {
+    const res = await fetch('/api/leads/confirm-company-pause', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ replyingLeadId })
+    });
+    if (res.ok) {
+      return await res.json();
+    }
+  } catch (err) {
+    console.warn('Backend confirmCompanyPause error:', err);
+  }
+  return { success: false, pausedCount: 0 };
+}
+
+// ---------------------------------------------------------------------------
+// REPLY KEYWORD RULES & TEST APIS
+// ---------------------------------------------------------------------------
+
+export interface KeywordListsData {
+  negativePhrases: string[];
+  positivePhrases: string[];
+  deferralPhrases: string[];
+  autoReplyPhrases: string[];
+}
+
+export interface ReplyRulesResponse {
+  success: boolean;
+  lists: KeywordListsData;
+  defaults: KeywordListsData;
+  error?: string;
+}
+
+export interface ReplyClassificationTestResult {
+  sentiment: 'positive' | 'negative' | 'neutral';
+  confidence: number;
+  matchedPhrases: string[];
+  reason: string;
+  isAutoReply?: boolean;
+}
+
+export interface ReplyPreviewItem {
+  leadId: string;
+  name: string;
+  email: string;
+  company: string;
+  replySnippet: string;
+  currentSentiment: 'positive' | 'negative' | 'neutral';
+  simulatedSentiment: 'positive' | 'negative' | 'neutral';
+  matchedPhrases: string[];
+  reason: string;
+  sentimentChanged: boolean;
+}
+
+export async function getReplyKeywordRules(): Promise<ReplyRulesResponse | null> {
+  try {
+    const res = await fetch('/api/reply-rules');
+    if (res.ok) return await res.json();
+  } catch (err) {
+    console.warn('Failed to fetch reply keyword rules:', err);
+  }
+  return null;
+}
+
+export async function saveReplyKeywordRules(lists: Partial<KeywordListsData>): Promise<ReplyRulesResponse | null> {
+  try {
+    const res = await fetch('/api/reply-rules', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(lists)
+    });
+    const data = await res.json();
+    if (res.ok && data.success) return data;
+    throw new Error(data.error || 'Failed to save reply rules');
+  } catch (err: any) {
+    console.warn('Failed to save reply keyword rules:', err);
+    throw err;
+  }
+}
+
+export async function resetReplyKeywordRules(category?: string): Promise<ReplyRulesResponse | null> {
+  try {
+    const res = await fetch('/api/reply-rules/reset', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ category })
+    });
+    if (res.ok) return await res.json();
+  } catch (err) {
+    console.warn('Failed to reset reply keyword rules:', err);
+  }
+  return null;
+}
+
+export async function testReplyClassification(text: string, subject?: string): Promise<{ success: boolean; classification?: ReplyClassificationTestResult; error?: string }> {
+  try {
+    const res = await fetch('/api/reply-rules/test', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text, subject })
+    });
+    return await res.json();
+  } catch (err: any) {
+    return { success: false, error: err.message };
+  }
+}
+
+export async function previewRecentReplyClassifications(): Promise<{ success: boolean; previews: ReplyPreviewItem[]; error?: string }> {
+  try {
+    const res = await fetch('/api/reply-rules/preview-recent');
+    if (res.ok) return await res.json();
+    return { success: false, previews: [] };
+  } catch (err: any) {
+    return { success: false, previews: [], error: err.message };
+  }
+}
+
+export async function getTaskAlertsState(): Promise<string[]> {
+  try {
+    const res = await fetch('/api/tasks/alerts-state');
+    if (res.ok) {
+      const data = await res.json();
+      return Array.isArray(data.dismissedAlertIds) ? data.dismissedAlertIds : [];
+    }
+  } catch (err) {
+    console.warn('Failed to load task alerts state from backend:', err);
+  }
+  return [];
+}
+
+export async function dismissTaskAlertsOnBackend(alertIds: string[]): Promise<string[]> {
+  try {
+    const res = await fetch('/api/tasks/alerts-state/dismiss', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ alertIds })
+    });
+    if (res.ok) {
+      const data = await res.json();
+      return Array.isArray(data.dismissedAlertIds) ? data.dismissedAlertIds : [];
+    }
+  } catch (err) {
+    console.warn('Failed to dismiss task alerts on backend:', err);
+  }
+  return alertIds;
+}
+
+export async function clearDismissedTaskAlertsOnBackend(): Promise<void> {
+  try {
+    await fetch('/api/tasks/alerts-state/clear', { method: 'POST' });
+  } catch (err) {
+    console.warn('Failed to clear dismissed task alerts on backend:', err);
+  }
+}
+

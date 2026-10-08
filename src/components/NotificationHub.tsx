@@ -21,9 +21,11 @@ import {
   AlertCircle,
   GripVertical,
   Move,
-  RotateCcw
+  RotateCcw,
+  CheckSquare,
+  Calendar
 } from 'lucide-react';
-import { Lead } from '../types';
+import { Lead, TaskAlertItem } from '../types';
 
 export interface AppActionLog {
   id: string;
@@ -42,8 +44,13 @@ export interface UserNote {
 
 interface NotificationHubProps {
   replyAlerts: Lead[];
+  taskAlerts?: TaskAlertItem[];
+  leads?: Lead[];
   onDismissReplyAlert: (leadId: string) => void;
+  onDismissTaskAlert?: (alertId: string) => void;
   onClearAllReplyAlerts: () => void;
+  onClearAllTaskAlerts?: () => void;
+  onClearAllAlerts?: () => void;
   onOpenLead: (lead: Lead) => void;
   onNavigateToTab: (tab: 'leads' | 'replied' | 'workflows' | 'tasks' | 'templates' | 'analytics') => void;
   actionLogs: AppActionLog[];
@@ -60,8 +67,13 @@ const HUB_POS_STORAGE_KEY = 'gini_activity_hub_pos';
 
 export const NotificationHub: React.FC<NotificationHubProps> = ({
   replyAlerts,
+  taskAlerts = [],
+  leads = [],
   onDismissReplyAlert,
+  onDismissTaskAlert,
   onClearAllReplyAlerts,
+  onClearAllTaskAlerts,
+  onClearAllAlerts,
   onOpenLead,
   onNavigateToTab,
   actionLogs,
@@ -251,7 +263,7 @@ export const NotificationHub: React.FC<NotificationHubProps> = ({
     setNotes(prev => prev.filter(n => n.id !== id));
   };
 
-  const unreadAlertsCount = replyAlerts.length;
+  const unreadAlertsCount = replyAlerts.length + taskAlerts.length;
 
   const getActionIcon = (type: AppActionLog['type']) => {
     switch (type) {
@@ -437,30 +449,138 @@ export const NotificationHub: React.FC<NotificationHubProps> = ({
             {/* ========================================================= */}
             {activeTab === 'alerts' && (
               <div className="space-y-2.5">
-                {replyAlerts.length === 0 ? (
+                {unreadAlertsCount === 0 ? (
                   <div className="py-12 text-center text-slate-400">
                     <div className="w-10 h-10 rounded-full bg-slate-100 flex items-center justify-center mx-auto mb-2 text-slate-400">
                       <CheckCircle2 className="w-5 h-5 text-emerald-500" />
                     </div>
-                    <p className="text-xs font-semibold text-slate-700">No Pending Reply Alerts</p>
+                    <p className="text-xs font-semibold text-slate-700">No Pending Alerts</p>
                     <p className="text-[11px] text-slate-400 mt-1 max-w-xs mx-auto">
-                      When prospects reply to your outreach emails, alerts will appear here peacefully without interrupting your screen.
+                      When prospects reply to outreach or manual tasks are assigned, alerts will appear here peacefully without interrupting your screen.
                     </p>
                   </div>
                 ) : (
                   <>
                     <div className="flex items-center justify-between pb-1 text-[11px]">
-                      <span className="font-bold text-red-600">
-                        {replyAlerts.length} Unhandled Prospect Repl{replyAlerts.length > 1 ? 'ies' : 'y'}
+                      <span className="font-bold text-slate-800">
+                        <span className="text-red-600 font-extrabold">{unreadAlertsCount}</span> Pending Alert{unreadAlertsCount > 1 ? 's' : ''}
                       </span>
                       <button
-                        onClick={onClearAllReplyAlerts}
+                        onClick={() => {
+                          if (onClearAllAlerts) {
+                            onClearAllAlerts();
+                          } else {
+                            onClearAllReplyAlerts();
+                            onClearAllTaskAlerts?.();
+                          }
+                        }}
                         className="text-[10px] text-slate-400 hover:text-red-600 font-semibold underline cursor-pointer"
                       >
                         Dismiss All
                       </button>
                     </div>
 
+                    {/* Task Alerts */}
+                    {taskAlerts.map((alert) => (
+                      <div
+                        key={alert.id}
+                        className={`p-3 border rounded-xl space-y-2 transition-all text-xs ${
+                          alert.state === 'overdue'
+                            ? 'bg-rose-50/50 border-rose-200/80 hover:bg-rose-50'
+                            : alert.state === 'due_today'
+                            ? 'bg-amber-50/50 border-amber-200/80 hover:bg-amber-50'
+                            : 'bg-blue-50/50 border-blue-200/80 hover:bg-blue-50'
+                        }`}
+                      >
+                        <div className="flex items-start justify-between gap-2">
+                          <div>
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              <span className="font-bold text-slate-900">{alert.title}</span>
+                            </div>
+                            <p className="text-[11px] text-slate-600 truncate max-w-[220px]">
+                              <span className="font-semibold text-slate-800">{alert.leadName}</span>
+                              {alert.leadCompany && <span> &bull; {alert.leadCompany}</span>}
+                            </p>
+                          </div>
+
+                          <span
+                            className={`px-2 py-0.5 rounded-full text-[10px] font-bold shrink-0 shadow-2xs text-white ${
+                              alert.state === 'overdue'
+                                ? 'bg-rose-600'
+                                : alert.state === 'due_today'
+                                ? 'bg-amber-600'
+                                : 'bg-blue-600'
+                            }`}
+                          >
+                            {alert.state === 'overdue' ? 'Overdue' : alert.state === 'due_today' ? 'Due Today' : 'New Task'}
+                          </span>
+                        </div>
+
+                        <div className="flex items-center gap-2 pt-0.5">
+                          <span
+                            className={`px-1.5 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider border ${
+                              alert.priority === 'high'
+                                ? 'bg-rose-100 text-rose-700 border-rose-200'
+                                : alert.priority === 'low'
+                                ? 'bg-slate-100 text-slate-600 border-slate-200'
+                                : 'bg-amber-100 text-amber-700 border-amber-200'
+                            }`}
+                          >
+                            {alert.priority} Priority
+                          </span>
+
+                          <span className="text-[10px] text-slate-500 font-medium flex items-center gap-1">
+                            <Clock className="w-3 h-3 text-slate-400" />
+                            Due: {alert.dueDate}
+                          </span>
+                        </div>
+
+                        <div className="flex items-center justify-between pt-1 gap-2 border-t border-slate-200/60">
+                          <button
+                            onClick={() => {
+                              onNavigateToTab('tasks');
+                              setIsOpen(false);
+                            }}
+                            className="flex items-center gap-1 px-2.5 py-1 bg-slate-900 hover:bg-slate-800 text-white rounded-lg font-bold text-[11px] shadow-2xs transition-colors cursor-pointer"
+                          >
+                            <CheckSquare className="w-3 h-3" />
+                            <span>Tasks Tab</span>
+                          </button>
+
+                          <div className="flex items-center gap-2">
+                            {(() => {
+                              const leadObj = leads.find(l =>
+                                (alert.leadId && l.leadId === alert.leadId) ||
+                                (alert.leadEmail && l.email && l.email.toLowerCase() === alert.leadEmail.toLowerCase())
+                              );
+                              if (leadObj) {
+                                return (
+                                  <button
+                                    onClick={() => {
+                                      onOpenLead(leadObj);
+                                      setIsOpen(false);
+                                    }}
+                                    className="text-[11px] font-semibold text-slate-600 hover:text-slate-900 cursor-pointer"
+                                  >
+                                    Open Lead
+                                  </button>
+                                );
+                              }
+                              return null;
+                            })()}
+                            <button
+                              onClick={() => onDismissTaskAlert?.(alert.id)}
+                              className="text-[10px] text-slate-400 hover:text-slate-600 cursor-pointer"
+                              title="Dismiss notification"
+                            >
+                              Dismiss
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+
+                    {/* Reply Alerts */}
                     {replyAlerts.map((lead) => (
                       <div
                         key={lead.leadId || lead.email}

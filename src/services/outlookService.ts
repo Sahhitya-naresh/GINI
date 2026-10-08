@@ -108,8 +108,12 @@ export async function checkThreadForLeadReply(
       return {
         hasReplied: Boolean(data.hasReplied),
         replyMessage: replyMsg,
-        allMessages: replyMsg ? [replyMsg] : []
-      };
+        allMessages: replyMsg ? [replyMsg] : [],
+        updatedLead: data.updatedLead,
+        classification: data.classification,
+        pausedCompanyLeadsCount: data.pausedCompanyLeadsCount,
+        pendingConfirmation: data.pendingConfirmation
+      } as any;
     }
   } catch (err) {
     console.warn('Backend check-reply error:', err);

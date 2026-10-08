@@ -41,6 +41,9 @@ interface LeadDetailModalProps {
   onTogglePause: (lead: Lead) => void;
   onSendNextStage: (lead: Lead) => void;
   onCheckReply: (lead: Lead) => void;
+  onOverrideSentiment?: (lead: Lead, sentiment: 'positive' | 'negative' | 'neutral') => void;
+  onResumeCompanyLeads?: (lead: Lead) => void;
+  onConfirmCompanyPause?: (lead: Lead) => void;
   campaigns?: CampaignWorkflow[];
 }
 
@@ -56,6 +59,9 @@ export const LeadDetailModal: React.FC<LeadDetailModalProps> = ({
   onTogglePause,
   onSendNextStage,
   onCheckReply,
+  onOverrideSentiment,
+  onResumeCompanyLeads,
+  onConfirmCompanyPause,
   campaigns = []
 }) => {
   const [threadMessages, setThreadMessages] = useState<EmailThreadMessage[]>([]);
@@ -204,8 +210,8 @@ export const LeadDetailModal: React.FC<LeadDetailModalProps> = ({
       const data = await getOutlookThread(token, lead.threadId, userEmail, lead.email);
       setThreadMessages(data.messages);
 
-      // Trigger reply check right after thread loads if latest message is from lead and lead is not already Replied
-      if (lead.status !== 'Replied') {
+      // Trigger reply check right after thread loads only if lead is not yet Replied / Negative Reply and missing sentiment
+      if (lead.status !== 'Replied' && lead.status !== 'Negative Reply' && !lead.replySentiment) {
         const msgs = data.messages || [];
         if (msgs.length > 0) {
           const sorted = [...msgs].sort(
@@ -262,6 +268,9 @@ export const LeadDetailModal: React.FC<LeadDetailModalProps> = ({
   };
 
   const getStatusBadge = () => {
+    if (lead.status === 'Negative Reply' || lead.replySentiment === 'negative') {
+      return <span className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-red-100 text-red-700 border border-red-200 font-bold">Negative Reply &bull; Do Not Contact</span>;
+    }
     switch (lead.status) {
       case 'Active':
         return <span className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-emerald-100 text-emerald-800 border border-emerald-200">Active</span>;
@@ -282,8 +291,8 @@ export const LeadDetailModal: React.FC<LeadDetailModalProps> = ({
   const emailNodes = assignedCampaign ? (assignedCampaign.nodes || (assignedCampaign as any).workflow_graph?.nodes || []).filter((n: any) => n.type === 'emailNode' || n.data?.nodeType === 'email') : [];
   const maxWorkflowStages = assignedCampaign && emailNodes.length > 0 ? emailNodes.length : (assignedCampaign ? 0 : 7);
   const nextStageNum = lead.currentStage + 1;
-  const isSequenceFinished = lead.status === 'Completed' || lead.status === 'Replied' || lead.status === 'Broke Up' || (maxWorkflowStages > 0 && lead.currentStage >= maxWorkflowStages);
-  const hasMoreStages = nextStageNum <= maxWorkflowStages && !isSequenceFinished && lead.status !== 'Paused';
+  const isSequenceFinished = lead.status === 'Completed' || lead.status === 'Replied' || lead.status === 'Negative Reply' || lead.status === 'Broke Up' || (maxWorkflowStages > 0 && lead.currentStage >= maxWorkflowStages);
+  const hasMoreStages = nextStageNum <= maxWorkflowStages && !isSequenceFinished && lead.status !== 'Paused' && lead.status !== 'Negative Reply';
   const nextTemplate = templates.find(t => t.stage === nextStageNum);
   const stageList = [1, 2, 3, 4, 5, 6, 7];
 
@@ -455,12 +464,141 @@ export const LeadDetailModal: React.FC<LeadDetailModalProps> = ({
                 </div>
               )}
 
+              {lead.status === 'Negative Reply' && (
+                <div className="p-3 bg-rose-50 border border-rose-200 rounded-lg text-xs text-rose-950 flex items-start gap-2">
+                  <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+                  <div>
+                    <strong className="font-semibold text-rose-700">Hard Safety Policy: Negative Reply (Do Not Contact).</strong>
+                    <p className="mt-0.5 text-rose-800">This prospect indicated disinterest or opt-out. All automated and manual email sending is permanently blocked.</p>
+                    {lead.stoppedReason && (
+                      <p className="mt-1 text-[11px] text-rose-600 italic">Reason: {lead.stoppedReason}</p>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {lead.status === 'Paused' && lead.stoppedReason && (
+                <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-950 flex items-start gap-2">
+                  <Info className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                  <div>
+                    <strong className="font-semibold text-amber-800">Paused Reason:</strong> {lead.stoppedReason}
+                  </div>
+                </div>
+              )}
+
               {lead.status === 'Replied' && (
                 <div className="p-3 bg-purple-50 border border-purple-200 rounded-lg text-xs text-purple-950 flex items-start gap-2">
                   <CheckCircle2 className="w-4 h-4 text-purple-600 shrink-0 mt-0.5" />
                   <div>
                     <strong className="font-semibold">Automated sequence stopped:</strong> A reply was detected from {lead.name}. Please follow up manually in Outlook.
                   </div>
+                </div>
+              )}
+
+              {/* Reply Sentiment & Manual Override Controls */}
+              {(lead.replySentiment || lead.status === 'Replied' || lead.status === 'Negative Reply') && (
+                <div className="p-3.5 bg-white border border-slate-200 rounded-xl space-y-2.5 text-xs shadow-2xs">
+                  <div className="flex items-center justify-between">
+                    <span className="font-bold uppercase tracking-wider text-[11px] text-slate-500">Reply Sentiment</span>
+                    {lead.replySentiment && (
+                      <span className={`px-2 py-0.5 rounded-full text-[11px] font-bold ${
+                        lead.replySentiment === 'positive'
+                          ? 'bg-emerald-100 text-emerald-800 border border-emerald-200'
+                          : lead.replySentiment === 'negative'
+                          ? 'bg-rose-100 text-rose-800 border border-rose-200'
+                          : 'bg-slate-100 text-slate-800 border border-slate-200'
+                      }`}>
+                        {lead.replySentiment.toUpperCase()} ({lead.replyClassifiedBy || 'auto'})
+                      </span>
+                    )}
+                  </div>
+
+                  {lead.replyMatchedPhrases && lead.replyMatchedPhrases.length > 0 && (
+                    <div className="text-[11px] text-slate-600">
+                      <span className="text-slate-400 font-medium">Matched phrases: </span>
+                      <span className="font-mono bg-slate-50 px-1.5 py-0.5 rounded border border-slate-200 text-slate-800">
+                        {lead.replyMatchedPhrases.join(', ')}
+                      </span>
+                    </div>
+                  )}
+
+                  {lead.replyReason && (
+                    <div className="text-[11px] text-slate-500 italic">
+                      {lead.replyReason}
+                    </div>
+                  )}
+
+                  {/* Three Manual Override Buttons */}
+                  <div className="pt-2 border-t border-slate-100 space-y-1.5">
+                    <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider block">Manual Sentiment Override:</span>
+                    <div className="grid grid-cols-3 gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => onOverrideSentiment?.(lead, 'positive')}
+                        className={`px-2 py-1.5 rounded-lg text-xs font-semibold transition-colors border ${
+                          lead.replySentiment === 'positive'
+                            ? 'bg-emerald-600 text-white border-emerald-600 shadow-2xs'
+                            : 'bg-white hover:bg-emerald-50 text-emerald-700 border-emerald-200'
+                        }`}
+                      >
+                        Mark Positive
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => onOverrideSentiment?.(lead, 'negative')}
+                        className={`px-2 py-1.5 rounded-lg text-xs font-semibold transition-colors border ${
+                          lead.replySentiment === 'negative'
+                            ? 'bg-rose-600 text-white border-rose-600 shadow-2xs'
+                            : 'bg-white hover:bg-rose-50 text-rose-700 border-rose-200'
+                        }`}
+                      >
+                        Mark Negative
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => onOverrideSentiment?.(lead, 'neutral')}
+                        className={`px-2 py-1.5 rounded-lg text-xs font-semibold transition-colors border ${
+                          lead.replySentiment === 'neutral'
+                            ? 'bg-slate-700 text-white border-slate-700 shadow-2xs'
+                            : 'bg-white hover:bg-slate-100 text-slate-700 border-slate-200'
+                        }`}
+                      >
+                        Mark Neutral
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* One-click resume company leads action */}
+                  {lead.replySentiment === 'positive' && (
+                    <div className="pt-2 border-t border-slate-100">
+                      <button
+                        type="button"
+                        onClick={() => onResumeCompanyLeads?.(lead)}
+                        className="w-full flex items-center justify-center gap-1.5 py-1.5 px-3 text-xs font-semibold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 rounded-lg border border-emerald-200 transition-colors"
+                      >
+                        <RotateCcw className="w-3.5 h-3.5" />
+                        <span>Resume company leads</span>
+                      </button>
+                    </div>
+                  )}
+
+                  {/* Pending Ask me first confirmation */}
+                  {lead.pendingCompanyPause && lead.pendingCompanyPause.count > 0 && (
+                    <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg text-xs space-y-2">
+                      <p className="font-semibold text-amber-900">
+                        Positive reply detected! Pause {lead.pendingCompanyPause.count} other active colleague(s) at {lead.company}?
+                      </p>
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => onConfirmCompanyPause?.(lead)}
+                          className="px-3 py-1 bg-amber-600 hover:bg-amber-700 text-white font-bold rounded text-xs transition-colors"
+                        >
+                          Confirm Pause
+                        </button>
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
             </div>

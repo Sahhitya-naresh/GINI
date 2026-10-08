@@ -1,4 +1,11 @@
 import { getDb, COLLECTIONS } from './mongodb.ts';
+import {
+  classifyReply,
+  getActiveKeywords,
+  normalizeCompanyName,
+  areSameCompany,
+  ReplyClassificationResult
+} from './replyRules.ts';
 
 export interface BackendLead {
   leadId: string;
@@ -31,6 +38,20 @@ export interface BackendLead {
   rowIndex?: number;
   createdAt?: string;
   updatedAt?: string;
+
+  // Sentiment and classification fields
+  replySentiment?: 'positive' | 'negative' | 'neutral';
+  replyClassifiedBy?: 'auto' | 'manual';
+  replyClassifiedAt?: string;
+  replyMatchedPhrases?: string[];
+  replyReason?: string;
+  stoppedReason?: string;
+  stoppedByLeadId?: string;
+  pendingCompanyPause?: {
+    candidateLeadIds: string[];
+    companyName?: string;
+    count: number;
+  };
   [key: string]: any;
 }
 
@@ -97,6 +118,7 @@ export interface BackendSettings {
   customLogoUrl?: string;
   appName?: string;
   updatedAt?: string;
+  positiveReplyAction?: 'pause_automatically' | 'ask_first';
 }
 
 export interface TrackingEvent {
@@ -122,8 +144,72 @@ export async function listLeads(token?: string, spreadsheetId?: string): Promise
     .collection<BackendLead>(COLLECTIONS.LEADS)
     .find({}, { projection: { _id: 0 } })
     .toArray();
+
+  const activeKeywords = await getActiveKeywords().catch(() => undefined);
+
+  // Auto-synchronize sentiment & status consistency across all leads
+  for (const l of leads) {
+    let changed = false;
+    const updatePayload: Partial<BackendLead> = {};
+
+    // 1. If lead has replied or status Replied/Negative Reply, but replySentiment is missing, auto-classify from inbound_replies
+    if ((l.hasReplied || l.status === 'Replied' || l.status === 'Negative Reply') && !l.replySentiment) {
+      try {
+        const cleanEmail = (l.email || '').trim().toLowerCase();
+        const inb = await db.collection(COLLECTIONS.INBOUND_REPLIES).findOne({
+          $or: [
+            ...(cleanEmail ? [{ leadEmail: cleanEmail }, { from: { $regex: cleanEmail, $options: 'i' } }] : []),
+            ...(l.threadId ? [{ threadId: l.threadId }] : []),
+            ...(l.leadId ? [{ leadId: l.leadId }] : [])
+          ]
+        });
+
+        if (inb) {
+          const classification = classifyReply((inb as any).subject, (inb as any).body, activeKeywords);
+          l.replySentiment = classification.sentiment;
+          l.replyClassifiedBy = 'auto';
+          l.replyClassifiedAt = new Date().toISOString();
+          l.replyMatchedPhrases = classification.matchedPhrases;
+          l.replyReason = classification.reason;
+
+          updatePayload.replySentiment = l.replySentiment;
+          updatePayload.replyClassifiedBy = l.replyClassifiedBy;
+          updatePayload.replyClassifiedAt = l.replyClassifiedAt;
+          updatePayload.replyMatchedPhrases = l.replyMatchedPhrases;
+          updatePayload.replyReason = l.replyReason;
+
+          if (classification.sentiment === 'negative') {
+            l.status = 'Negative Reply';
+            l.stoppedReason = 'Negative reply received';
+            updatePayload.status = 'Negative Reply';
+            updatePayload.stoppedReason = 'Negative reply received';
+          }
+          changed = true;
+        }
+      } catch (_) {}
+    }
+
+    // 2. Strict safety sync: any lead with negative replySentiment MUST have status 'Negative Reply'
+    if (l.replySentiment === 'negative' && l.status !== 'Negative Reply') {
+      l.status = 'Negative Reply';
+      l.stoppedReason = l.stoppedReason || 'Negative reply received';
+      updatePayload.status = 'Negative Reply';
+      updatePayload.stoppedReason = l.stoppedReason;
+      changed = true;
+    }
+
+    if (changed && Object.keys(updatePayload).length > 0) {
+      updatePayload.updatedAt = new Date().toISOString();
+      await db.collection(COLLECTIONS.LEADS).updateOne(
+        { leadId: l.leadId },
+        { $set: updatePayload }
+      ).catch(() => {});
+    }
+  }
+
   return leads.map(l => ({
     ...l,
+    notes: cleanLeadNotes(l.notes),
     campaign: (l.campaign && l.campaign.trim()) ? l.campaign.trim() : 'Default',
     campaignId: l.campaignId || ''
   }));
@@ -314,8 +400,17 @@ export async function updateLead(leadData: Partial<BackendLead>, token?: string,
   const updated: BackendLead = {
     ...existing,
     ...leadData,
+    notes: cleanLeadNotes(leadData.notes !== undefined ? leadData.notes : existing.notes),
     updatedAt: new Date().toISOString()
   };
+
+  // Prevent accidental status downgrade of Negative Reply
+  if ((existing.replySentiment === 'negative' || leadData.replySentiment === 'negative') && updated.status === 'Replied') {
+    updated.status = 'Negative Reply';
+    updated.replySentiment = 'negative';
+  } else if (updated.status === 'Negative Reply' && !updated.replySentiment) {
+    updated.replySentiment = 'negative';
+  }
 
   await col.updateOne({ leadId: leadData.leadId }, { $set: updated });
   return updated;
@@ -647,6 +742,35 @@ export async function deleteLocalTask(taskId: string): Promise<boolean> {
   return result.deletedCount > 0;
 }
 
+export async function loadTaskAlertsState(): Promise<{ dismissedAlertIds: string[] }> {
+  const db = await getDb();
+  const doc = await db.collection(COLLECTIONS.SETTINGS).findOne({ id: 'task_alerts_state' });
+  return {
+    dismissedAlertIds: Array.isArray(doc?.dismissedAlertIds) ? doc.dismissedAlertIds : []
+  };
+}
+
+export async function saveDismissedTaskAlerts(alertIds: string[]): Promise<string[]> {
+  const db = await getDb();
+  const existing = await loadTaskAlertsState();
+  const merged = Array.from(new Set([...existing.dismissedAlertIds, ...alertIds]));
+  await db.collection(COLLECTIONS.SETTINGS).updateOne(
+    { id: 'task_alerts_state' },
+    { $set: { id: 'task_alerts_state', dismissedAlertIds: merged, updatedAt: new Date().toISOString() } },
+    { upsert: true }
+  );
+  return merged;
+}
+
+export async function clearTaskAlertsState(): Promise<void> {
+  const db = await getDb();
+  await db.collection(COLLECTIONS.SETTINGS).updateOne(
+    { id: 'task_alerts_state' },
+    { $set: { id: 'task_alerts_state', dismissedAlertIds: [], updatedAt: new Date().toISOString() } },
+    { upsert: true }
+  );
+}
+
 // ---------------------------------------------------------------------------
 // SETTINGS PERSISTENCE (MongoDB)
 // ---------------------------------------------------------------------------
@@ -815,6 +939,49 @@ export async function getSystemStatsSummary() {
 // SHARED LEAD REPLY PROCESSING (Reused by Webhooks, Polling & Manual checks)
 // ---------------------------------------------------------------------------
 
+export function cleanLeadNotes(existingNotes: string | undefined): string {
+  if (!existingNotes || !existingNotes.trim()) return '';
+  const parts = existingNotes.split('|').map(p => p.trim()).filter(Boolean);
+  const seen = new Set<string>();
+  const cleaned: string[] = [];
+
+  for (const part of parts) {
+    // Drop repetitive dummy tags
+    if (/Reply detected on \d{4}-\d{2}-\d{2}: Incoming reply flag detected/i.test(part)) {
+      continue;
+    }
+    const normalized = part.toLowerCase();
+    if (seen.has(normalized)) {
+      continue;
+    }
+    seen.add(normalized);
+    cleaned.push(part);
+  }
+
+  // If there's a specific sentiment tag (e.g. "[Negative reply detected..." or "[Positive reply detected..."),
+  // remove any generic "Reply detected" or "[Reply detected]" tags that precede it.
+  const hasSpecificSentiment = cleaned.some(p => /\[(?:Negative|Positive|Neutral) reply detected/i.test(p));
+  const finalParts = hasSpecificSentiment
+    ? cleaned.filter(p => p !== 'Reply detected' && p !== '[Reply detected]')
+    : cleaned;
+
+  return finalParts.join(' | ');
+}
+
+export function appendLeadNote(existingNotes: string | undefined, newTag: string): string {
+  const cleaned = cleanLeadNotes(existingNotes);
+  if (!cleaned) return newTag;
+  if (!newTag || !newTag.trim()) return cleaned;
+
+  // If the note already contains the tag or its core classifier (e.g. [Negative reply detected), don't append duplicate
+  const tagBase = newTag.replace(/\s+by\s+(auto|manual).*/i, '').trim();
+  if (cleaned.toLowerCase().includes(tagBase.toLowerCase()) || cleaned.toLowerCase().includes(newTag.toLowerCase())) {
+    return cleaned;
+  }
+
+  return `${cleaned} | ${newTag}`;
+}
+
 export interface ApplyReplyParams {
   leadEmail?: string;
   threadId?: string;
@@ -824,6 +991,7 @@ export interface ApplyReplyParams {
   from?: string;
   receivedDateTime?: string;
   source?: string;
+  classifiedBy?: 'auto' | 'manual';
 }
 
 export interface ApplyReplyResult {
@@ -832,8 +1000,22 @@ export interface ApplyReplyResult {
   lead?: BackendLead;
   reply?: any;
   message?: string;
+  classification?: ReplyClassificationResult;
+  pausedCompanyLeadsCount?: number;
+  pendingConfirmation?: {
+    candidateLeadIds: string[];
+    companyName?: string;
+    count: number;
+  };
 }
 
+/**
+ * Shared central reply-apply function used across:
+ * 1. Microsoft Graph Webhook path (processGraphWebhookNotification)
+ * 2. POST /api/email/check-reply endpoint
+ * 3. Workflow Campaign Runner reply check (server/runnerBackend.ts)
+ * 4. src/services/replyService.ts (checkLeadForReplyAndSave)
+ */
 export async function applyLeadReply(params: ApplyReplyParams): Promise<ApplyReplyResult> {
   const db = await getDb();
   const leadsCol = db.collection<BackendLead>(COLLECTIONS.LEADS);
@@ -853,9 +1035,39 @@ export async function applyLeadReply(params: ApplyReplyParams): Promise<ApplyRep
     );
   }
 
-  const replyId = params.messageId || `inbound-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
-  const receivedAt = params.receivedDateTime || new Date().toISOString();
-  const replyDoc = {
+  const isDummySystemBody = !params.body ||
+    params.body.includes('Incoming reply flag detected on lead record') ||
+    params.body.includes('Status already marked Replied') ||
+    params.body.includes('Status marked Negative Reply');
+
+  const repliesCol = db.collection(COLLECTIONS.INBOUND_REPLIES);
+  let existingReply: any = null;
+
+  if (params.messageId) {
+    existingReply = await repliesCol.findOne({ id: params.messageId });
+  }
+
+  // Deduplication check: verify if an inbound reply with matching body already exists for this lead/thread
+  if (!existingReply && cleanEmail && params.body && !isDummySystemBody) {
+    const normalizedBody = params.body.trim().replace(/\s+/g, ' ').toLowerCase();
+    const candidateQuery: any = {
+      $or: [
+        { leadEmail: cleanEmail },
+        ...(cleanThreadId ? [{ threadId: cleanThreadId }] : [])
+      ]
+    };
+    const candidateReplies = await repliesCol.find(candidateQuery).toArray();
+    existingReply = candidateReplies.find((r: any) => {
+      const rBody = (r.body || r.snippet || '').trim().replace(/\s+/g, ' ').toLowerCase();
+      if (!rBody) return false;
+      return rBody === normalizedBody ||
+        (rBody.length > 30 && normalizedBody.length > 30 && (rBody.startsWith(normalizedBody.slice(0, 50)) || normalizedBody.startsWith(rBody.slice(0, 50))));
+    });
+  }
+
+  const replyId = existingReply?.id || params.messageId || `inbound-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+  const receivedAt = existingReply?.receivedDateTime || params.receivedDateTime || new Date().toISOString();
+  const replyDoc = existingReply || {
     id: replyId,
     leadEmail: cleanEmail || matchedLead?.email || '',
     leadId: matchedLead?.leadId,
@@ -867,15 +1079,16 @@ export async function applyLeadReply(params: ApplyReplyParams): Promise<ApplyRep
     source: params.source || 'Webhook'
   };
 
-  try {
-    const repliesCol = db.collection(COLLECTIONS.INBOUND_REPLIES);
-    await repliesCol.updateOne(
-      { id: replyId },
-      { $set: replyDoc },
-      { upsert: true }
-    );
-  } catch (err) {
-    console.warn('[MongoDB] Could not persist inbound reply document:', err);
+  if (!existingReply && !isDummySystemBody) {
+    try {
+      await repliesCol.updateOne(
+        { id: replyId },
+        { $set: replyDoc },
+        { upsert: true }
+      );
+    } catch (err) {
+      console.warn('[MongoDB] Could not persist inbound reply document:', err);
+    }
   }
 
   if (!matchedLead) {
@@ -887,28 +1100,315 @@ export async function applyLeadReply(params: ApplyReplyParams): Promise<ApplyRep
     };
   }
 
-  const existingNotes = matchedLead.notes || '';
-  const noteTag = `[Reply detected${params.source ? ` via ${params.source}` : ''}]`;
-  const updatedNotes = existingNotes.includes(noteTag)
-    ? existingNotes
-    : (existingNotes ? `${existingNotes} | ${noteTag}` : noteTag);
+  // 1. Rule-based classification (deterministic, 100% server-side)
+  const activeKeywords = await getActiveKeywords().catch(() => undefined);
+  const classification = classifyReply(params.subject, params.body, activeKeywords);
+  const now = new Date().toISOString();
 
   const updateFields: Partial<BackendLead> = {
-    status: 'Replied',
     hasReplied: true,
     hasUnreadReply: true,
     lastReplyReceivedDate: receivedAt,
-    notes: updatedNotes,
-    updatedAt: new Date().toISOString()
+    replySentiment: classification.sentiment,
+    replyClassifiedBy: params.classifiedBy || 'auto',
+    replyClassifiedAt: now,
+    replyMatchedPhrases: classification.matchedPhrases,
+    replyReason: classification.reason,
+    updatedAt: now
   };
 
+  let pausedCompanyLeadsCount = 0;
+  let pendingConfirmation: any = undefined;
+
+  // 2. Action based on classified sentiment
+  if (classification.sentiment === 'negative') {
+    // Negative reply: stop ONLY that lead, do NOT affect anyone else at the company
+    updateFields.status = 'Negative Reply';
+    updateFields.stoppedReason = 'Negative reply received';
+    updateFields.stoppedByLeadId = undefined;
+    const noteTag = `[Negative reply detected (${classification.matchedPhrases.join(', ') || 'disinterest'}) by ${params.classifiedBy || 'auto'}: Sequence stopped]`;
+    updateFields.notes = appendLeadNote(matchedLead.notes, noteTag);
+
+  } else if (classification.sentiment === 'positive') {
+    // Positive reply: stop this lead (Replied)
+    updateFields.status = 'Replied';
+    const noteTag = `[Positive reply detected (${classification.matchedPhrases.join(', ') || 'interest'}) by ${params.classifiedBy || 'auto'}]`;
+    updateFields.notes = appendLeadNote(matchedLead.notes, noteTag);
+
+    // Stop the rest of the same company (across all campaigns)
+    const settings = await loadLocalSettings().catch(() => null);
+    const positiveAction = settings?.positiveReplyAction || 'pause_automatically';
+
+    // Find other leads that are currently Active across all campaigns
+    // NEVER touch leads already Replied, Negative Reply, Completed, or Broke Up.
+    const otherActiveLeads = await leadsCol.find(
+      {
+        leadId: { $ne: matchedLead.leadId },
+        status: 'Active'
+      },
+      { projection: { _id: 0 } }
+    ).toArray();
+
+    const sameCompanyLeads = otherActiveLeads.filter(other => areSameCompany(matchedLead, other));
+
+    if (positiveAction === 'ask_first') {
+      if (sameCompanyLeads.length > 0) {
+        pendingConfirmation = {
+          candidateLeadIds: sameCompanyLeads.map(l => l.leadId),
+          companyName: matchedLead.company,
+          count: sameCompanyLeads.length
+        };
+        updateFields.pendingCompanyPause = pendingConfirmation;
+      }
+    } else {
+      // Automatic pause: pause active colleagues at same company
+      for (const other of sameCompanyLeads) {
+        const stopReason = `Positive reply from ${matchedLead.name} at the same company`;
+        await leadsCol.updateOne(
+          { leadId: other.leadId },
+          {
+            $set: {
+              status: 'Paused',
+              stoppedReason: stopReason,
+              stoppedByLeadId: matchedLead.leadId,
+              notes: appendLeadNote(other.notes, `[Paused: ${stopReason}]`),
+              updatedAt: now
+            }
+          }
+        );
+        pausedCompanyLeadsCount++;
+      }
+    }
+
+  } else {
+    // Neutral reply: behaves exactly as today (Replied, manual follow-up)
+    updateFields.status = 'Replied';
+    const autoTag = classification.isAutoReply ? ' (auto-reply)' : '';
+    const noteTag = `[Neutral reply detected${autoTag} by ${params.classifiedBy || 'auto'}: Manual follow-up needed]`;
+    updateFields.notes = appendLeadNote(matchedLead.notes, noteTag);
+  }
+
   await leadsCol.updateOne({ leadId: matchedLead.leadId }, { $set: updateFields });
+  const updatedLeadDoc = await leadsCol.findOne({ leadId: matchedLead.leadId }, { projection: { _id: 0 } });
 
   return {
     success: true,
     applied: true,
-    lead: { ...matchedLead, ...updateFields },
-    reply: replyDoc
+    lead: updatedLeadDoc || { ...matchedLead, ...updateFields },
+    reply: replyDoc,
+    classification,
+    pausedCompanyLeadsCount,
+    pendingConfirmation
   };
 }
+
+/**
+ * Manual override for lead reply sentiment (Mark Positive / Negative / Neutral).
+ * Runs the exact same side effects and reverses previous decisions (Undo).
+ */
+export async function manualOverrideSentiment(
+  leadId: string,
+  newSentiment: 'positive' | 'negative' | 'neutral',
+  reason?: string
+): Promise<{ success: boolean; lead?: BackendLead; pausedCount: number; resumedCount: number }> {
+  const db = await getDb();
+  const leadsCol = db.collection<BackendLead>(COLLECTIONS.LEADS);
+
+  const lead = await leadsCol.findOne({ leadId }, { projection: { _id: 0 } });
+  if (!lead) {
+    return { success: false, pausedCount: 0, resumedCount: 0 };
+  }
+
+  let resumedCount = 0;
+  let pausedCount = 0;
+  const now = new Date().toISOString();
+
+  // 1. UNDO PREVIOUS DECISION
+  // If previously positive, resume company leads that were paused by this lead
+  if (lead.replySentiment === 'positive') {
+    const leadsToResume = await leadsCol.find(
+      { stoppedByLeadId: leadId, status: 'Paused' },
+      { projection: { _id: 0 } }
+    ).toArray();
+
+    for (const pausedLead of leadsToResume) {
+      await leadsCol.updateOne(
+        { leadId: pausedLead.leadId },
+        {
+          $set: {
+            status: 'Active',
+            notes: appendLeadNote(pausedLead.notes, `[Resumed: Positive reply from ${lead.name} overridden]`),
+            updatedAt: now
+          },
+          $unset: {
+            stoppedReason: "",
+            stoppedByLeadId: ""
+          }
+        }
+      );
+      resumedCount++;
+    }
+  }
+
+  // 2. APPLY NEW SENTIMENT
+  const overrideReason = reason || `Manual override to ${newSentiment}`;
+  const noteTag = `[Sentiment manually updated to ${newSentiment} by user: ${overrideReason}]`;
+
+  const updateFields: Partial<BackendLead> = {
+    replySentiment: newSentiment,
+    replyClassifiedBy: 'manual',
+    replyClassifiedAt: now,
+    replyReason: overrideReason,
+    notes: appendLeadNote(lead.notes, noteTag),
+    updatedAt: now
+  };
+
+  if (newSentiment === 'positive') {
+    updateFields.status = 'Replied';
+    updateFields.stoppedReason = undefined;
+
+    // Pause other active leads at the same company
+    const otherActiveLeads = await leadsCol.find(
+      {
+        leadId: { $ne: leadId },
+        status: 'Active'
+      },
+      { projection: { _id: 0 } }
+    ).toArray();
+
+    const sameCompanyLeads = otherActiveLeads.filter(other => areSameCompany(lead, other));
+    for (const other of sameCompanyLeads) {
+      const stopReason = `Positive reply from ${lead.name} at the same company`;
+      await leadsCol.updateOne(
+        { leadId: other.leadId },
+        {
+          $set: {
+            status: 'Paused',
+            stoppedReason: stopReason,
+            stoppedByLeadId: lead.leadId,
+            notes: appendLeadNote(other.notes, `[Paused: ${stopReason}]`),
+            updatedAt: now
+          }
+        }
+      );
+      pausedCount++;
+    }
+
+  } else if (newSentiment === 'negative') {
+    updateFields.status = 'Negative Reply';
+    updateFields.stoppedReason = 'Negative reply (manual override)';
+    updateFields.stoppedByLeadId = undefined;
+
+  } else {
+    // Neutral
+    updateFields.status = 'Replied';
+    updateFields.stoppedReason = undefined;
+  }
+
+  await leadsCol.updateOne({ leadId }, { $set: updateFields });
+  const updatedLead = await leadsCol.findOne({ leadId }, { projection: { _id: 0 } });
+
+  return {
+    success: true,
+    lead: updatedLead || undefined,
+    pausedCount,
+    resumedCount
+  };
+}
+
+/**
+ * Resumes company leads paused by a specific replying lead.
+ */
+export async function resumeCompanyLeads(replyingLeadId: string): Promise<{ success: boolean; resumedCount: number }> {
+  const db = await getDb();
+  const leadsCol = db.collection<BackendLead>(COLLECTIONS.LEADS);
+
+  const leadsToResume = await leadsCol.find(
+    { stoppedByLeadId: replyingLeadId, status: 'Paused' },
+    { projection: { _id: 0 } }
+  ).toArray();
+
+  let resumedCount = 0;
+  const now = new Date().toISOString();
+
+  for (const lead of leadsToResume) {
+    await leadsCol.updateOne(
+      { leadId: lead.leadId },
+      {
+        $set: {
+          status: 'Active',
+          notes: appendLeadNote(lead.notes, `[Resumed company outreach by user from lead ${replyingLeadId}]`),
+          updatedAt: now
+        },
+        $unset: {
+          stoppedReason: "",
+          stoppedByLeadId: ""
+        }
+      }
+    );
+    resumedCount++;
+  }
+
+  return {
+    success: true,
+    resumedCount
+  };
+}
+
+/**
+ * Confirms company pause for "Ask me first" mode.
+ */
+export async function confirmCompanyPause(replyingLeadId: string): Promise<{ success: boolean; pausedCount: number }> {
+  const db = await getDb();
+  const leadsCol = db.collection<BackendLead>(COLLECTIONS.LEADS);
+
+  const replyingLead = await leadsCol.findOne({ leadId: replyingLeadId }, { projection: { _id: 0 } });
+  if (!replyingLead) {
+    return { success: false, pausedCount: 0 };
+  }
+
+  const otherActiveLeads = await leadsCol.find(
+    {
+      leadId: { $ne: replyingLeadId },
+      status: 'Active'
+    },
+    { projection: { _id: 0 } }
+  ).toArray();
+
+  const sameCompanyLeads = otherActiveLeads.filter(other => areSameCompany(replyingLead, other));
+  let pausedCount = 0;
+  const now = new Date().toISOString();
+
+  for (const other of sameCompanyLeads) {
+    const stopReason = `Positive reply from ${replyingLead.name} at the same company`;
+    await leadsCol.updateOne(
+      { leadId: other.leadId },
+      {
+        $set: {
+          status: 'Paused',
+          stoppedReason: stopReason,
+          stoppedByLeadId: replyingLead.leadId,
+          notes: appendLeadNote(other.notes, `[Paused: ${stopReason}]`),
+          updatedAt: now
+        }
+      }
+    );
+    pausedCount++;
+  }
+
+  // Clear pendingCompanyPause on replyingLead
+  await leadsCol.updateOne(
+    { leadId: replyingLeadId },
+    {
+      $unset: { pendingCompanyPause: "" },
+      $set: { updatedAt: now }
+    }
+  );
+
+  return {
+    success: true,
+    pausedCount
+  };
+}
+
 

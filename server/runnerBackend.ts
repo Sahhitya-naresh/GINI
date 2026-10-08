@@ -6,11 +6,13 @@ import {
   loadLocalSenders, 
   saveLocalSenders,
   loadLocalTasks,
-  saveLocalTasks
+  saveLocalTasks,
+  applyLeadReply
 } from './mongoBackend.ts';
 import { checkAppThreadForReply, sendAppEmail } from './msGraphService.ts';
 import { getPublicBaseUrl } from './urlHelper.ts';
 import { DEFAULT_STAGE_TEMPLATES } from '../src/data/defaultTemplates.ts';
+import { getDb } from './mongodb.ts';
 
 export interface CampaignRunResult {
   success: boolean;
@@ -53,10 +55,13 @@ async function checkLeadForReply(
   _token?: string,
   _userEmail?: string,
   _sender?: BackendSender
-): Promise<{ hasReplied: boolean; reason?: string }> {
+): Promise<{ hasReplied: boolean; reason?: string; replyMessage?: any }> {
   // 1. Check explicit reply indicators on lead record
   if (lead.status === 'Replied') {
     return { hasReplied: true, reason: 'Status already marked Replied' };
+  }
+  if (lead.status === 'Negative Reply') {
+    return { hasReplied: true, reason: 'Status marked Negative Reply (do not contact)' };
   }
   if ((lead as any).hasReplied === true || (lead as any).hasUnreadReply === true || (lead as any).lastReplyReceivedDate) {
     return { hasReplied: true, reason: 'Incoming reply flag detected on lead record' };
@@ -79,7 +84,8 @@ async function checkLeadForReply(
       const fromInfo = res.replyMessage?.from ? ` (${res.replyMessage.from})` : '';
       return {
         hasReplied: true,
-        reason: `Lead reply detected in Microsoft Graph service account mailbox${fromInfo}`
+        reason: `Lead reply detected in Microsoft Graph service account mailbox${fromInfo}`,
+        replyMessage: res.replyMessage
       };
     }
   } catch (err) {
@@ -206,8 +212,8 @@ export async function runDueCampaignsJob(
 
     // Find leads assigned to this active campaign
     const campaignLeads = leads.filter(l => {
-      // Must not be Paused, Completed, Broke Up, or Replied
-      if (l.status === 'Paused' || l.status === 'Completed' || l.status === 'Broke Up' || l.status === 'Replied') {
+      // Must not be Paused, Completed, Broke Up, Replied, or Negative Reply
+      if (l.status === 'Paused' || l.status === 'Completed' || l.status === 'Broke Up' || l.status === 'Replied' || l.status === 'Negative Reply') {
         return false;
       }
       return l.campaignId === campaign.id || l.campaign === campaign.name;
@@ -338,13 +344,29 @@ export async function runDueCampaignsJob(
 
       const replyCheck = await checkLeadForReply(lead, token, userEmail, leadSender);
       if (replyCheck.hasReplied) {
-        lead.status = 'Replied';
-        lead.notes = lead.notes
-          ? `${lead.notes} | [Reply detected on ${todayStr}: ${replyCheck.reason}]`
-          : `Reply detected on ${todayStr}: ${replyCheck.reason}`;
+        // Only run through shared server-side applyLeadReply if a real new reply message was retrieved
+        if ((replyCheck as any).replyMessage) {
+          const applyRes = await applyLeadReply({
+            leadEmail: lead.email,
+            threadId: lead.threadId,
+            messageId: (replyCheck as any).replyMessage?.id,
+            subject: (replyCheck as any).replyMessage?.subject || 'Re: Outreach Flow follow-up',
+            body: (replyCheck as any).replyMessage?.bodyPreview || '',
+            from: (replyCheck as any).replyMessage?.from || lead.email,
+            receivedDateTime: (replyCheck as any).replyMessage?.receivedDateTime,
+            source: 'Campaign Runner Check'
+          });
+
+          if (applyRes.lead) {
+            Object.assign(lead, applyRes.lead);
+          }
+        }
+        if (lead.status !== 'Negative Reply') {
+          lead.status = 'Replied';
+        }
         await updateLead(lead, token, spreadsheetId);
         logs.push(
-          `Reply check for lead ${lead.name} (${lead.email}): Reply detected! Pulled lead to "Needs Reply" (status: Replied) instead of sending.`
+          `Reply check for lead ${lead.name} (${lead.email}): Reply detected (sentiment: ${lead.replySentiment || 'neutral'}). Sequence halted.`
         );
         continue; // Sequence permanently halted; do not send!
       }
@@ -606,6 +628,12 @@ export async function runDueCampaignsJob(
       // 3. And ONLY THEN executes the email send node!
       // --------------------------------------------------------------------
       if (rawNodeType === 'email') {
+        // Hard safety: refuse to email any lead with status 'Negative Reply' at send time
+        if (lead.status === 'Negative Reply') {
+          logs.push(`Safety Refusal: Refusing to email lead ${lead.name} (${lead.email}) - status is "Negative Reply" (do not contact).`);
+          continue;
+        }
+
         // 6.1 Determine sender account
         const senderId =
           startNode?.data?.senderId ||
@@ -671,6 +699,36 @@ export async function runDueCampaignsJob(
             baseUrl
           });
           lead.threadId = sendResult.threadId;
+
+          // Record sent email to sent_emails collection so it appears in the lead thread
+          try {
+            const db = await getDb().catch(() => null);
+            if (db) {
+              const cleanBody = (template.bodyHtml || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+              await db.collection('sent_emails').updateOne(
+                { id: sendResult.messageId },
+                {
+                  $set: {
+                    id: sendResult.messageId,
+                    leadId: lead.leadId,
+                    leadEmail: lead.email.toLowerCase(),
+                    threadId: sendResult.threadId || lead.threadId || '',
+                    from: sender?.name ? `"${sender.name}" <${sendFromAccount}>` : `Outreach Flow <${sendFromAccount}>`,
+                    to: lead.email,
+                    subject: sendResult.subject || template.subject,
+                    bodyHtml: template.bodyHtml,
+                    bodyText: cleanBody,
+                    snippet: cleanBody.substring(0, 160),
+                    date: new Date().toISOString(),
+                    stage: stageNum,
+                    campaign: lead.campaign || '',
+                    isFromLead: false
+                  }
+                },
+                { upsert: true }
+              );
+            }
+          } catch (_) {}
         } catch (sendErr: any) {
           logs.push(`Email dispatch to ${lead.name} failed via Graph: ${sendErr.message}. Skipping advance.`);
           continue;

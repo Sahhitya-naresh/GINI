@@ -18,14 +18,29 @@ import {
   saveLocalTasks,
   updateLocalTask,
   deleteLocalTask,
+  loadTaskAlertsState,
+  saveDismissedTaskAlerts,
+  clearTaskAlertsState,
   loadTrackingEvents,
   recordTrackingEvent,
   clearAllTrackingEvents,
   getSystemStatsSummary,
   applyLeadReply,
+  manualOverrideSentiment,
+  resumeCompanyLeads,
+  confirmCompanyPause,
   TrackingEvent,
   BackendLead
 } from './mongoBackend.ts';
+import {
+  getActiveKeywords,
+  saveActiveKeywords,
+  resetKeywordsToDefault,
+  validatePhrase,
+  classifyReply,
+  DEFAULT_KEYWORD_LISTS,
+  ActiveKeywordLists
+} from './replyRules.ts';
 import { getMongoStatus, getDb, autoSeedFromLocalData, updateMongoUri, COLLECTIONS } from './mongodb.ts';
 import { parseFileBuffer } from './importBackend.ts';
 import { runDueCampaignsJob } from './runnerBackend.ts';
@@ -43,6 +58,7 @@ import {
 } from './msGraphService.ts';
 import { getAuthDiagnostics } from './msGraphAuth.ts';
 import { getPublicBaseUrl } from './urlHelper.ts';
+import { renderEmailMergeTags, DEFAULT_STAGE_TEMPLATES } from '../src/data/defaultTemplates.ts';
 
 export const app = express();
 
@@ -592,7 +608,7 @@ app.post('/api/leads/delete', async (req, res) => {
 
 // --- Campaigns CRUD & Workflow Graph Endpoints (MongoDB) ---
 
-app.all(['/api/campaigns', '/api/campaigns/list'], async (_req, res) => {
+app.get(['/api/campaigns', '/api/campaigns/list'], async (_req, res) => {
   try {
     const campaigns = await listCampaigns();
     res.json({ success: true, count: campaigns.length, campaigns });
@@ -602,9 +618,9 @@ app.all(['/api/campaigns', '/api/campaigns/list'], async (_req, res) => {
   }
 });
 
-app.post('/api/campaigns/save', async (req, res) => {
+app.post(['/api/campaigns', '/api/campaigns/save'], async (req, res) => {
   try {
-    const campaign = req.body.campaign;
+    const campaign = req.body.campaign || req.body;
     if (!campaign || !campaign.id) {
       return res.status(400).json({ success: false, error: 'Missing campaign or campaign.id' });
     }
@@ -761,6 +777,38 @@ app.post('/api/tasks/delete', async (req, res) => {
   }
 });
 
+app.get('/api/tasks/alerts-state', async (_req, res) => {
+  try {
+    const state = await loadTaskAlertsState();
+    res.json({ success: true, dismissedAlertIds: state.dismissedAlertIds });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post('/api/tasks/alerts-state/dismiss', async (req, res) => {
+  try {
+    const alertIds = Array.isArray(req.body.alertIds)
+      ? req.body.alertIds
+      : req.body.alertId
+      ? [req.body.alertId]
+      : [];
+    const updated = await saveDismissedTaskAlerts(alertIds);
+    res.json({ success: true, dismissedAlertIds: updated });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post('/api/tasks/alerts-state/clear', async (_req, res) => {
+  try {
+    await clearTaskAlertsState();
+    res.json({ success: true, dismissedAlertIds: [] });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // --- System Overview & Stats ---
 
 app.get('/api/system/stats', async (_req, res) => {
@@ -819,6 +867,29 @@ app.post('/api/email/send-stage', async (req, res) => {
     if (!lead || !lead.email) {
       return res.status(400).json({ success: false, error: 'Lead with email is required' });
     }
+
+    // Hard safety check: Refuse to email any lead with status 'Negative Reply' at send time
+    if (lead.status === 'Negative Reply') {
+      return res.status(400).json({
+        success: false,
+        error: `Cannot email lead ${lead.name || lead.email}: Lead status is "Negative Reply" (do not contact).`
+      });
+    }
+
+    // Verify database record as real-time safety boundary
+    const db = await getDb().catch(() => null);
+    if (db) {
+      const dbLead = await db.collection(COLLECTIONS.LEADS).findOne({
+        $or: [{ leadId: lead.leadId }, { email: lead.email }]
+      });
+      if (dbLead && dbLead.status === 'Negative Reply') {
+        return res.status(400).json({
+          success: false,
+          error: `Cannot email lead ${lead.name || lead.email}: Lead status is "Negative Reply" (do not contact).`
+        });
+      }
+    }
+
     if (!template || !template.subject || !template.bodyHtml) {
       return res.status(400).json({ success: false, error: 'Stage template is required' });
     }
@@ -833,12 +904,91 @@ app.post('/api/email/send-stage', async (req, res) => {
       baseUrl
     });
 
+    // Record outbound email to sent_emails collection so it appears in the thread
+    const effectiveSender = customSenderName
+      ? `"${customSenderName}" <${lead.senderUsed || 'care@giniiris.ai'}>`
+      : (lead.senderUsed ? `Outreach Flow <${lead.senderUsed}>` : 'You <care@giniiris.ai>');
+
+    await recordSentEmail({
+      id: result.messageId,
+      leadId: lead.leadId,
+      leadEmail: lead.email,
+      threadId: result.threadId || lead.threadId,
+      from: effectiveSender,
+      to: lead.email,
+      subject: result.subject || template.subject,
+      bodyHtml: template.bodyHtml,
+      stage: stageNum || template.stage || 1,
+      campaign: lead.campaign
+    });
+
     res.json(result);
   } catch (err: any) {
     console.error('API /api/email/send-stage error:', err);
     res.status(500).json({ success: false, error: err.message });
   }
 });
+
+function stripHtmlTags(html: string): string {
+  return (html || '')
+    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
+    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+export async function recordSentEmail(entry: {
+  id?: string;
+  leadId?: string;
+  leadEmail: string;
+  threadId?: string;
+  from?: string;
+  to: string;
+  subject: string;
+  bodyHtml: string;
+  bodyText?: string;
+  stage?: number;
+  campaign?: string;
+  date?: string;
+}) {
+  const db = await getDb().catch(() => null);
+  const cleanEmail = (entry.leadEmail || entry.to || '').trim().toLowerCase();
+  const doc = {
+    id: entry.id || `sent-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+    leadId: entry.leadId || '',
+    leadEmail: cleanEmail,
+    threadId: entry.threadId || '',
+    from: entry.from || 'You <care@giniiris.ai>',
+    to: entry.to || cleanEmail,
+    subject: entry.subject || 'Outreach email',
+    bodyHtml: entry.bodyHtml || '',
+    bodyText: entry.bodyText || stripHtmlTags(entry.bodyHtml),
+    snippet: stripHtmlTags(entry.bodyHtml).substring(0, 160),
+    date: entry.date || new Date().toISOString(),
+    stage: entry.stage || 1,
+    campaign: entry.campaign || '',
+    isFromLead: false
+  };
+
+  if (db) {
+    try {
+      await db.collection('sent_emails').updateOne(
+        { id: doc.id },
+        { $set: doc },
+        { upsert: true }
+      );
+    } catch (e) {
+      console.warn('Could not persist sent_email doc to DB:', e);
+    }
+  }
+  return doc;
+}
 
 interface InboundReply {
   id: string;
@@ -854,58 +1004,226 @@ const inMemoryInboundReplies: InboundReply[] = [];
 
 app.get('/api/email/thread', async (req, res) => {
   try {
-    const threadId = req.query.threadId as string;
-    const leadEmail = req.query.leadEmail as string;
-    const result = await getAppConversationThread(threadId, leadEmail);
+    const threadId = (req.query.threadId as string) || '';
+    const leadEmail = (req.query.leadEmail as string) || '';
+    const cleanEmail = leadEmail.trim().toLowerCase();
 
-    // Also include any recorded inbound replies
-    const cleanEmail = (leadEmail || '').trim().toLowerCase();
-    let matchingInbound = inMemoryInboundReplies.filter(
-      r => (cleanEmail && r.leadEmail === cleanEmail) || (threadId && r.threadId === threadId)
-    );
+    // 1. Fetch Microsoft Graph messages if configured
+    const graphResult = await getAppConversationThread(threadId, leadEmail).catch(() => ({ messages: [], subject: '' }));
 
     const db = await getDb().catch(() => null);
+
+    // 2. Query sent_emails collection from database
+    let sentMessages: any[] = [];
+    let leadDoc: any = null;
+
     if (db) {
       try {
-        const query: any = {};
+        const sentQuery: any = {};
         if (cleanEmail && threadId) {
-          query.$or = [{ leadEmail: cleanEmail }, { threadId }];
+          sentQuery.$or = [{ leadEmail: cleanEmail }, { threadId }];
         } else if (cleanEmail) {
-          query.leadEmail = cleanEmail;
+          sentQuery.leadEmail = cleanEmail;
         } else if (threadId) {
-          query.threadId = threadId;
+          sentQuery.threadId = threadId;
         }
-        const dbReplies = await (db.collection('inbound_replies') as any).find(query).toArray();
-        for (const r of dbReplies) {
-          if (!matchingInbound.some(m => m.id === r.id)) {
-            matchingInbound.push(r);
-          }
+        sentMessages = await db.collection('sent_emails').find(sentQuery).toArray();
+
+        // Also query the lead document to check if we need to backfill past stage emails
+        const leadQuery: any = {};
+        if (cleanEmail && threadId) {
+          leadQuery.$or = [{ email: cleanEmail }, { threadId }];
+        } else if (cleanEmail) {
+          leadQuery.email = cleanEmail;
+        } else if (threadId) {
+          leadQuery.threadId = threadId;
         }
+        leadDoc = await db.collection(COLLECTIONS.LEADS).findOne(leadQuery);
       } catch (_) {}
     }
 
-    if (matchingInbound.length > 0) {
-      const messages = [...result.messages];
-      for (const inb of matchingInbound) {
-        if (!messages.some(m => m.id === inb.id)) {
-          messages.push({
-            id: inb.id,
-            threadId: inb.threadId || threadId || '',
-            from: inb.from || cleanEmail,
-            to: '',
-            date: inb.receivedDateTime,
-            subject: inb.subject,
-            snippet: inb.body,
-            bodyHtml: `<p>${inb.body}</p>`,
-            bodyText: inb.body,
-            isFromLead: true
-          });
+    // 3. If no sent emails are recorded in sent_emails yet, but lead exists and was dispatched to
+    if (sentMessages.length === 0 && leadDoc && (leadDoc.lastEmailSentDate || (leadDoc.currentStage || 0) >= 1)) {
+      try {
+        let campaignDoc: any = null;
+        if (leadDoc.campaignId) {
+          campaignDoc = await db.collection(COLLECTIONS.CAMPAIGNS).findOne({ id: leadDoc.campaignId }).catch(() => null);
+        } else if (leadDoc.campaign) {
+          campaignDoc = await db.collection(COLLECTIONS.CAMPAIGNS).findOne({ name: leadDoc.campaign }).catch(() => null);
         }
+
+        const senderDisplayName = leadDoc.senderUsed || 'Care';
+        const senderEmail = leadDoc.senderUsed || 'care@giniiris.ai';
+        const maxStage = Math.max(1, leadDoc.currentStage || 1);
+
+        for (let st = 1; st <= maxStage; st++) {
+          let subject = '';
+          let bodyHtml = '';
+
+          if (campaignDoc) {
+            const nodes = campaignDoc.workflow_graph?.nodes || campaignDoc.nodes || [];
+            const emailNodes = nodes.filter((n: any) => n.type === 'emailNode' || n.data?.nodeType === 'email');
+            const emailNode = emailNodes[st - 1];
+            if (emailNode?.data) {
+              subject = emailNode.data.customSubject || '';
+              bodyHtml = (emailNode.data.customBody || '').replace(/\n/g, '<br/>');
+            }
+          }
+
+          if (!subject || !bodyHtml) {
+            const defaultTpl = DEFAULT_STAGE_TEMPLATES.find(t => t.stage === st) || DEFAULT_STAGE_TEMPLATES[0];
+            subject = subject || defaultTpl.subject;
+            bodyHtml = bodyHtml || defaultTpl.bodyHtml;
+          }
+
+          const renderedSubject = renderEmailMergeTags(subject, leadDoc, senderDisplayName);
+          const renderedBody = renderEmailMergeTags(bodyHtml, leadDoc, senderDisplayName);
+
+          const backfilledDoc = {
+            id: `sent-${leadDoc.leadId}-stage-${st}`,
+            leadId: leadDoc.leadId,
+            leadEmail: cleanEmail || leadDoc.email.toLowerCase(),
+            threadId: threadId || leadDoc.threadId || '',
+            from: `"${senderDisplayName}" <${senderEmail}>`,
+            to: leadDoc.email,
+            date: leadDoc.lastEmailSentDate || leadDoc.createdAt || new Date().toISOString(),
+            subject: renderedSubject,
+            snippet: stripHtmlTags(renderedBody).substring(0, 160),
+            bodyHtml: renderedBody,
+            bodyText: stripHtmlTags(renderedBody),
+            stage: st,
+            campaign: leadDoc.campaign || '',
+            isFromLead: false
+          };
+
+          sentMessages.push(backfilledDoc);
+          if (db) {
+            await db.collection('sent_emails').updateOne(
+              { id: backfilledDoc.id },
+              { $set: backfilledDoc },
+              { upsert: true }
+            ).catch(() => {});
+          }
+        }
+      } catch (backfillErr) {
+        console.warn('Error backfilling sent stage emails:', backfillErr);
       }
-      return res.json({ success: true, messages, subject: result.subject || matchingInbound[0].subject });
     }
 
-    res.json({ success: true, ...result });
+    // 4. Query inbound_replies collection
+    let inboundReplies: any[] = [];
+    if (db) {
+      try {
+        const inbQuery: any = {};
+        if (cleanEmail && threadId) {
+          inbQuery.$or = [{ leadEmail: cleanEmail }, { threadId }];
+        } else if (cleanEmail) {
+          inbQuery.leadEmail = cleanEmail;
+        } else if (threadId) {
+          inbQuery.threadId = threadId;
+        }
+        inboundReplies = await db.collection('inbound_replies').find(inbQuery).toArray();
+      } catch (_) {}
+    }
+
+    // Also include any recorded in-memory inbound replies
+    for (const inb of inMemoryInboundReplies) {
+      if ((cleanEmail && inb.leadEmail === cleanEmail) || (threadId && inb.threadId === threadId)) {
+        if (!inboundReplies.some(m => m.id === inb.id)) {
+          inboundReplies.push(inb);
+        }
+      }
+    }
+
+    // 5. Build combined thread messages
+    const messageMap = new Map<string, any>();
+
+    // Add Graph messages
+    for (const msg of graphResult.messages || []) {
+      messageMap.set(msg.id, msg);
+    }
+
+    // Add sent messages
+    for (const sent of sentMessages) {
+      messageMap.set(sent.id, {
+        id: sent.id,
+        threadId: sent.threadId || threadId,
+        from: sent.from || 'You <care@giniiris.ai>',
+        to: sent.to || cleanEmail,
+        date: sent.date,
+        subject: sent.subject,
+        snippet: sent.snippet || stripHtmlTags(sent.bodyHtml),
+        bodyHtml: sent.bodyHtml,
+        bodyText: sent.bodyText || stripHtmlTags(sent.bodyHtml),
+        isFromLead: false
+      });
+    }
+
+    // Add inbound replies (filter out dummy system records and map fields)
+    for (const inb of inboundReplies) {
+      if (!inb) continue;
+      const rawBody = inb.body || inb.bodyText || inb.snippet || '';
+      // Exclude internal dummy status strings from appearing as emails in thread
+      if (
+        rawBody.includes('Incoming reply flag detected on lead record') ||
+        rawBody.includes('Status already marked Replied') ||
+        rawBody.includes('Status marked Negative Reply')
+      ) {
+        continue;
+      }
+
+      messageMap.set(inb.id, {
+        id: inb.id,
+        threadId: inb.threadId || threadId,
+        from: inb.from || cleanEmail,
+        to: inb.to || '',
+        date: inb.receivedDateTime || inb.date || new Date().toISOString(),
+        subject: inb.subject || 'Re: Outreach Flow follow-up',
+        snippet: inb.snippet || rawBody,
+        bodyHtml: inb.bodyHtml || (rawBody ? `<p>${rawBody.replace(/\n/g, '<br/>')}</p>` : ''),
+        bodyText: rawBody,
+        isFromLead: true
+      });
+    }
+
+    // Deduplicate across Graph, sent emails, and inbound replies
+    const allRaw = Array.from(messageMap.values());
+    const seenSignatures = new Set<string>();
+    const deduplicatedMessages: any[] = [];
+
+    for (const msg of allRaw) {
+      const isFromLead = Boolean(msg.isFromLead);
+      const cleanBody = (msg.bodyText || msg.snippet || msg.bodyHtml || '')
+        .trim()
+        .replace(/\s+/g, ' ')
+        .toLowerCase()
+        .substring(0, 100);
+
+      // Unique signature:
+      // Inbound: lead email + first 100 chars of normalized text
+      // Outbound: stage + sent date day + normalized subject
+      const dateDay = (msg.date || '').slice(0, 10);
+      const signature = isFromLead
+        ? `inbound_${(msg.from || cleanEmail).toLowerCase().trim()}_${cleanBody}`
+        : `outbound_${msg.stage || 0}_${dateDay}_${(msg.subject || '').trim().toLowerCase()}`;
+
+      if (cleanBody && seenSignatures.has(signature)) {
+        continue;
+      }
+      seenSignatures.add(signature);
+      deduplicatedMessages.push(msg);
+    }
+
+    // Sort chronologically (oldest first)
+    deduplicatedMessages.sort((a, b) => new Date(a.date || 0).getTime() - new Date(b.date || 0).getTime());
+
+    const subject = graphResult.subject || sentMessages[0]?.subject || inboundReplies[0]?.subject || (threadId ? `Conversation ${threadId}` : 'Email Thread');
+
+    res.json({
+      success: true,
+      messages: deduplicatedMessages,
+      subject
+    });
   } catch (err: any) {
     console.error('API /api/email/thread error:', err);
     res.status(500).json({ success: false, error: err.message });
@@ -926,7 +1244,27 @@ app.post('/api/email/check-reply', async (req, res) => {
     });
 
     if (result.hasReplied) {
-      return res.json({ success: true, ...result });
+      // Process through shared reply logic & rule-based sentiment classification
+      const applyResult = await applyLeadReply({
+        leadEmail,
+        threadId,
+        messageId: result.replyMessage?.id,
+        subject: result.replyMessage?.subject || 'Re: Outreach Flow follow-up',
+        body: result.replyMessage?.bodyPreview || result.reason || '',
+        from: result.replyMessage?.from || leadEmail,
+        receivedDateTime: result.replyMessage?.receivedDateTime,
+        source: 'Microsoft Graph Reply Check'
+      });
+
+      return res.json({
+        success: true,
+        ...result,
+        applied: applyResult.applied,
+        updatedLead: applyResult.lead,
+        classification: applyResult.classification,
+        pausedCompanyLeadsCount: applyResult.pausedCompanyLeadsCount,
+        pendingConfirmation: applyResult.pendingConfirmation
+      });
     }
 
     // In production, real Microsoft Graph API is the sole source of truth for reply detection.
@@ -965,6 +1303,18 @@ app.post('/api/email/check-reply', async (req, res) => {
           }
         }
 
+        // Process through shared reply logic & rule-based sentiment classification
+        const applyResult = await applyLeadReply({
+          leadEmail: cleanEmail,
+          threadId: reply.threadId || threadId,
+          messageId: reply.id,
+          subject: reply.subject || 'Re: Outreach Flow follow-up',
+          body: reply.body || '',
+          from: reply.from || cleanEmail,
+          receivedDateTime: reply.receivedDateTime,
+          source: 'Simulated Inbound Reply'
+        });
+
         return res.json({
           success: true,
           hasReplied: true,
@@ -975,7 +1325,12 @@ app.post('/api/email/check-reply', async (req, res) => {
             subject: reply.subject,
             receivedDateTime: reply.receivedDateTime,
             bodyPreview: reply.body
-          }
+          },
+          applied: applyResult.applied,
+          updatedLead: applyResult.lead,
+          classification: applyResult.classification,
+          pausedCompanyLeadsCount: applyResult.pausedCompanyLeadsCount,
+          pendingConfirmation: applyResult.pendingConfirmation
         });
       }
     }
@@ -983,6 +1338,201 @@ app.post('/api/email/check-reply', async (req, res) => {
     res.json({ success: true, ...result });
   } catch (err: any) {
     console.error('API /api/email/check-reply error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// --- Manual Sentiment Override & Company Actions Endpoints ---
+
+app.post('/api/leads/override-sentiment', async (req, res) => {
+  try {
+    const { leadId, sentiment, reason } = req.body;
+    if (!leadId || !sentiment) {
+      return res.status(400).json({ success: false, error: 'leadId and sentiment are required' });
+    }
+    const result = await manualOverrideSentiment(leadId, sentiment, reason);
+    res.json(result);
+  } catch (err: any) {
+    console.error('API /api/leads/override-sentiment error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post('/api/leads/resume-company', async (req, res) => {
+  try {
+    const replyingLeadId = req.body.replyingLeadId || req.body.leadId;
+    if (!replyingLeadId) {
+      return res.status(400).json({ success: false, error: 'replyingLeadId is required' });
+    }
+    const result = await resumeCompanyLeads(replyingLeadId);
+    res.json(result);
+  } catch (err: any) {
+    console.error('API /api/leads/resume-company error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post('/api/leads/confirm-company-pause', async (req, res) => {
+  try {
+    const replyingLeadId = req.body.replyingLeadId || req.body.leadId;
+    if (!replyingLeadId) {
+      return res.status(400).json({ success: false, error: 'replyingLeadId is required' });
+    }
+    const result = await confirmCompanyPause(replyingLeadId);
+    res.json(result);
+  } catch (err: any) {
+    console.error('API /api/leads/confirm-company-pause error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ===========================================================================
+// REPLY CLASSIFIER KEYWORD RULES & TEST ENDPOINTS
+// ===========================================================================
+
+app.get('/api/reply-rules', async (_req, res) => {
+  try {
+    const lists = await getActiveKeywords();
+    res.json({
+      success: true,
+      lists,
+      defaults: DEFAULT_KEYWORD_LISTS
+    });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post('/api/reply-rules', async (req, res) => {
+  try {
+    const { negativePhrases, positivePhrases, deferralPhrases, autoReplyPhrases } = req.body;
+
+    const sanitizeList = (raw: any, categoryName: string): string[] | undefined => {
+      if (raw === undefined) return undefined;
+      if (!Array.isArray(raw)) throw new Error(`${categoryName} must be an array of strings`);
+      const sanitized: string[] = [];
+      const seen = new Set<string>();
+
+      for (const item of raw) {
+        const str = String(item || '');
+        const v = validatePhrase(str, sanitized);
+        if (!v.valid) {
+          throw new Error(`[${categoryName}] ${v.error}`);
+        }
+        if (!seen.has(v.normalized)) {
+          seen.add(v.normalized);
+          sanitized.push(v.normalized);
+        }
+      }
+      return sanitized;
+    };
+
+    const updated = await saveActiveKeywords({
+      negativePhrases: sanitizeList(negativePhrases, 'Negative phrases'),
+      positivePhrases: sanitizeList(positivePhrases, 'Positive phrases'),
+      deferralPhrases: sanitizeList(deferralPhrases, 'Deferral phrases'),
+      autoReplyPhrases: sanitizeList(autoReplyPhrases, 'Auto-reply phrases')
+    });
+
+    res.json({
+      success: true,
+      lists: updated,
+      defaults: DEFAULT_KEYWORD_LISTS
+    });
+  } catch (err: any) {
+    res.status(400).json({ success: false, error: err.message });
+  }
+});
+
+app.post('/api/reply-rules/reset', async (req, res) => {
+  try {
+    const { category } = req.body;
+    const updated = await resetKeywordsToDefault(category);
+    res.json({
+      success: true,
+      lists: updated,
+      defaults: DEFAULT_KEYWORD_LISTS
+    });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post('/api/reply-rules/test', async (req, res) => {
+  try {
+    const { text, subject } = req.body;
+    const activeKeywords = await getActiveKeywords();
+    const classification = classifyReply(subject || '', text || '', activeKeywords);
+    res.json({
+      success: true,
+      classification
+    });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.get('/api/reply-rules/preview-recent', async (_req, res) => {
+  try {
+    const db = await getDb();
+    const activeKeywords = await getActiveKeywords();
+
+    // Find up to 10 most recent leads with replies
+    const leads = await db
+      .collection(COLLECTIONS.LEADS)
+      .find({
+        $or: [
+          { status: 'Replied' },
+          { status: 'Negative Reply' },
+          { hasReplied: true },
+          { lastReplyReceivedDate: { $exists: true, $ne: '' } }
+        ]
+      })
+      .sort({ lastReplyReceivedDate: -1, updatedAt: -1 })
+      .limit(10)
+      .toArray();
+
+    // Also look up stored inbound reply snippets if available
+    const inboundReplies = await db
+      .collection(COLLECTIONS.INBOUND_REPLIES)
+      .find({})
+      .sort({ receivedDateTime: -1, createdAt: -1 })
+      .limit(20)
+      .toArray();
+
+    const previews = leads.map(l => {
+      const matchingReply = inboundReplies.find(
+        (r: any) =>
+          (l.email && r.leadEmail && r.leadEmail.toLowerCase() === l.email.toLowerCase()) ||
+          (l.threadId && r.threadId && r.threadId === l.threadId)
+      );
+
+      const replyBody = (matchingReply as any)?.body || l.notes || '';
+      const replySubject = (matchingReply as any)?.subject || '';
+      const currentSentiment = l.replySentiment || (l.status === 'Negative Reply' ? 'negative' : 'neutral');
+
+      const sim = classifyReply(replySubject, replyBody, activeKeywords);
+
+      return {
+        leadId: l.leadId,
+        name: l.name,
+        email: l.email,
+        company: l.company,
+        replySnippet: replyBody.slice(0, 150),
+        currentSentiment,
+        simulatedSentiment: sim.sentiment,
+        matchedPhrases: sim.matchedPhrases,
+        reason: sim.reason,
+        sentimentChanged: currentSentiment !== sim.sentiment
+      };
+    });
+
+    res.json({
+      success: true,
+      count: previews.length,
+      previews
+    });
+  } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });
   }
 });
