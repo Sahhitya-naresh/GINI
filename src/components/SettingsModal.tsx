@@ -39,6 +39,7 @@ import {
   ReplyPreviewItem,
   ReplyClassificationTestResult
 } from '../services/leadBackendService';
+import { getHeaderFooter, saveHeaderFooter } from '../services/templateService';
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -75,6 +76,36 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [testEmailTo, setTestEmailTo] = useState('nick.ron890@gmail.com');
   const [isSendingTest, setIsSendingTest] = useState(false);
   const [testResult, setTestResult] = useState<{ success: boolean; message: string; details?: any } | null>(null);
+
+  // Email Header & Footer state (Admin only)
+  const [emailHeader, setEmailHeader] = useState<string>('');
+  const [emailFooter, setEmailFooter] = useState<string>('');
+  const [isSavingHeaderFooter, setIsSavingHeaderFooter] = useState<boolean>(false);
+  const [headerFooterToast, setHeaderFooterToast] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (isOpen) {
+      getHeaderFooter().then(res => {
+        setEmailHeader(res.header || '');
+        setEmailFooter(res.footer || '');
+      }).catch(() => {});
+    }
+  }, [isOpen]);
+
+  const handleSaveHeaderFooter = async () => {
+    setIsSavingHeaderFooter(true);
+    try {
+      const res = await saveHeaderFooter(emailHeader, emailFooter);
+      setEmailHeader(res.header);
+      setEmailFooter(res.footer);
+      setHeaderFooterToast('Header & footer saved!');
+      setTimeout(() => setHeaderFooterToast(null), 3000);
+    } catch (err: any) {
+      alert(err.message || 'Failed to save header and footer');
+    } finally {
+      setIsSavingHeaderFooter(false);
+    }
+  };
 
   const fetchGraphStatus = async () => {
     try {
@@ -1341,6 +1372,73 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   </div>
                 </div>
               )}
+            </div>
+          </div>
+
+          {/* Global Email Header & Footer (Admin Only) */}
+          <div className="space-y-3.5 p-4 bg-slate-50 rounded-xl border border-slate-200">
+            <div className="flex items-center justify-between">
+              <div>
+                <h3 className="text-xs font-bold uppercase tracking-wider text-slate-800 flex items-center gap-1.5">
+                  <Mail className="w-3.5 h-3.5 text-red-600" />
+                  <span>Global Email Header &amp; Footer</span>
+                </h3>
+                <p className="text-[11px] text-slate-500 mt-0.5">
+                  Composed with every outbound email across runner, manual send, and previews.
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                {headerFooterToast && (
+                  <span className="text-[11px] font-semibold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200 animate-fade-in">
+                    {headerFooterToast}
+                  </span>
+                )}
+                <span className="text-[10px] text-red-700 bg-red-50 font-semibold px-2 py-0.5 rounded border border-red-200">
+                  Admin Configured
+                </span>
+              </div>
+            </div>
+
+            <div className="space-y-3 text-xs">
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  Global Email Header HTML
+                </label>
+                <textarea
+                  rows={3}
+                  value={emailHeader}
+                  onChange={(e) => setEmailHeader(e.target.value)}
+                  placeholder="<div style='text-align: center;'><img src='https://...' alt='Logo'/></div>"
+                  className="w-full p-2.5 font-mono text-xs rounded-lg border border-slate-300 focus:ring-2 focus:ring-red-500 bg-white text-slate-800"
+                />
+                <span className="text-[11px] text-slate-400">Supports simple formatting, links, https images, and merge tags. Empty by default.</span>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  Global Email Footer HTML
+                </label>
+                <textarea
+                  rows={3}
+                  value={emailFooter}
+                  onChange={(e) => setEmailFooter(e.target.value)}
+                  placeholder="<p style='color: #888;'>Acme Corp &bull; Unsubscribe</p>"
+                  className="w-full p-2.5 font-mono text-xs rounded-lg border border-slate-300 focus:ring-2 focus:ring-red-500 bg-white text-slate-800"
+                />
+                <span className="text-[11px] text-slate-400">Footer links are never rewritten with click tracking. Empty by default.</span>
+              </div>
+
+              <div className="flex items-center justify-end">
+                <button
+                  type="button"
+                  onClick={handleSaveHeaderFooter}
+                  disabled={isSavingHeaderFooter}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white rounded-lg text-xs font-semibold transition-colors disabled:opacity-50"
+                >
+                  <Save className="w-3.5 h-3.5" />
+                  <span>{isSavingHeaderFooter ? 'Saving Header/Footer...' : 'Save Header & Footer'}</span>
+                </button>
+              </div>
             </div>
           </div>
 

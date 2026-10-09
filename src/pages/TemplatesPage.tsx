@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { StageTemplate, Lead, ConnectedSender } from '../types';
+import React, { useState, useEffect, useMemo } from 'react';
+import { StageTemplate, Lead, ConnectedSender, AppUser, TemplateSet, TemplateStageItem } from '../types';
 import { renderEmailMergeTags, DEFAULT_STAGE_TEMPLATES } from '../data/defaultTemplates';
 import { 
   Monitor, 
@@ -12,35 +12,125 @@ import {
   Info,
   Save,
   UserCheck,
-  Table as TableIcon
+  Table as TableIcon,
+  History,
+  Lock,
+  AlertTriangle,
+  ChevronDown,
+  RefreshCw,
+  User
 } from 'lucide-react';
+import {
+  getDefaultTemplateSet,
+  getUserTemplateSet,
+  saveTemplateSet,
+  restoreTemplateSetVersion,
+  resetUserTemplateSetToDefault,
+  getHeaderFooter
+} from '../services/templateService';
+import { listUsersApi } from '../services/authService';
 
 interface TemplateAdminProps {
-  templates: StageTemplate[];
-  onSaveTemplates: (updated: StageTemplate[]) => void;
+  templates?: StageTemplate[];
+  onSaveTemplates?: (updated: StageTemplate[]) => void;
   leads: Lead[];
   senderName: string;
   senders?: ConnectedSender[];
+  currentUser?: AppUser | null;
 }
 
 export const TemplateAdmin: React.FC<TemplateAdminProps> = ({
-  templates,
-  onSaveTemplates,
   leads,
   senderName,
-  senders = []
+  senders = [],
+  currentUser
 }) => {
   const [selectedStageNumber, setSelectedStageNumber] = useState<number>(1);
-  const [editedTemplates, setEditedTemplates] = useState<StageTemplate[]>(templates);
   const [previewDevice, setPreviewDevice] = useState<'desktop' | 'mobile'>('desktop');
   const [activeLeadIndex, setActiveLeadIndex] = useState<number>(0);
   const [showSavedToast, setShowSavedToast] = useState(false);
   const [editorMode, setEditorMode] = useState<'visual' | 'code'>('visual');
   const [showTableView, setShowTableView] = useState(false);
 
-  const currentTemplate = editedTemplates.find(t => t.stage === selectedStageNumber) || editedTemplates[0];
+  // Template sets state
+  const [activeSetType, setActiveSetType] = useState<'mine' | 'default' | 'user'>('mine');
+  const [selectedUserId, setSelectedUserId] = useState<string>(currentUser?.id || '');
+  const [allUsers, setAllUsers] = useState<AppUser[]>([]);
+  const [currentSet, setCurrentSet] = useState<TemplateSet | null>(null);
+  const [editedStages, setEditedStages] = useState<TemplateStageItem[]>([]);
+  const [isLoadingSet, setIsLoadingSet] = useState<boolean>(true);
+  const [saveError, setSaveError] = useState<string | null>(null);
 
-  // Select sample lead for preview
+  // Header & Footer state (locked read-only in template editor)
+  const [globalHeader, setGlobalHeader] = useState<string>('');
+  const [globalFooter, setGlobalFooter] = useState<string>('');
+
+  // Modals
+  const [showHistoryModal, setShowHistoryModal] = useState<boolean>(false);
+  const [showResetModal, setShowResetModal] = useState<boolean>(false);
+  const [isResetting, setIsResetting] = useState<boolean>(false);
+
+  const isAdmin = currentUser?.role === 'admin';
+  const hasEditAny = Boolean(currentUser?.permissions?.includes('templates.editAny'));
+  const hasEditDefault = Boolean(currentUser?.permissions?.includes('templates.editDefault'));
+  const canSelectOtherSets = isAdmin || hasEditAny;
+
+  // Load all users if permitted to view other sets
+  useEffect(() => {
+    if (canSelectOtherSets) {
+      listUsersApi().then(res => {
+        if (res.success && res.users) {
+          setAllUsers(res.users);
+        }
+      }).catch(() => {});
+    }
+  }, [canSelectOtherSets]);
+
+  // Load global header and footer
+  useEffect(() => {
+    getHeaderFooter().then(res => {
+      setGlobalHeader(res.header || '');
+      setGlobalFooter(res.footer || '');
+    }).catch(() => {});
+  }, []);
+
+  // Load template set based on activeSetType and selectedUserId
+  const loadActiveSet = async () => {
+    setIsLoadingSet(true);
+    setSaveError(null);
+    try {
+      let set: TemplateSet;
+      if (activeSetType === 'default') {
+        set = await getDefaultTemplateSet();
+      } else if (activeSetType === 'user' && selectedUserId) {
+        set = await getUserTemplateSet(selectedUserId);
+      } else {
+        // mine
+        set = await getUserTemplateSet(currentUser?.id || 'current');
+      }
+      setCurrentSet(set);
+      setEditedStages(set.stages || []);
+    } catch (err: any) {
+      setSaveError(err.message || 'Failed to load template set');
+    } finally {
+      setIsLoadingSet(false);
+    }
+  };
+
+  useEffect(() => {
+    loadActiveSet();
+  }, [activeSetType, selectedUserId, currentUser?.id]);
+
+  const currentStage = editedStages.find(s => s.stage === selectedStageNumber) || editedStages[0] || {
+    stage: 1,
+    name: 'Introduction',
+    purpose: 'Initial outreach',
+    defaultGapDays: 3,
+    subject: '',
+    bodyHtml: ''
+  };
+
+  // Preview lead
   const previewLead: Partial<Lead> = leads.length > 0 
     ? leads[activeLeadIndex] || leads[0] 
     : {
@@ -50,41 +140,90 @@ export const TemplateAdmin: React.FC<TemplateAdminProps> = ({
         email: 'jordan@apex-example.com'
       };
 
-  const renderedSubject = renderEmailMergeTags(currentTemplate.subject, previewLead, senderName);
-  const renderedBodyHtml = renderEmailMergeTags(currentTemplate.bodyHtml, previewLead, senderName);
+  const renderedSubject = renderEmailMergeTags(currentStage.subject || '', previewLead, senderName);
+  const renderedHeader = globalHeader ? renderEmailMergeTags(globalHeader, previewLead, senderName) : '';
+  const renderedBodyHtml = renderEmailMergeTags(currentStage.bodyHtml || '', previewLead, senderName);
+  const renderedFooter = globalFooter ? renderEmailMergeTags(globalFooter, previewLead, senderName) : '';
 
-  const handleFieldChange = (field: keyof StageTemplate, value: any) => {
-    const updated = editedTemplates.map(t => {
-      if (t.stage === selectedStageNumber) {
-        return { ...t, [field]: value };
+  // Calculate full composed plain text length for length warning
+  const fullComposedHtml = useMemo(() => {
+    const parts: string[] = [];
+    if (renderedHeader.trim()) parts.push(`<div class="email-header" style="margin-bottom: 20px;">${renderedHeader}</div>`);
+    parts.push(`<div class="email-body">${renderedBodyHtml}</div>`);
+    if (renderedFooter.trim()) parts.push(`<div class="email-footer" style="margin-top: 28px;">${renderedFooter}</div>`);
+    return parts.join('\n');
+  }, [renderedHeader, renderedBodyHtml, renderedFooter]);
+
+  const plainTextLength = useMemo(() => {
+    return fullComposedHtml.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().length;
+  }, [fullComposedHtml]);
+
+  const isLikelyLong = plainTextLength > 1500;
+
+  const handleFieldChange = (field: keyof TemplateStageItem, value: any) => {
+    const updated = editedStages.map(s => {
+      if (s.stage === selectedStageNumber) {
+        return { ...s, [field]: value };
       }
-      return t;
+      return s;
     });
-    setEditedTemplates(updated);
+    setEditedStages(updated);
   };
 
-  const handleSave = () => {
-    onSaveTemplates(editedTemplates);
-    setShowSavedToast(true);
-    setTimeout(() => setShowSavedToast(false), 2500);
+  const handleSave = async () => {
+    if (!currentSet) return;
+    setSaveError(null);
+    try {
+      const saved = await saveTemplateSet(currentSet.id, editedStages);
+      setCurrentSet(saved);
+      setEditedStages(saved.stages);
+      setShowSavedToast(true);
+      setTimeout(() => setShowSavedToast(false), 2500);
+    } catch (err: any) {
+      setSaveError(err.message || 'Failed to save template set');
+    }
   };
 
-  const handleResetCurrent = () => {
-    const defaultOne = DEFAULT_STAGE_TEMPLATES.find(t => t.stage === selectedStageNumber);
-    if (!defaultOne) return;
-    const updated = editedTemplates.map(t => (t.stage === selectedStageNumber ? { ...defaultOne } : t));
-    setEditedTemplates(updated);
+  const handleRestoreVersion = async (versionNumber: number) => {
+    if (!currentSet) return;
+    try {
+      const restored = await restoreTemplateSetVersion(currentSet.id, versionNumber);
+      setCurrentSet(restored);
+      setEditedStages(restored.stages);
+      setShowHistoryModal(false);
+      setShowSavedToast(true);
+      setTimeout(() => setShowSavedToast(false), 2500);
+    } catch (err: any) {
+      alert(err.message || 'Failed to restore template set version');
+    }
+  };
+
+  const handleResetToDefault = async () => {
+    if (!currentUser?.id) return;
+    setIsResetting(true);
+    try {
+      const resetSet = await resetUserTemplateSetToDefault(currentUser.id);
+      setCurrentSet(resetSet);
+      setEditedStages(resetSet.stages);
+      setShowResetModal(false);
+      setShowSavedToast(true);
+      setTimeout(() => setShowSavedToast(false), 2500);
+    } catch (err: any) {
+      alert(err.message || 'Failed to reset to default');
+    } finally {
+      setIsResetting(false);
+    }
   };
 
   const insertMergeTag = (tag: string) => {
     const textarea = document.getElementById('template-body-input') as HTMLTextAreaElement | null;
     if (!textarea) {
-      handleFieldChange('bodyHtml', currentTemplate.bodyHtml + ` ${tag}`);
+      handleFieldChange('bodyHtml', (currentStage.bodyHtml || '') + ` ${tag}`);
       return;
     }
     const start = textarea.selectionStart;
     const end = textarea.selectionEnd;
-    const text = currentTemplate.bodyHtml;
+    const text = currentStage.bodyHtml || '';
     const newText = text.substring(0, start) + tag + text.substring(end);
     handleFieldChange('bodyHtml', newText);
     setTimeout(() => {
@@ -98,36 +237,137 @@ export const TemplateAdmin: React.FC<TemplateAdminProps> = ({
       {/* Top Banner */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-white p-5 rounded-xl border border-red-100 shadow-2xs">
         <div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             <h2 className="text-xl font-bold text-slate-900">7-Stage Sequence Template Studio</h2>
             <span className="px-2 py-0.5 text-xs font-semibold bg-red-50 text-red-700 rounded-md border border-red-200">
               HTML Email Client Ready
             </span>
+            {currentSet && (
+              <span className="px-2 py-0.5 text-xs font-medium bg-slate-100 text-slate-700 rounded-md border border-slate-200">
+                v{currentSet.version || 1} &bull; {currentSet.kind === 'default' ? 'Admin Default' : currentSet.kind === 'user' ? 'Personal Set' : 'Campaign'}
+              </span>
+            )}
           </div>
           <p className="text-sm text-slate-500 mt-1">
             Write responsive single-column outreach emails with merge variables. Test live desktop & mobile viewport heights.
           </p>
         </div>
 
-        <div className="flex items-center gap-3">
-          <button
-            type="button"
-            onClick={handleResetCurrent}
-            className="flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-slate-600 hover:text-slate-900 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors"
-            title="Reset this stage to default template"
-          >
-            <RotateCcw className="w-3.5 h-3.5" />
-            <span>Reset Stage</span>
-          </button>
+        <div className="flex items-center gap-2.5 flex-wrap">
+          {/* Version History Button */}
+          {currentSet && currentSet.history && currentSet.history.length > 0 && (
+            <button
+              type="button"
+              onClick={() => setShowHistoryModal(true)}
+              className="flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-slate-700 hover:text-slate-900 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors border border-slate-200 shadow-2xs"
+            >
+              <History className="w-3.5 h-3.5 text-slate-600" />
+              <span>History ({currentSet.history.length})</span>
+            </button>
+          )}
+
+          {/* Reset to Default Button (only for personal set) */}
+          {activeSetType === 'mine' && (
+            <button
+              type="button"
+              onClick={() => setShowResetModal(true)}
+              className="flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-slate-600 hover:text-red-700 bg-slate-100 hover:bg-red-50 rounded-lg transition-colors border border-slate-200"
+              title="Reset personal templates to current Admin Default"
+            >
+              <RotateCcw className="w-3.5 h-3.5" />
+              <span>Reset to Default</span>
+            </button>
+          )}
           
           <button
             type="button"
             onClick={handleSave}
-            className="flex items-center gap-2 px-4 py-2 text-sm font-semibold text-white bg-red-600 hover:bg-red-700 active:bg-red-800 rounded-lg shadow-xs shadow-red-500/20 transition-all"
+            disabled={isLoadingSet}
+            className="flex items-center gap-2 px-4 py-2 text-sm font-semibold text-white bg-red-600 hover:bg-red-700 active:bg-red-800 rounded-lg shadow-xs shadow-red-500/20 transition-all disabled:opacity-50"
           >
-            {showSavedToast ? <Check className="w-4 h-4" /> : <Save className="w-4 h-4" />}
+            {showSavedToast ? <Check className="w-4 h-4" /> : <Save className="w-4 h-4 text-white" />}
             <span>{showSavedToast ? 'Templates Saved!' : 'Save All Stages'}</span>
           </button>
+        </div>
+      </div>
+
+      {saveError && (
+        <div className="p-3 bg-red-50 border border-red-200 rounded-xl text-xs text-red-700 flex items-center gap-2">
+          <AlertTriangle className="w-4 h-4 text-red-600 shrink-0" />
+          <span>{saveError}</span>
+        </div>
+      )}
+
+      {/* Set Selector Toolbar (Mine vs Admin Default vs Other Users) */}
+      <div className="flex flex-wrap items-center justify-between gap-3 bg-slate-50 p-3 rounded-xl border border-slate-200">
+        <div className="flex items-center gap-2">
+          <span className="text-xs font-bold text-slate-700 uppercase tracking-wider">
+            Template Set:
+          </span>
+          <div className="inline-flex rounded-lg border border-slate-300 bg-white p-0.5 shadow-2xs text-xs font-semibold">
+            <button
+              type="button"
+              onClick={() => { setActiveSetType('mine'); setSelectedUserId(currentUser?.id || ''); }}
+              className={`px-3 py-1 rounded-md transition-colors ${
+                activeSetType === 'mine'
+                  ? 'bg-red-600 text-white shadow-xs'
+                  : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              My Personal Set
+            </button>
+            {(isAdmin || hasEditDefault) && (
+              <button
+                type="button"
+                onClick={() => setActiveSetType('default')}
+                className={`px-3 py-1 rounded-md transition-colors ${
+                  activeSetType === 'default'
+                    ? 'bg-red-600 text-white shadow-xs'
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                Admin Default Set
+              </button>
+            )}
+            {canSelectOtherSets && allUsers.length > 0 && (
+              <button
+                type="button"
+                onClick={() => {
+                  setActiveSetType('user');
+                  if (!selectedUserId && allUsers[0]) setSelectedUserId(allUsers[0].id);
+                }}
+                className={`px-3 py-1 rounded-md transition-colors ${
+                  activeSetType === 'user'
+                    ? 'bg-red-600 text-white shadow-xs'
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                User Sets
+              </button>
+            )}
+          </div>
+
+          {activeSetType === 'user' && canSelectOtherSets && (
+            <select
+              value={selectedUserId}
+              onChange={(e) => setSelectedUserId(e.target.value)}
+              className="text-xs bg-white border border-slate-300 rounded-lg px-2.5 py-1 text-slate-800 font-medium focus:ring-1 focus:ring-red-500"
+            >
+              {allUsers.map(u => (
+                <option key={u.id} value={u.id}>
+                  {u.name} ({u.email})
+                </option>
+              ))}
+            </select>
+          )}
+        </div>
+
+        <div className="flex items-center gap-2">
+          {currentSet && (
+            <span className="text-[11px] text-slate-500">
+              Last saved by <strong className="font-semibold text-slate-700">{currentSet.updatedBy || 'System'}</strong> on {currentSet.updatedAt ? new Date(currentSet.updatedAt).toLocaleDateString() : 'N/A'}
+            </span>
+          )}
         </div>
       </div>
 
@@ -143,12 +383,11 @@ export const TemplateAdmin: React.FC<TemplateAdminProps> = ({
             className="flex items-center gap-1.5 px-2.5 py-1 text-xs font-semibold text-slate-600 hover:text-red-700 bg-white border border-slate-200 rounded-lg hover:bg-slate-50 transition-colors shadow-2xs"
           >
             <TableIcon className="w-3.5 h-3.5 text-slate-500" />
-            <span>{showTableView ? 'Switch to Stage Pills' : 'View Stages & Senders Table'}</span>
+            <span>{showTableView ? 'Switch to Stage Pills' : 'View Stages Table'}</span>
           </button>
         </div>
 
         {showTableView ? (
-          /* Table View with dedicated Sender Account column */
           <div className="bg-white rounded-xl border border-slate-200 overflow-hidden shadow-2xs">
             <table className="w-full text-left text-xs border-collapse">
               <thead>
@@ -156,15 +395,13 @@ export const TemplateAdmin: React.FC<TemplateAdminProps> = ({
                   <th className="py-2.5 px-3">Stage #</th>
                   <th className="py-2.5 px-3">Stage Name</th>
                   <th className="py-2.5 px-3">Wait Delay</th>
-                  <th className="py-2.5 px-3 bg-red-50/50 text-red-900 border-x border-red-100">Sender Account (Column)</th>
                   <th className="py-2.5 px-3">Subject</th>
                   <th className="py-2.5 px-3 text-right">Action</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
-                {editedTemplates.map((t) => {
+                {editedStages.map((t) => {
                   const isSelected = t.stage === selectedStageNumber;
-                  const sender = senders.find(s => s.id === t.senderId);
                   return (
                     <tr 
                       key={t.stage}
@@ -182,15 +419,7 @@ export const TemplateAdmin: React.FC<TemplateAdminProps> = ({
                       </td>
                       <td className="py-2.5 px-3 font-semibold text-slate-900">{t.name}</td>
                       <td className="py-2.5 px-3 text-slate-600">{t.defaultGapDays} business days</td>
-                      <td className="py-2.5 px-3 bg-red-50/30 border-x border-red-100 font-medium text-slate-800">
-                        <div className="flex items-center gap-1.5">
-                          <UserCheck className="w-3.5 h-3.5 text-red-600 shrink-0" />
-                          <span className="truncate max-w-[180px]">
-                            {sender ? `${sender.name} (${sender.email})` : `Default (${senderName})`}
-                          </span>
-                        </div>
-                      </td>
-                      <td className="py-2.5 px-3 text-slate-500 font-mono text-[11px] truncate max-w-[200px]">
+                      <td className="py-2.5 px-3 text-slate-500 font-mono text-[11px] truncate max-w-[260px]">
                         {t.subject}
                       </td>
                       <td className="py-2.5 px-3 text-right">
@@ -200,9 +429,9 @@ export const TemplateAdmin: React.FC<TemplateAdminProps> = ({
                             e.stopPropagation();
                             setSelectedStageNumber(t.stage);
                           }}
-                          className="px-2 py-1 text-[11px] font-bold text-red-700 bg-red-50 hover:bg-red-100 rounded transition-colors"
+                          className="px-2.5 py-1 text-[11px] font-semibold text-red-700 hover:text-red-800 bg-red-50 hover:bg-red-100 rounded border border-red-200"
                         >
-                          {isSelected ? 'Editing' : 'Edit'}
+                          Edit Stage
                         </button>
                       </td>
                     </tr>
@@ -212,37 +441,30 @@ export const TemplateAdmin: React.FC<TemplateAdminProps> = ({
             </table>
           </div>
         ) : (
-          /* Grid of Stage Pills */
-          <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-2">
-            {editedTemplates.map((t) => {
+          <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-7 gap-2">
+            {editedStages.map((t) => {
               const isSelected = t.stage === selectedStageNumber;
-              const sender = senders.find(s => s.id === t.senderId);
               return (
                 <button
                   key={t.stage}
+                  type="button"
                   onClick={() => setSelectedStageNumber(t.stage)}
-                  className={`p-3 rounded-xl border text-left transition-all ${
+                  className={`p-3 rounded-xl border text-left transition-all relative flex flex-col justify-between ${
                     isSelected
-                      ? 'bg-red-50/80 border-red-500 shadow-xs ring-1 ring-red-500'
-                      : 'bg-white border-slate-200 hover:border-slate-300 hover:bg-slate-50'
+                      ? 'border-red-600 bg-white ring-2 ring-red-500/20 shadow-xs'
+                      : 'border-slate-200 bg-white hover:border-red-200 hover:bg-slate-50'
                   }`}
                 >
                   <div className="flex items-center justify-between mb-1">
-                    <span className={`text-xs font-bold px-1.5 py-0.5 rounded ${isSelected ? 'bg-red-600 text-white' : 'bg-slate-100 text-slate-700'}`}>
+                    <span className={`text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded ${
+                      isSelected ? 'bg-red-100 text-red-800' : 'bg-slate-100 text-slate-600'
+                    }`}>
                       Stage {t.stage}
                     </span>
-                    <span className="text-[11px] text-slate-500 flex items-center gap-0.5">
-                      <Clock className="w-3 h-3" />
-                      {t.defaultGapDays}d
-                    </span>
+                    <span className="text-[10px] text-slate-400">+{t.defaultGapDays}d</span>
                   </div>
-                  <p className="text-xs font-semibold text-slate-800 truncate">{t.name}</p>
-                  {/* Sender Account tag */}
-                  <div className="mt-1.5 flex items-center gap-1 text-[10px] text-slate-500 bg-slate-50 px-1.5 py-0.5 rounded border border-slate-200 truncate">
-                    <UserCheck className="w-2.5 h-2.5 text-red-500 shrink-0" />
-                    <span className="truncate">
-                      {sender ? sender.name : 'Default'}
-                    </span>
+                  <div className="text-xs font-bold text-slate-900 truncate">
+                    {t.name}
                   </div>
                 </button>
               );
@@ -251,103 +473,76 @@ export const TemplateAdmin: React.FC<TemplateAdminProps> = ({
         )}
       </div>
 
-      {/* Main Studio Grid: Left = Editor, Right = Dual Viewport Preview */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-        
-        {/* Editor Panel (6 cols on lg) */}
-        <div className="lg:col-span-6 space-y-4">
-          <div className="bg-white rounded-xl border border-red-100 p-5 shadow-2xs space-y-4">
-            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
-              <div>
-                <h3 className="font-semibold text-slate-900">
-                  Stage {currentTemplate.stage}: {currentTemplate.name}
-                </h3>
-                <p className="text-xs text-slate-500">{currentTemplate.purpose}</p>
-              </div>
-              
-              <div className="flex items-center gap-1 bg-slate-100 p-0.5 rounded-lg text-xs font-medium">
-                <button
-                  type="button"
-                  onClick={() => setEditorMode('visual')}
-                  className={`px-2.5 py-1 rounded-md transition-colors ${editorMode === 'visual' ? 'bg-white shadow-2xs text-red-700 font-semibold' : 'text-slate-600'}`}
-                >
-                  Visual Fields
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setEditorMode('code')}
-                  className={`px-2.5 py-1 rounded-md transition-colors ${editorMode === 'code' ? 'bg-white shadow-2xs text-red-700 font-semibold' : 'text-slate-600'}`}
-                >
-                  Raw HTML
-                </button>
-              </div>
+      {/* Editor & Preview Split Workspace */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
+        {/* Editor Form (6 cols on lg) */}
+        <div className="lg:col-span-6 bg-white rounded-xl border border-slate-200 shadow-2xs p-5 space-y-4">
+          <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+            <div>
+              <span className="text-xs font-bold text-red-600 uppercase tracking-wider">
+                Stage {currentStage.stage} Content Editor
+              </span>
+              <h3 className="text-base font-bold text-slate-900">{currentStage.name}</h3>
             </div>
+            <div className="flex items-center gap-1.5 bg-slate-100 p-0.5 rounded-lg border border-slate-200 text-xs">
+              <button
+                type="button"
+                onClick={() => setEditorMode('visual')}
+                className={`px-2.5 py-1 rounded-md font-semibold transition-colors ${
+                  editorMode === 'visual' ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-500 hover:text-slate-800'
+                }`}
+              >
+                Visual Mode
+              </button>
+              <button
+                type="button"
+                onClick={() => setEditorMode('code')}
+                className={`px-2.5 py-1 rounded-md font-semibold transition-colors ${
+                  editorMode === 'code' ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-500 hover:text-slate-800'
+                }`}
+              >
+                Code (HTML)
+              </button>
+            </div>
+          </div>
 
-            {/* Gap Days, Purpose & SENDER COLUMN */}
+          <div className="space-y-4">
+            {/* Stage Name & Wait Delay */}
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-              <div>
+              <div className="sm:col-span-2">
                 <label className="block text-xs font-semibold text-slate-700 mb-1">Stage Title</label>
                 <input
                   type="text"
-                  value={currentTemplate.name}
+                  value={currentStage.name}
                   onChange={(e) => handleFieldChange('name', e.target.value)}
-                  className="w-full text-xs sm:text-sm px-3 py-1.5 rounded-lg border border-slate-300 focus:outline-none focus:ring-2 focus:ring-red-500"
+                  className="w-full text-xs sm:text-sm px-3 py-2 rounded-lg border border-slate-300 focus:outline-none focus:ring-2 focus:ring-red-500 text-slate-800"
                 />
               </div>
               <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">
-                  Wait Gap Before Send
-                </label>
-                <div className="flex items-center gap-2">
+                <label className="block text-xs font-semibold text-slate-700 mb-1">Wait Delay</label>
+                <div className="flex items-center gap-1">
                   <input
                     type="number"
-                    min="1"
-                    max="30"
-                    value={currentTemplate.defaultGapDays}
+                    min={1}
+                    max={30}
+                    value={currentStage.defaultGapDays}
                     onChange={(e) => handleFieldChange('defaultGapDays', parseInt(e.target.value, 10) || 3)}
-                    className="w-20 text-xs sm:text-sm px-3 py-1.5 rounded-lg border border-slate-300 focus:outline-none focus:ring-2 focus:ring-red-500"
+                    className="w-full text-xs sm:text-sm px-3 py-2 rounded-lg border border-slate-300 focus:outline-none focus:ring-2 focus:ring-red-500 text-slate-800"
                   />
-                  <span className="text-xs text-slate-500">Days</span>
+                  <span className="text-xs text-slate-500">days</span>
                 </div>
-              </div>
-              {/* Sender Account Column */}
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1 flex items-center gap-1">
-                  <UserCheck className="w-3.5 h-3.5 text-red-600" />
-                  <span>Sender Account</span>
-                </label>
-                <select
-                  value={currentTemplate.senderId || ''}
-                  onChange={(e) => {
-                    const chosen = senders.find(s => s.id === e.target.value);
-                    handleFieldChange('senderId', e.target.value);
-                    handleFieldChange('senderEmail', chosen?.email || '');
-                  }}
-                  className="w-full text-xs px-2.5 py-1.5 rounded-lg border border-slate-300 focus:outline-none focus:ring-2 focus:ring-red-500 bg-white font-medium"
-                >
-                  <option value="">Default ({senderName})</option>
-                  {senders.map(s => (
-                    <option key={s.id} value={s.id}>
-                      {s.name} ({s.email})
-                    </option>
-                  ))}
-                </select>
               </div>
             </div>
 
-            {/* Subject Line */}
+            {/* Email Subject Line */}
             <div>
-              <div className="flex items-center justify-between mb-1">
-                <label className="block text-xs font-semibold text-slate-700">Subject Line</label>
-                {selectedStageNumber > 1 && (
-                  <span className="text-[11px] text-amber-700 bg-amber-50 px-2 py-0.5 rounded border border-amber-200 font-medium">
-                    Sends in existing email thread (Re:)
-                  </span>
-                )}
-              </div>
+              <label className="block text-xs font-semibold text-slate-700 mb-1 flex items-center justify-between">
+                <span>Subject Line</span>
+                <span className="text-[11px] text-slate-400 font-normal">Supports merge tags like {`{{company}}`}</span>
+              </label>
               <input
                 type="text"
-                value={currentTemplate.subject}
+                value={currentStage.subject}
                 onChange={(e) => handleFieldChange('subject', e.target.value)}
                 className="w-full text-xs sm:text-sm px-3 py-2 rounded-lg border border-slate-300 focus:outline-none focus:ring-2 focus:ring-red-500 font-mono text-slate-800"
                 placeholder="Subject line with {{company}}..."
@@ -381,29 +576,63 @@ export const TemplateAdmin: React.FC<TemplateAdminProps> = ({
               </div>
             </div>
 
-            {/* Email Body Content */}
+            {/* LOCKED READ-ONLY HEADER PREVIEW */}
+            <div className="p-3 bg-slate-100/80 rounded-xl border border-slate-200 text-xs space-y-1">
+              <div className="flex items-center justify-between">
+                <span className="font-semibold text-slate-700 flex items-center gap-1.5">
+                  <Lock className="w-3.5 h-3.5 text-slate-500" />
+                  Locked Global Email Header (Read-Only)
+                </span>
+                <span className="text-[10px] text-slate-500 bg-white px-2 py-0.5 rounded border border-slate-200 font-medium">
+                  Configured in Settings
+                </span>
+              </div>
+              {globalHeader.trim() ? (
+                <div 
+                  className="bg-white p-2.5 rounded-lg border border-slate-200 text-slate-600 text-xs"
+                  dangerouslySetInnerHTML={{ __html: renderedHeader }}
+                />
+              ) : (
+                <p className="text-[11px] text-slate-400 italic">No global header configured. (Empty)</p>
+              )}
+            </div>
+
+            {/* EDITABLE Email Body Content */}
             <div>
               <div className="flex items-center justify-between mb-1">
                 <label className="block text-xs font-semibold text-slate-700">
-                  {editorMode === 'visual' ? 'Email HTML Body Markup' : 'Raw HTML (Single-column table layout)'}
+                  {editorMode === 'visual' ? 'Email HTML Body Markup' : 'Raw HTML'}
                 </label>
-                <span className="text-[11px] text-slate-400">Inline CSS & tables for universal email client rendering</span>
+                <span className="text-[11px] text-slate-400">Wraps click tracking automatically</span>
               </div>
               <textarea
                 id="template-body-input"
-                rows={12}
-                value={currentTemplate.bodyHtml}
+                rows={10}
+                value={currentStage.bodyHtml}
                 onChange={(e) => handleFieldChange('bodyHtml', e.target.value)}
                 className="w-full p-3 font-mono text-xs leading-relaxed rounded-lg border border-slate-300 focus:outline-none focus:ring-2 focus:ring-red-500 text-slate-800 bg-slate-50/50"
               />
             </div>
 
-            {/* Compliance & Height Guidance note */}
-            <div className="p-3 bg-red-50/60 border border-red-200 rounded-lg flex items-start gap-2 text-xs text-red-950">
-              <Info className="w-4 h-4 shrink-0 text-red-600 mt-0.5" />
-              <div>
-                <strong className="font-semibold">Email Design Standard:</strong> Desktop emails (~600px width) should fit within the preview window without vertical scroll. Mobile view (~375px) should require at most 1–2 gentle scrolls.
+            {/* LOCKED READ-ONLY FOOTER PREVIEW */}
+            <div className="p-3 bg-slate-100/80 rounded-xl border border-slate-200 text-xs space-y-1">
+              <div className="flex items-center justify-between">
+                <span className="font-semibold text-slate-700 flex items-center gap-1.5">
+                  <Lock className="w-3.5 h-3.5 text-slate-500" />
+                  Locked Global Email Footer (Read-Only)
+                </span>
+                <span className="text-[10px] text-slate-500 bg-white px-2 py-0.5 rounded border border-slate-200 font-medium">
+                  Configured in Settings
+                </span>
               </div>
+              {globalFooter.trim() ? (
+                <div 
+                  className="bg-white p-2.5 rounded-lg border border-slate-200 text-slate-600 text-xs"
+                  dangerouslySetInnerHTML={{ __html: renderedFooter }}
+                />
+              ) : (
+                <p className="text-[11px] text-slate-400 italic">No global footer configured. (Empty)</p>
+              )}
             </div>
           </div>
         </div>
@@ -417,7 +646,7 @@ export const TemplateAdmin: React.FC<TemplateAdminProps> = ({
                 <Eye className="w-4 h-4 text-slate-600" />
                 <span className="text-sm font-semibold text-slate-800">Live Client Preview</span>
                 <span className="text-xs px-2 py-0.5 bg-red-100 text-red-700 rounded-full font-semibold">
-                  Stage {currentTemplate.stage}
+                  Stage {currentStage.stage}
                 </span>
               </div>
 
@@ -450,7 +679,7 @@ export const TemplateAdmin: React.FC<TemplateAdminProps> = ({
                   }`}
                 >
                   <Monitor className="w-3.5 h-3.5" />
-                  <span>Desktop (640px)</span>
+                  <span>Desktop (600px)</span>
                 </button>
                 <button
                   type="button"
@@ -467,74 +696,159 @@ export const TemplateAdmin: React.FC<TemplateAdminProps> = ({
               </div>
             </div>
 
-            {/* Email Header Simulation */}
-            <div className="px-5 py-3 bg-white border-b border-slate-100 text-xs space-y-1.5">
-              <div className="flex items-center gap-2 text-slate-500">
-                <span className="font-semibold text-slate-700 w-14">Subject:</span>
-                <span className="font-medium text-slate-900 truncate">{renderedSubject}</span>
-              </div>
-              <div className="flex items-center gap-2 text-slate-500">
-                <span className="font-semibold text-slate-700 w-14">To:</span>
-                <span className="text-slate-800">{previewLead.name} &lt;{previewLead.email || 'lead@example.com'}&gt;</span>
-              </div>
-              <div className="flex items-center gap-2 text-slate-500">
-                <span className="font-semibold text-slate-700 w-14">Pain Point:</span>
-                <span className="text-slate-600 italic truncate">{previewLead.painPoint}</span>
-              </div>
-            </div>
-
-            {/* Viewport Canvas */}
-            <div className="flex-1 bg-slate-100/70 p-4 sm:p-6 overflow-auto flex justify-center items-start min-h-[420px]">
-              {previewDevice === 'desktop' ? (
-                /* Desktop Email Frame (640px) */
-                <div className="w-full max-w-[640px] bg-white rounded-lg shadow-sm border border-slate-200 overflow-hidden transition-all duration-200">
-                  <div className="bg-slate-50 px-3 py-1.5 border-b border-slate-200 text-[11px] text-slate-500 flex items-center justify-between">
-                    <span className="font-mono">Viewport: 640px &bull; Fits without vertical scroll</span>
-                    <span className="text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded font-semibold text-[10px]">
-                      Optimal Height
-                    </span>
-                  </div>
-                  <div 
-                    className="p-1"
-                    dangerouslySetInnerHTML={{ __html: renderedBodyHtml }} 
-                  />
+            {/* Non-blocking Length Warning Banner */}
+            {isLikelyLong && (
+              <div className="p-3 bg-amber-50 border-b border-amber-200 flex items-start gap-2.5 text-xs text-amber-900">
+                <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                <div>
+                  <strong className="font-semibold">Length Advisory:</strong> Composed email is ~{plainTextLength} characters of text and may be longer than one screen on mobile devices.
                 </div>
-              ) : (
-                /* Mobile Phone Frame (375px) */
-                <div className="w-[375px] max-w-full bg-slate-900 p-3 rounded-[36px] shadow-xl border-4 border-slate-800 transition-all duration-200">
-                  {/* Phone Speaker & Notch */}
-                  <div className="w-28 h-4 bg-slate-800 rounded-full mx-auto mb-2 flex items-center justify-center">
-                    <div className="w-10 h-1 bg-slate-700 rounded-full" />
+              </div>
+            )}
+
+            {/* Preview Frame */}
+            <div className="p-6 bg-slate-100 flex items-center justify-center min-h-[500px]">
+              <div 
+                className={`bg-white rounded-xl shadow-lg border border-slate-200 p-6 transition-all duration-300 w-full overflow-hidden ${
+                  previewDevice === 'mobile' ? 'max-w-[375px]' : 'max-w-[600px]'
+                }`}
+              >
+                {/* Email Header Preview Meta */}
+                <div className="pb-4 mb-4 border-b border-slate-100 space-y-1.5 text-xs text-slate-600">
+                  <div className="flex items-center justify-between">
+                    <span className="font-bold text-slate-800 text-sm">{renderedSubject || '(No Subject)'}</span>
+                    <span className="text-[10px] text-slate-400">Live Render</span>
                   </div>
-                  {/* Phone Screen */}
-                  <div className="bg-white rounded-[24px] overflow-hidden min-h-[480px] max-h-[580px] overflow-y-auto">
-                    <div className="bg-slate-50 px-3 py-1.5 border-b border-slate-100 text-[10px] text-slate-500 flex items-center justify-between">
-                      <span>375px Mobile View</span>
-                      <span className="text-red-700 bg-red-50 px-1.5 py-0.5 rounded font-medium">Single/Double Scroll</span>
-                    </div>
+                  <div className="text-[11px] text-slate-500">
+                    To: <strong>{previewLead.name}</strong> &lt;{previewLead.email}&gt;
+                  </div>
+                  <div className="text-[11px] text-slate-500">
+                    From: <strong>{senderName}</strong>
+                  </div>
+                </div>
+
+                {/* Composed Email HTML (Header + Body + Footer) */}
+                <div className="text-xs text-slate-800 leading-relaxed font-sans space-y-4">
+                  {renderedHeader.trim() && (
                     <div 
-                      className="p-1"
-                      dangerouslySetInnerHTML={{ __html: renderedBodyHtml }} 
+                      className="email-header-preview pb-3 border-b border-slate-100"
+                      dangerouslySetInnerHTML={{ __html: renderedHeader }}
                     />
-                  </div>
-                  {/* Phone Bottom Pill */}
-                  <div className="w-24 h-1 bg-slate-700 rounded-full mx-auto mt-2" />
+                  )}
+                  <div 
+                    className="email-body-preview"
+                    dangerouslySetInnerHTML={{ __html: renderedBodyHtml }}
+                  />
+                  {renderedFooter.trim() && (
+                    <div 
+                      className="email-footer-preview pt-3 border-t border-slate-100 text-[11px] text-slate-500"
+                      dangerouslySetInnerHTML={{ __html: renderedFooter }}
+                    />
+                  )}
                 </div>
-              )}
-            </div>
-
-            {/* Bottom Status / Summary */}
-            <div className="p-3 bg-slate-50 border-t border-slate-200 text-xs text-slate-500 flex items-center justify-between">
-              <span>Variables previewed: <strong className="text-slate-700">{previewLead.company}</strong>, <strong className="text-slate-700">{previewLead.name}</strong></span>
-              <span className="text-slate-400 font-mono text-[11px]">RFC-2822 Safe</span>
+              </div>
             </div>
           </div>
         </div>
-
       </div>
+
+      {/* VERSION HISTORY MODAL */}
+      {showHistoryModal && currentSet && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-4 animate-in fade-in duration-150">
+          <div className="w-full max-w-lg bg-white rounded-2xl shadow-2xl border border-slate-200 p-6 space-y-4 max-h-[85vh] overflow-y-auto">
+            <div className="flex items-center justify-between pb-2 border-b border-slate-100">
+              <div className="flex items-center gap-2">
+                <History className="w-5 h-5 text-red-600" />
+                <h3 className="text-base font-bold text-slate-900">Version History</h3>
+              </div>
+              <button 
+                type="button" 
+                onClick={() => setShowHistoryModal(false)}
+                className="text-slate-400 hover:text-slate-600 text-sm font-semibold"
+              >
+                Close
+              </button>
+            </div>
+
+            <p className="text-xs text-slate-500">
+              Showing the last 10 versions of this template set. Restoring a version creates a new latest version with those stages.
+            </p>
+
+            <div className="space-y-2.5">
+              {currentSet.history && currentSet.history.length > 0 ? (
+                currentSet.history.map((h, i) => (
+                  <div key={i} className="p-3 rounded-xl border border-slate-200 bg-slate-50/60 flex items-center justify-between gap-3 text-xs">
+                    <div>
+                      <div className="font-bold text-slate-800 flex items-center gap-2">
+                        <span>Version {h.version}</span>
+                        {h.changeNote && (
+                          <span className="px-1.5 py-0.5 rounded text-[10px] bg-red-50 text-red-700 font-semibold border border-red-200">
+                            {h.changeNote}
+                          </span>
+                        )}
+                      </div>
+                      <div className="text-[11px] text-slate-500 mt-0.5">
+                        Edited by <strong>{h.editedBy || 'System'}</strong> on {new Date(h.editedAt).toLocaleString()}
+                      </div>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => handleRestoreVersion(h.version)}
+                      className="px-3 py-1.5 text-xs font-semibold text-red-700 bg-red-50 hover:bg-red-100 border border-red-200 rounded-lg transition-colors shrink-0"
+                    >
+                      Restore
+                    </button>
+                  </div>
+                ))
+              ) : (
+                <p className="text-xs text-slate-400 italic">No previous versions recorded yet.</p>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* RESET TO DEFAULT CONFIRMATION MODAL */}
+      {showResetModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-4 animate-in fade-in duration-150">
+          <div className="w-full max-w-sm bg-white rounded-2xl shadow-2xl border border-slate-200 p-6 space-y-4">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl bg-amber-100 text-amber-700 flex items-center justify-center shrink-0">
+                <RotateCcw className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-slate-900">Reset My Templates</h3>
+                <p className="text-xs text-slate-500">Revert to current Admin Default</p>
+              </div>
+            </div>
+
+            <p className="text-xs text-slate-600 leading-relaxed">
+              Are you sure you want to reset your personal templates to the current <strong>Admin Default set</strong>? This will replace your personal templates for stages 1–7. A backup of your current version will be saved in your history.
+            </p>
+
+            <div className="flex items-center justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setShowResetModal(false)}
+                className="px-3 py-1.5 text-xs font-semibold text-slate-600 hover:text-slate-800 bg-slate-100 rounded-lg"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={isResetting}
+                onClick={handleResetToDefault}
+                className="px-3.5 py-1.5 text-xs font-semibold text-white bg-red-600 hover:bg-red-700 rounded-lg shadow-xs"
+              >
+                {isResetting ? 'Resetting...' : 'Confirm Reset'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
 
-export const TemplatesPage = TemplateAdmin;
-
+export { TemplateAdmin as TemplatesPage };

@@ -50,6 +50,13 @@ export interface Lead {
     companyName?: string;
     count: number;
   };
+
+  // Ownership & audit fields
+  ownerId?: string;
+  ownerName?: string;
+  lastModifiedBy?: string;
+  sentBy?: string;
+  templateSource?: 'campaign' | 'own';
 }
 
 // Senders Management
@@ -160,6 +167,18 @@ export interface CampaignWorkflow {
   updated_date?: string;
   nodes: WorkflowNodeItem[];
   edges: WorkflowEdgeItem[];
+  ownerId?: string;
+  ownerName?: string;
+  lastEditedBy?: string;
+  lastEditedAt?: string;
+  versions?: {
+    version: number;
+    savedAt: string;
+    savedBy: string;
+    name: string;
+    nodes: WorkflowNodeItem[];
+    edges: WorkflowEdgeItem[];
+  }[];
 }
 
 export interface LeadManualTask {
@@ -275,6 +294,41 @@ export interface AppSettings {
   customLogoUrl?: string;
   appName?: string;
   positiveReplyAction?: 'pause_automatically' | 'ask_first';
+  emailHeader?: string;
+  emailFooter?: string;
+}
+
+export type TemplateSetKind = 'default' | 'user' | 'campaign';
+
+export interface TemplateStageItem {
+  stage: number;
+  name: string;
+  purpose: string;
+  defaultGapDays: number;
+  subject: string;
+  bodyHtml: string;
+}
+
+export interface TemplateSetHistoryEntry {
+  version: number;
+  stages: TemplateStageItem[];
+  editedBy: string;
+  editedAt: string;
+  changeNote?: string;
+}
+
+export interface TemplateSet {
+  id: string;
+  kind: TemplateSetKind;
+  ownerId?: string;
+  campaignId?: string;
+  name?: string;
+  stages: TemplateStageItem[];
+  version: number;
+  history: TemplateSetHistoryEntry[];
+  updatedBy: string;
+  updatedAt: string;
+  createdAt?: string;
 }
 
 export interface SendLogEntry {
@@ -287,3 +341,36 @@ export interface SendLogEntry {
   status: 'sent' | 'reply_detected' | 'failed' | 'skipped' | 'advanced';
   details: string;
 }
+
+export type UserRole = 'admin' | 'user';
+
+export type PermissionKey =
+  | 'users.manage'
+  | 'users.changeRoles'
+  | 'leads.create'
+  | 'leads.viewAll'
+  | 'leads.reassign'
+  | 'leads.deleteOwn'
+  | 'leads.deleteAny'
+  | 'campaigns.create'
+  | 'campaigns.run'
+  | 'campaigns.editOwn'
+  | 'campaigns.editAny'
+  | 'templates.editOwn'
+  | 'templates.editAny'
+  | 'templates.editDefault'
+  | 'templates.editHeaderFooter'
+  | 'settings.edit';
+
+export interface AppUser {
+  id: string;
+  name: string;
+  email: string;
+  role: UserRole;
+  isActive: boolean;
+  mustChangePassword: boolean;
+  createdAt: string;
+  lastLoginAt?: string | null;
+  permissions?: PermissionKey[];
+}
+

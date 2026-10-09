@@ -22,16 +22,19 @@ import {
   CheckSquare
 } from 'lucide-react';
 import { BrandLogo } from './BrandLogo';
+import { AppUser } from '../types';
 
 interface HeaderProps {
+  currentUser?: AppUser | null;
+  onLogout?: () => void;
   userEmail?: string;
   spreadsheetId?: string;
   spreadsheetName?: string;
   dueCount: number;
   repliedCount: number;
   tasksCount?: number;
-  currentTab: 'leads' | 'replied' | 'workflows' | 'tasks' | 'templates' | 'analytics' | 'settings';
-  onTabChange: (tab: 'leads' | 'replied' | 'workflows' | 'tasks' | 'templates' | 'analytics' | 'settings') => void;
+  currentTab: 'leads' | 'replied' | 'workflows' | 'tasks' | 'templates' | 'analytics' | 'users' | 'settings';
+  onTabChange: (tab: 'leads' | 'replied' | 'workflows' | 'tasks' | 'templates' | 'analytics' | 'users' | 'settings') => void;
   onSync: () => void;
   isSyncing: boolean;
   onOpenScheduler: () => void;
@@ -47,6 +50,8 @@ interface HeaderProps {
 }
 
 export const Header: React.FC<HeaderProps> = ({
+  currentUser,
+  onLogout,
   userEmail,
   dueCount,
   repliedCount,
@@ -59,6 +64,7 @@ export const Header: React.FC<HeaderProps> = ({
   customLogoUrl,
   onLogoChange
 }) => {
+
   const [mongoStatus, setMongoStatus] = useState<{
     connected: boolean;
     status: 'connected' | 'connecting' | 'disconnected' | 'error';
@@ -104,6 +110,7 @@ export const Header: React.FC<HeaderProps> = ({
       case 'tasks': return `Tasks${tasksCount > 0 ? ` (${tasksCount})` : ''}`;
       case 'templates': return 'Templates';
       case 'analytics': return 'Analytics';
+      case 'users': return 'Users';
       case 'settings': return 'Settings';
       default: return 'Menu';
     }
@@ -430,13 +437,95 @@ export const Header: React.FC<HeaderProps> = ({
                       </div>
                       {currentTab === 'analytics' && <CheckCircle2 className="w-4 h-4 text-red-600" />}
                     </button>
-                    </div>
+
+                    {/* Item 7: Users & Access (Protected by users.manage permission) */}
+                    {currentUser?.permissions?.includes('users.manage') && (
+                      <button
+                        id="menu-tab-users"
+                        type="button"
+                        onClick={() => { onTabChange('users'); setIsNavMenuOpen(false); }}
+                        className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs transition-all cursor-pointer ${
+                          currentTab === 'users'
+                            ? 'bg-red-50 text-red-700 font-bold border border-red-200/80 shadow-2xs'
+                            : 'text-slate-700 hover:bg-slate-50 hover:text-slate-900'
+                        }`}
+                      >
+                        <div className="flex items-center gap-2.5">
+                          <div className={`p-1.5 rounded-lg ${currentTab === 'users' ? 'bg-red-600 text-white' : 'bg-slate-100 text-slate-500'}`}>
+                            <Users className="w-4 h-4" />
+                          </div>
+                          <div className="text-left">
+                            <p className="font-semibold leading-tight">Users & Access</p>
+                            <p className="text-[10px] text-slate-400 font-normal">Team roles & permissions</p>
+                          </div>
+                        </div>
+                        {currentTab === 'users' && <CheckCircle2 className="w-4 h-4 text-red-600" />}
+                      </button>
+                    )}
+
+                    {/* Item 8: Settings (Protected by settings.edit permission) */}
+                    {currentUser?.permissions?.includes('settings.edit') && (
+                      <button
+                        id="menu-tab-settings"
+                        type="button"
+                        onClick={() => { onTabChange('settings'); setIsNavMenuOpen(false); }}
+                        className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs transition-all cursor-pointer ${
+                          currentTab === 'settings'
+                            ? 'bg-red-50 text-red-700 font-bold border border-red-200/80 shadow-2xs'
+                            : 'text-slate-700 hover:bg-slate-50 hover:text-slate-900'
+                        }`}
+                      >
+                        <div className="flex items-center gap-2.5">
+                          <div className={`p-1.5 rounded-lg ${currentTab === 'settings' ? 'bg-red-600 text-white' : 'bg-slate-100 text-slate-500'}`}>
+                            <SettingsIcon className="w-4 h-4" />
+                          </div>
+                          <div className="text-left">
+                            <p className="font-semibold leading-tight">Settings</p>
+                            <p className="text-[10px] text-slate-400 font-normal">Configuration & defaults</p>
+                          </div>
+                        </div>
+                        {currentTab === 'settings' && <CheckCircle2 className="w-4 h-4 text-red-600" />}
+                      </button>
+                    )}
                   </div>
+                </div>
               )}
             </div>
+
+            {/* User Profile & Logout in Header Bar */}
+            {currentUser && (
+              <div className="flex items-center gap-2 pl-1.5 sm:pl-2.5 border-l border-slate-200 shrink-0">
+                <div className="hidden lg:flex flex-col text-right">
+                  <span className="text-xs font-bold text-slate-800 leading-tight truncate max-w-[120px]">
+                    {currentUser.name}
+                  </span>
+                  <span className="text-[10px] text-slate-400 font-medium truncate max-w-[120px]">
+                    {currentUser.email}
+                  </span>
+                </div>
+                <span className={`px-2 py-0.5 rounded-md text-[10px] font-black uppercase tracking-wider ${
+                  currentUser.role === 'admin'
+                    ? 'bg-red-100 text-red-700 border border-red-200/80'
+                    : 'bg-slate-100 text-slate-700 border border-slate-200/80'
+                }`}>
+                  {currentUser.role}
+                </span>
+                <button
+                  id="btn-header-logout"
+                  type="button"
+                  onClick={onLogout}
+                  className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-bold text-slate-600 hover:text-red-700 hover:bg-red-50 rounded-lg transition-colors border border-slate-200 hover:border-red-200 cursor-pointer shadow-2xs shrink-0"
+                  title={`Log out of ${currentUser.email}`}
+                >
+                  <LogOut className="w-3.5 h-3.5" />
+                  <span className="hidden sm:inline">Logout</span>
+                </button>
+              </div>
+            )}
           </div>
         </div>
       </div>
+
 
       {/* MongoDB Atlas Connection Modal */}
       {showMongoModal && (

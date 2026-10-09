@@ -22,10 +22,16 @@ export const COLLECTIONS = {
   SETTINGS: 'settings',
   TRACKING_EVENTS: 'trackingEvents',
   GRAPH_SUBSCRIPTIONS: 'graph_subscriptions',
-  INBOUND_REPLIES: 'inbound_replies'
+  INBOUND_REPLIES: 'inbound_replies',
+  USERS: 'users',
+  AUTH_LOCKOUTS: 'auth_lockouts',
+  USER_WORKSPACE_NOTES: 'user_workspace_notes',
+  USER_ALERT_STATES: 'user_alert_states',
+  TEMPLATE_SETS: 'templateSets'
 } as const;
 
 export interface MongoStatusInfo {
+
   connected: boolean;
   status: 'connected' | 'connecting' | 'disconnected' | 'error';
   database: string;
@@ -247,25 +253,53 @@ async function ensureIndexesAndSeed(db: Db): Promise<void> {
     const sendersCol = db.collection(COLLECTIONS.SENDERS);
     const settingsCol = db.collection(COLLECTIONS.SETTINGS);
     const eventsCol = db.collection(COLLECTIONS.TRACKING_EVENTS);
+    const usersCol = db.collection(COLLECTIONS.USERS);
+    const lockoutsCol = db.collection(COLLECTIONS.AUTH_LOCKOUTS);
+    const notesCol = db.collection(COLLECTIONS.USER_WORKSPACE_NOTES);
+    const alertStatesCol = db.collection(COLLECTIONS.USER_ALERT_STATES);
 
     // 1. Create indexes with unique constraints
     await Promise.all([
       leadsCol.createIndex({ leadId: 1 }, { unique: true, name: 'idx_leads_leadId_unique' }).catch(() => {}),
       leadsCol.createIndex({ email: 1 }, { name: 'idx_leads_email' }).catch(() => {}),
       leadsCol.createIndex({ campaignId: 1 }, { name: 'idx_leads_campaignId' }).catch(() => {}),
+      leadsCol.createIndex({ ownerId: 1 }, { name: 'idx_leads_ownerId' }).catch(() => {}),
       campaignsCol.createIndex({ id: 1 }, { unique: true, name: 'idx_campaigns_id_unique' }).catch(() => {}),
+      campaignsCol.createIndex({ ownerId: 1 }, { name: 'idx_campaigns_ownerId' }).catch(() => {}),
       tasksCol.createIndex({ id: 1 }, { unique: true, name: 'idx_tasks_id_unique' }).catch(() => {}),
       sendersCol.createIndex({ id: 1 }, { unique: true, name: 'idx_senders_id_unique' }).catch(() => {}),
       settingsCol.createIndex({ id: 1 }, { unique: true, name: 'idx_settings_id_unique' }).catch(() => {}),
       eventsCol.createIndex({ id: 1 }, { unique: true, name: 'idx_events_id_unique' }).catch(() => {}),
       eventsCol.createIndex({ leadId: 1 }, { name: 'idx_events_leadId' }).catch(() => {}),
-      eventsCol.createIndex({ email: 1 }, { name: 'idx_events_email' }).catch(() => {})
+      eventsCol.createIndex({ email: 1 }, { name: 'idx_events_email' }).catch(() => {}),
+      usersCol.createIndex({ email: 1 }, { unique: true, name: 'idx_users_email_unique' }).catch(() => {}),
+      usersCol.createIndex({ id: 1 }, { unique: true, name: 'idx_users_id_unique' }).catch(() => {}),
+      lockoutsCol.createIndex({ key: 1 }, { unique: true, name: 'idx_lockouts_key_unique' }).catch(() => {}),
+      notesCol.createIndex({ userId: 1 }, { unique: true, name: 'idx_notes_userId_unique' }).catch(() => {}),
+      alertStatesCol.createIndex({ userId: 1 }, { unique: true, name: 'idx_alerts_userId_unique' }).catch(() => {})
     ]);
 
     // 2. Perform one-time migration / auto-seeding if collections are empty
     if (!state.isSeeded) {
       await autoSeedFromLocalData(db);
+      try {
+        const { seedInitialUsers } = await import('./auth.ts');
+        await seedInitialUsers();
+      } catch (authSeedErr) {
+        console.warn('[MongoDB] Auth seed notice:', authSeedErr);
+      }
       state.isSeeded = true;
+    }
+
+    // 3. Backfill ownership for existing leads & campaigns to the first admin
+    await backfillOwnership(db);
+
+    // 4. Ensure templateSets collection is initialized and seeded
+    try {
+      const { ensureTemplateSetsAndSeed } = await import('./templateBackend.ts');
+      await ensureTemplateSetsAndSeed();
+    } catch (tmplErr) {
+      console.warn('[MongoDB] Template sets seed notice:', tmplErr);
     }
   } catch (err: any) {
     console.error('[MongoDB] Error during index creation or seeding:', err);
@@ -273,9 +307,64 @@ async function ensureIndexesAndSeed(db: Db): Promise<void> {
 }
 
 /**
+ * Backfills unowned leads and campaigns to the first active administrator.
+ */
+export async function backfillOwnership(db: Db): Promise<{ leadsUpdated: number; campaignsUpdated: number }> {
+  try {
+    const usersCol = db.collection(COLLECTIONS.USERS);
+    // Find first active admin
+    const firstAdmin = await usersCol.findOne(
+      { role: 'admin', isActive: true },
+      { sort: { createdAt: 1 } }
+    );
+
+    if (!firstAdmin) {
+      return { leadsUpdated: 0, campaignsUpdated: 0 };
+    }
+
+    const leadsCol = db.collection(COLLECTIONS.LEADS);
+    const unownedLeadsFilter = {
+      $or: [
+        { ownerId: { $exists: false } },
+        { ownerId: null },
+        { ownerId: '' }
+      ]
+    };
+    const leadResult = await leadsCol.updateMany(unownedLeadsFilter, {
+      $set: { ownerId: firstAdmin.id, ownerName: firstAdmin.name }
+    });
+
+    const campaignsCol = db.collection(COLLECTIONS.CAMPAIGNS);
+    const unownedCampaignsFilter = {
+      $or: [
+        { ownerId: { $exists: false } },
+        { ownerId: null },
+        { ownerId: '' }
+      ]
+    };
+    const campaignResult = await campaignsCol.updateMany(unownedCampaignsFilter, {
+      $set: { ownerId: firstAdmin.id, ownerName: firstAdmin.name }
+    });
+
+    if (leadResult.modifiedCount > 0 || campaignResult.modifiedCount > 0) {
+      console.log(`[Backfill] Backfilled ${leadResult.modifiedCount} leads and ${campaignResult.modifiedCount} campaigns to admin ${firstAdmin.email}`);
+    }
+
+    return {
+      leadsUpdated: leadResult.modifiedCount,
+      campaignsUpdated: campaignResult.modifiedCount
+    };
+  } catch (err: any) {
+    console.error('[Backfill] Error in backfillOwnership:', err);
+    return { leadsUpdated: 0, campaignsUpdated: 0 };
+  }
+}
+
+/**
  * Automatically seeds MongoDB collections from existing data_store JSON files if empty.
  */
 export async function autoSeedFromLocalData(db: Db): Promise<{ seeded: boolean; counts: Record<string, number> }> {
+
   const result: Record<string, number> = {
     leads: 0,
     campaigns: 0,

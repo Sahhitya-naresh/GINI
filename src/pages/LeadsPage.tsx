@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { Lead, StageTemplate, CampaignWorkflow } from '../types';
+import { Lead, StageTemplate, CampaignWorkflow, AppUser } from '../types';
 import { formatDisplayDate, isLeadDueForNextSend, getTodayDateString } from '../utils/dateUtils';
 import { 
   Search, 
@@ -22,12 +22,20 @@ import {
   MousePointer,
   FolderOpen,
   Trash2,
+  UserCheck,
+  Shield,
+  RefreshCw,
+  X,
   Info
 } from 'lucide-react';
+import { listUsersApi } from '../services/authService';
+import { reassignLeadApi } from '../services/leadBackendService';
 
 interface LeadsTableProps {
   leads: Lead[];
   templates: StageTemplate[];
+  currentUser?: AppUser | null;
+  onRefreshLeads?: () => Promise<void> | void;
   onSelectLead: (lead: Lead) => void;
   onTogglePause: (lead: Lead) => void;
   onSendNextStage: (lead: Lead) => void;
@@ -47,6 +55,8 @@ interface LeadsTableProps {
 export const LeadsTable: React.FC<LeadsTableProps> = ({
   leads,
   templates,
+  currentUser,
+  onRefreshLeads,
   onSelectLead,
   onTogglePause,
   onSendNextStage,
@@ -124,6 +134,74 @@ export const LeadsTable: React.FC<LeadsTableProps> = ({
     });
     return Array.from(set).sort();
   }, [leads]);
+
+  // Ownership & Admin Scoping
+  const isAdmin = currentUser?.role === 'admin' || Boolean(currentUser?.permissions?.includes('leads.viewAll'));
+  const [ownerFilter, setOwnerFilter] = useState<string>('ALL');
+  const [leadToReassign, setLeadToReassign] = useState<Lead | null>(null);
+  const [reassignTargetUserId, setReassignTargetUserId] = useState<string>('');
+  const [isReassigning, setIsReassigning] = useState<boolean>(false);
+  const [reassignModalError, setReassignModalError] = useState<string | null>(null);
+  const [activeUsersList, setActiveUsersList] = useState<AppUser[]>([]);
+  const [bulkReassignTargetId, setBulkReassignTargetId] = useState<string>('');
+  const [isBulkReassigning, setIsBulkReassigning] = useState<boolean>(false);
+
+  // Discover distinct owners
+  const availableOwners = useMemo(() => {
+    const map = new Map<string, string>();
+    leads.forEach(l => {
+      if (l.ownerId) {
+        map.set(l.ownerId, l.ownerName || l.ownerId);
+      }
+    });
+    return Array.from(map.entries()).map(([id, name]) => ({ id, name }));
+  }, [leads]);
+
+  useEffect(() => {
+    if (isAdmin) {
+      listUsersApi().then(res => {
+        if (res.success && res.users) {
+          setActiveUsersList(res.users.filter(u => u.isActive));
+        }
+      }).catch(() => {});
+    }
+  }, [isAdmin]);
+
+  const handleConfirmReassignSingle = async () => {
+    if (!leadToReassign || !reassignTargetUserId) return;
+    setIsReassigning(true);
+    setReassignModalError(null);
+    try {
+      const res = await reassignLeadApi(leadToReassign.leadId, reassignTargetUserId);
+      if (res.success) {
+        setLeadToReassign(null);
+        await onRefreshLeads?.();
+      } else {
+        setReassignModalError(res.error || 'Failed to reassign lead');
+      }
+    } catch (err: any) {
+      setReassignModalError(err.message || 'Error reassigning lead');
+    } finally {
+      setIsReassigning(false);
+    }
+  };
+
+  const handleApplyBulkReassign = async () => {
+    if (!bulkReassignTargetId || selectedLeadIds.size === 0) return;
+    setIsBulkReassigning(true);
+    try {
+      for (const id of Array.from(selectedLeadIds) as string[]) {
+        await reassignLeadApi(id, bulkReassignTargetId);
+      }
+      setSelectedLeadIds(new Set());
+      setBulkReassignTargetId('');
+      await onRefreshLeads?.();
+    } catch (err) {
+      console.error('Bulk reassign failed:', err);
+    } finally {
+      setIsBulkReassigning(false);
+    }
+  };
 
   const handleToggleSelectAll = () => {
     if (selectedLeadIds.size === filteredLeads.length && filteredLeads.length > 0) {
@@ -208,6 +286,9 @@ export const LeadsTable: React.FC<LeadsTableProps> = ({
       // Company
       if (companyFilter !== 'ALL' && lead.company !== companyFilter) return false;
 
+      // Owner filter (Admin only)
+      if (isAdmin && ownerFilter !== 'ALL' && lead.ownerId !== ownerFilter) return false;
+
       // Due Filter
       if (dueFilter === 'due') {
         const isDue = lead.status === 'Active' && isLeadDueForNextSend(lead.nextSendDate);
@@ -239,14 +320,15 @@ export const LeadsTable: React.FC<LeadsTableProps> = ({
     }
 
     return list;
-  }, [leads, searchQuery, statusFilter, stageFilter, campaignFilter, engagementFilter, industryFilter, companyFilter, dueFilter, sortBy]);
+  }, [leads, searchQuery, statusFilter, stageFilter, campaignFilter, engagementFilter, industryFilter, companyFilter, dueFilter, sortBy, isAdmin, ownerFilter]);
 
   const activeAdvancedFilterCount = [
     engagementFilter !== 'ALL',
     industryFilter !== 'ALL',
     companyFilter !== 'ALL',
     dueFilter !== 'ALL',
-    sortBy !== 'default'
+    sortBy !== 'default',
+    isAdmin && ownerFilter !== 'ALL'
   ].filter(Boolean).length;
 
   const handleResetFilters = () => {
@@ -258,6 +340,7 @@ export const LeadsTable: React.FC<LeadsTableProps> = ({
     setStatusFilter('ALL');
     setStageFilter('ALL');
     setCampaignFilter('ALL');
+    setOwnerFilter('ALL');
     setSearchQuery('');
   };
 
@@ -562,6 +645,24 @@ export const LeadsTable: React.FC<LeadsTableProps> = ({
               </div>
             )}
 
+            {/* Owner Filter (Admins only) */}
+            {isAdmin && availableOwners.length > 0 && (
+              <div className="flex items-center gap-1 bg-slate-50 border border-slate-300 rounded-lg px-2 py-1 text-xs w-[138px]">
+                <UserCheck className="w-3 h-3 text-slate-400 shrink-0" />
+                <select
+                  value={ownerFilter}
+                  onChange={(e) => setOwnerFilter(e.target.value)}
+                  className="bg-transparent text-slate-700 font-medium focus:outline-none cursor-pointer w-full truncate"
+                  title="Filter by lead owner"
+                >
+                  <option value="ALL">All Owners</option>
+                  {availableOwners.map((owner) => (
+                    <option key={owner.id} value={owner.id}>{owner.name}</option>
+                  ))}
+                </select>
+              </div>
+            )}
+
             {/* Due / Schedule Filter */}
             <div className="w-[130px]">
               <select
@@ -612,10 +713,10 @@ export const LeadsTable: React.FC<LeadsTableProps> = ({
         </div>
       </div>
 
-      {/* Bulk Campaign Assignment Bar */}
+      {/* Bulk Campaign & Reassign Assignment Bar */}
       {selectedLeadIds.size > 0 && (
         <div className="p-3 bg-slate-900 text-white rounded-xl shadow-lg border border-slate-800 flex flex-wrap items-center justify-between gap-3 text-xs animate-in fade-in slide-in-from-top-2 duration-150">
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-3 flex-wrap">
             <span className="font-bold px-2 py-0.5 rounded bg-red-600 text-white text-[11px]">
               {selectedLeadIds.size} Lead{selectedLeadIds.size > 1 ? 's' : ''} Selected
             </span>
@@ -643,6 +744,30 @@ export const LeadsTable: React.FC<LeadsTableProps> = ({
             >
               {isBulkAssigning ? 'Applying...' : 'Apply Campaign'}
             </button>
+
+            {/* Bulk Reassign (Admins only) */}
+            {isAdmin && activeUsersList.length > 0 && (
+              <div className="flex items-center gap-2 pl-3 border-l border-slate-700">
+                <span className="text-slate-300 font-medium">Reassign to:</span>
+                <select
+                  value={bulkReassignTargetId}
+                  onChange={(e) => setBulkReassignTargetId(e.target.value)}
+                  className="bg-slate-800 text-white border border-slate-700 rounded-lg px-2.5 py-1.5 focus:ring-2 focus:ring-red-500 font-medium text-xs cursor-pointer"
+                >
+                  <option value="">Choose User...</option>
+                  {activeUsersList.map(u => (
+                    <option key={u.id} value={u.id}>{u.name} ({u.email})</option>
+                  ))}
+                </select>
+                <button
+                  onClick={handleApplyBulkReassign}
+                  disabled={!bulkReassignTargetId || isBulkReassigning}
+                  className="px-3.5 py-1.5 bg-slate-700 hover:bg-slate-600 disabled:opacity-50 text-white font-bold rounded-lg shadow-xs transition-colors cursor-pointer"
+                >
+                  {isBulkReassigning ? 'Reassigning...' : 'Reassign'}
+                </button>
+              </div>
+            )}
           </div>
           <button
             onClick={() => setSelectedLeadIds(new Set())}
@@ -684,13 +809,14 @@ export const LeadsTable: React.FC<LeadsTableProps> = ({
                     </span>
                   </div>
                 </th>
+                {isAdmin && <th className="py-2.5 px-3 whitespace-nowrap">Owner</th>}
                 <th className="py-2.5 px-3 text-right whitespace-nowrap">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
               {filteredLeads.length === 0 ? (
                 <tr>
-                  <td colSpan={8} className="py-12 text-center text-slate-400">
+                  <td colSpan={isAdmin ? 9 : 8} className="py-12 text-center text-slate-400">
                     <p className="text-sm font-medium text-slate-600">No leads found</p>
                     <p className="text-xs text-slate-400 mt-1">Try changing your search keywords or status filter</p>
                   </td>
@@ -830,6 +956,27 @@ export const LeadsTable: React.FC<LeadsTableProps> = ({
                         </div>
                       </td>
 
+                      {/* Owner Column (Admins only) */}
+                      {isAdmin && (
+                        <td className="py-2.5 px-3 whitespace-nowrap">
+                          <div className="flex items-center gap-1.5">
+                            <span className="font-semibold text-slate-700">{lead.ownerName || 'Admin'}</span>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setLeadToReassign(lead);
+                                setReassignTargetUserId(activeUsersList[0]?.id || '');
+                                setReassignModalError(null);
+                              }}
+                              className="text-[10px] text-red-600 hover:text-red-800 font-bold ml-1 hover:underline cursor-pointer"
+                              title="Reassign lead owner"
+                            >
+                              Reassign
+                            </button>
+                          </div>
+                        </td>
+                      )}
+
                       {/* Actions */}
                       <td className="py-2.5 px-3 text-right whitespace-nowrap">
                         <div className="flex items-center justify-end gap-1.5">
@@ -954,6 +1101,74 @@ export const LeadsTable: React.FC<LeadsTableProps> = ({
                 className="px-4 py-2 text-xs font-bold text-white bg-rose-600 hover:bg-rose-700 rounded-lg transition-colors cursor-pointer shadow-2xs"
               >
                 Delete Lead
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Reassign Lead Modal */}
+      {leadToReassign && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-4 animate-in fade-in duration-150">
+          <div className="w-full max-w-sm bg-white rounded-2xl shadow-2xl border border-slate-200 p-6 space-y-4">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl bg-red-100 text-red-700 flex items-center justify-center shrink-0">
+                <UserCheck className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-slate-900">Reassign Lead</h3>
+                <p className="text-xs text-slate-500">Change contact owner</p>
+              </div>
+            </div>
+
+            {reassignModalError && (
+              <div className="p-3 bg-red-50 border border-red-200 rounded-xl text-xs text-red-700 font-semibold flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 shrink-0 text-red-600" />
+                <span>{reassignModalError}</span>
+              </div>
+            )}
+
+            <p className="text-xs text-slate-600 leading-relaxed">
+              Reassign lead <strong>"{leadToReassign.name}"</strong> ({leadToReassign.email}) from <strong>{leadToReassign.ownerName || 'Current Owner'}</strong> to:
+            </p>
+
+            <div>
+              <label className="block text-[11px] font-bold text-slate-700 uppercase tracking-wider mb-1.5">
+                New Owner:
+              </label>
+              <select
+                value={reassignTargetUserId}
+                onChange={(e) => setReassignTargetUserId(e.target.value)}
+                className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-red-500 cursor-pointer"
+              >
+                {activeUsersList.map(u => (
+                  <option key={u.id} value={u.id}>{u.name} ({u.email})</option>
+                ))}
+              </select>
+            </div>
+
+            <div className="pt-2 border-t border-slate-100 flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setLeadToReassign(null)}
+                className="px-4 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-100 rounded-lg transition-colors cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={isReassigning || !reassignTargetUserId}
+                onClick={handleConfirmReassignSingle}
+                className="px-4 py-2 text-xs font-bold text-white bg-red-600 hover:bg-red-700 disabled:opacity-50 rounded-lg transition-colors cursor-pointer shadow-2xs flex items-center gap-1.5"
+              >
+                {isReassigning ? (
+                  <>
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                    <span>Reassigning...</span>
+                  </>
+                ) : (
+                  <span>Confirm Reassignment</span>
+                )}
               </button>
             </div>
           </div>

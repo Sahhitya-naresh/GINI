@@ -6,10 +6,15 @@ import {
   updateLead,
   deleteLead,
   batchCreateLeads,
+  reassignLead,
+  reassignAllLeads,
   listCampaigns,
   saveCampaign,
   deleteCampaign,
   toggleCampaignActive,
+  checkCampaignImpact,
+  duplicateCampaign,
+  restoreCampaignVersion,
   loadLocalSettings,
   saveLocalSettings,
   loadLocalSenders,
@@ -21,6 +26,11 @@ import {
   loadTaskAlertsState,
   saveDismissedTaskAlerts,
   clearTaskAlertsState,
+  loadUserWorkspaceNotes,
+  saveUserWorkspaceNotes,
+  loadUserAlertsState,
+  saveUserDismissedAlerts,
+  clearUserAlertsState,
   loadTrackingEvents,
   recordTrackingEvent,
   clearAllTrackingEvents,
@@ -30,7 +40,8 @@ import {
   resumeCompanyLeads,
   confirmCompanyPause,
   TrackingEvent,
-  BackendLead
+  BackendLead,
+  BackendTask
 } from './mongoBackend.ts';
 import {
   getActiveKeywords,
@@ -59,13 +70,53 @@ import {
 import { getAuthDiagnostics } from './msGraphAuth.ts';
 import { getPublicBaseUrl } from './urlHelper.ts';
 import { renderEmailMergeTags, DEFAULT_STAGE_TEMPLATES } from '../src/data/defaultTemplates.ts';
+import {
+  getDefaultTemplateSet,
+  getUserTemplateSet,
+  getCampaignTemplateSet,
+  getTemplateSetById,
+  saveTemplateSet,
+  restoreTemplateSetVersion,
+  resetUserTemplateSetToDefault,
+  getCampaignTemplateImpact,
+  resolveEmailContent,
+  composeFullEmail,
+  sanitizeHtml
+} from './templateBackend.ts';
+import { requireAuth, requirePermission, requireAdmin } from './authMiddleware.ts';
+import {
+  getAuthProvider,
+  createSessionToken,
+  setSessionCookie,
+  clearSessionCookie,
+  checkLockout,
+  recordFailedAttempt,
+  clearLockout,
+  seedInitialUsers
+} from './auth.ts';
+import {
+  listUsers,
+  createUser,
+  toggleUserActive,
+  changeUserRole,
+  resetUserPassword,
+  changeOwnPassword,
+  deleteUser
+} from './userBackend.ts';
+import { getPermissionsForRole } from './permissions.ts';
 
 export const app = express();
+
+// Seed initial users on startup if collection is empty
+seedInitialUsers().catch(err => console.error('[Auth Seeder] Startup error:', err));
 
 app.set('trust proxy', true);
 
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+
+// Global Authentication Middleware (Whitelists public webhook, tracking, cron, health & login endpoints)
+app.use(requireAuth);
 
 // 1x1 transparent GIF binary for tracking pixel
 const TRANSPARENT_GIF_1X1 = Buffer.from(
@@ -135,6 +186,187 @@ const getAuth = (req: express.Request) => {
   return { token, spreadsheetId };
 };
 
+// ===========================================================================
+// AUTHENTICATION & USER MANAGEMENT ENDPOINTS
+// ===========================================================================
+
+app.post('/api/auth/login', async (req, res) => {
+  try {
+    const { email, password } = req.body || {};
+    if (!email || !password) {
+      return res.status(400).json({ success: false, error: 'Email and password are required' });
+    }
+
+    const clientIp = (req.headers['x-forwarded-for'] as string)?.split(',')[0].trim() || req.ip || '127.0.0.1';
+    const cleanEmail = String(email).toLowerCase().trim();
+
+    // Check brute-force lockout (5 attempts per email+IP locks for 15 minutes in MongoDB)
+    const lockout = await checkLockout(cleanEmail, clientIp);
+    if (lockout.isLocked) {
+      return res.status(429).json({
+        success: false,
+        error: `Account is temporarily locked due to multiple failed login attempts. Please try again in ${lockout.remainingMinutes || 15} minutes.`
+      });
+    }
+
+    const authProvider = getAuthProvider();
+    const user = await authProvider.authenticate(cleanEmail, String(password));
+
+    if (!user) {
+      const attempt = await recordFailedAttempt(cleanEmail, clientIp);
+      if (attempt.isLocked) {
+        return res.status(429).json({
+          success: false,
+          error: `Account is temporarily locked due to multiple failed login attempts. Please try again in ${attempt.remainingMinutes || 15} minutes.`
+        });
+      }
+      // Same generic error for wrong email and wrong password
+      return res.status(401).json({ success: false, error: 'Invalid email or password' });
+    }
+
+    // Reject inactive users
+    if (!user.isActive) {
+      return res.status(403).json({ success: false, error: 'Account is deactivated. Please contact an administrator.' });
+    }
+
+    // Clear lockout on successful authentication
+    await clearLockout(cleanEmail, clientIp);
+
+    // Update lastLoginAt
+    const db = await getDb();
+    const now = new Date().toISOString();
+    await db.collection('users').updateOne({ id: user.id }, { $set: { lastLoginAt: now } });
+
+    // Issue signed session token (stateless HMAC-SHA256, 8-hour expiry)
+    const token = createSessionToken({ id: user.id, email: user.email, role: user.role });
+    setSessionCookie(res, token);
+
+    const permissions = getPermissionsForRole(user.role);
+
+    return res.json({
+      success: true,
+      user: {
+        ...user,
+        lastLoginAt: now,
+        permissions
+      }
+    });
+  } catch (err: any) {
+    console.error('[Auth API] Login error:', err);
+    return res.status(500).json({ success: false, error: 'Internal login error' });
+  }
+});
+
+app.post('/api/auth/logout', async (_req, res) => {
+  clearSessionCookie(res);
+  res.json({ success: true, message: 'Logged out successfully' });
+});
+
+app.get('/api/auth/me', async (req, res) => {
+  if (!req.user) {
+    return res.status(401).json({ success: false, error: 'Unauthorized: Session missing or expired' });
+  }
+  res.json({ success: true, user: req.user });
+});
+
+app.post('/api/auth/change-password', async (req, res) => {
+  try {
+    if (!req.user) {
+      return res.status(401).json({ success: false, error: 'Unauthorized' });
+    }
+    const { oldPassword, newPassword } = req.body || {};
+    if (!oldPassword || !newPassword) {
+      return res.status(400).json({ success: false, error: 'Current password and new password are required' });
+    }
+
+    const result = await changeOwnPassword(req.user.id, oldPassword, newPassword);
+    if (!result.success) {
+      return res.status(400).json(result);
+    }
+
+    res.json({ success: true, user: result.user });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// --- Admin Users Management Endpoints ---
+
+app.get('/api/users', requirePermission('users.manage'), async (_req, res) => {
+  try {
+    const users = await listUsers();
+    res.json({ success: true, users });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post('/api/users', requirePermission('users.manage'), async (req, res) => {
+  try {
+    const user = await createUser(req.body || {});
+    res.json({ success: true, user });
+  } catch (err: any) {
+    res.status(400).json({ success: false, error: err.message });
+  }
+});
+
+app.post('/api/users/:id/toggle-active', requirePermission('users.manage'), async (req, res) => {
+  try {
+    const requestingUserId = req.user!.id;
+    const result = await toggleUserActive(req.params.id, requestingUserId);
+    if (!result.success) {
+      return res.status(400).json(result);
+    }
+    res.json(result);
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post('/api/users/:id/change-role', requirePermission('users.changeRoles'), async (req, res) => {
+  try {
+    const requestingUserId = req.user!.id;
+    const { role } = req.body || {};
+    const result = await changeUserRole(req.params.id, role, requestingUserId);
+    if (!result.success) {
+      return res.status(400).json(result);
+    }
+    res.json(result);
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post('/api/users/:id/reset-password', requirePermission('users.manage'), async (req, res) => {
+  try {
+    const { newPassword } = req.body || {};
+    const result = await resetUserPassword(req.params.id, newPassword);
+    if (!result.success) {
+      return res.status(400).json(result);
+    }
+    res.json(result);
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.delete('/api/users/:id', requirePermission('users.manage'), async (req, res) => {
+  try {
+    const requestingUserId = req.user!.id;
+    const reassignToUserId = req.body?.reassignToUserId || (req.query?.reassignToUserId as string) || '';
+    if (!reassignToUserId) {
+      return res.status(400).json({ success: false, error: 'A replacement user (reassignToUserId) is required to inherit leads and campaigns.' });
+    }
+    const result = await deleteUser(req.params.id, reassignToUserId, requestingUserId);
+    if (!result.success) {
+      return res.status(400).json(result);
+    }
+    res.json(result);
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // --- Health & MongoDB Status Endpoints ---
 
 app.get('/api/health', async (_req, res) => {
@@ -147,7 +379,7 @@ app.get('/api/health', async (_req, res) => {
   });
 });
 
-app.get('/api/mongodb/status', async (_req, res) => {
+app.get('/api/mongodb/status', requireAdmin, async (_req, res) => {
   try {
     const status = await getMongoStatus();
     res.json(status);
@@ -156,7 +388,7 @@ app.get('/api/mongodb/status', async (_req, res) => {
   }
 });
 
-app.get('/api/mongodb/test-atlas', async (req, res) => {
+app.get('/api/mongodb/test-atlas', requireAdmin, async (req, res) => {
   const customUri = (req.query.uri as string) || '';
   const variations: { name: string; uri: string }[] = customUri ? [{ name: 'custom', uri: customUri }] : [
     {
@@ -212,7 +444,7 @@ app.get('/api/mongodb/test-atlas', async (req, res) => {
   res.json({ results });
 });
 
-app.post('/api/mongodb/update-uri', async (req, res) => {
+app.post('/api/mongodb/update-uri', requireAdmin, async (req, res) => {
   const { uri } = req.body || {};
   if (!uri || typeof uri !== 'string') {
     return res.status(400).json({ success: false, error: 'Valid "uri" string is required.' });
@@ -226,7 +458,7 @@ app.post('/api/mongodb/update-uri', async (req, res) => {
   }
 });
 
-app.post('/api/mongodb/migrate', async (_req, res) => {
+app.post('/api/mongodb/migrate', requireAdmin, async (_req, res) => {
   try {
     const db = await getDb();
     const result = await autoSeedFromLocalData(db);
@@ -384,6 +616,14 @@ app.post('/api/track/reset-lead', async (req, res) => {
       filter.push({ leadId: emailRegex });
     }
 
+    // Verify lead ownership for non-admin
+    if (req.user && req.user.role !== 'admin') {
+      const existingLead = await leadsCol.findOne({ $or: filter });
+      if (!existingLead || (existingLead.ownerId && existingLead.ownerId !== req.user.id)) {
+        return res.status(404).json({ success: false, error: 'Lead not found' });
+      }
+    }
+
     // Delete tracking events for this lead
     const deletedEvents = await eventsCol.deleteMany({ $or: filter });
 
@@ -417,7 +657,7 @@ app.post('/api/track/reset-lead', async (req, res) => {
 
 // --- Debug Tracking Endpoint ---
 
-app.get('/api/track/debug', async (req, res) => {
+app.get('/api/track/debug', requireAdmin, async (req, res) => {
   try {
     const leadId = (req.query.leadId || '').toString().trim();
     if (!leadId) {
@@ -453,9 +693,10 @@ app.get('/api/track/debug', async (req, res) => {
 
 // --- Tracking Stats Endpoint ---
 
-app.get('/api/track/events', async (_req, res) => {
+app.get('/api/track/events', async (req, res) => {
   try {
-    const events = await loadTrackingEvents();
+    const ownerId = (req.user && req.user.role !== 'admin') ? req.user.id : undefined;
+    const events = await loadTrackingEvents(ownerId);
     const statsByLead = computeStatsByLead(events);
     res.json({
       success: true,
@@ -469,8 +710,12 @@ app.get('/api/track/events', async (_req, res) => {
   }
 });
 
-app.post('/api/track/event', async (req, res) => {
+app.post('/api/track/event', requireAdmin, async (req, res) => {
   try {
+    if (process.env.NODE_ENV === 'production') {
+      return res.status(403).json({ success: false, error: 'Manual tracking event generation is disabled in production' });
+    }
+
     const { type, leadId, stage, campaign, targetUrl } = req.body;
     if (!type || !leadId) {
       return res.status(400).json({ error: 'Missing type or leadId' });
@@ -494,7 +739,7 @@ app.post('/api/track/event', async (req, res) => {
   }
 });
 
-app.post('/api/track/clear', async (_req, res) => {
+app.post('/api/track/clear', requireAdmin, async (_req, res) => {
   try {
     await clearAllTrackingEvents();
     res.json({ success: true, message: 'All tracking events cleared' });
@@ -505,9 +750,10 @@ app.post('/api/track/clear', async (_req, res) => {
 
 // --- Leads CRUD Endpoints (MongoDB Single Source of Truth) ---
 
-app.all(['/api/leads', '/api/leads/list', '/api/leads/local'], async (_req, res) => {
+app.all(['/api/leads', '/api/leads/list', '/api/leads/local'], async (req, res) => {
   try {
-    const leads = await listLeads();
+    const filter = (req.user && req.user.role !== 'admin') ? { ownerId: req.user.id } : {};
+    const leads = await listLeads(undefined, undefined, filter);
     res.json({ success: true, count: leads.length, leads });
   } catch (err: any) {
     console.error('API /api/leads/list error:', err);
@@ -517,29 +763,31 @@ app.all(['/api/leads', '/api/leads/list', '/api/leads/local'], async (_req, res)
 
 app.post('/api/leads/create', async (req, res) => {
   try {
-    const leadData = req.body.lead;
+    const leadData = req.body.lead || (req.body.email || req.body.name || req.body.leadId ? req.body : null);
     if (!leadData) {
       return res.status(400).json({ success: false, error: 'Missing lead object in request body' });
     }
-    const created = await createLead(leadData);
+    const created = await createLead(leadData, req.user);
     res.json({ success: true, lead: created });
   } catch (err: any) {
     console.error('API /api/leads/create error:', err);
-    res.status(500).json({ success: false, error: err.message });
+    const status = err.status || 500;
+    res.status(status).json({ success: false, error: err.message });
   }
 });
 
 app.post('/api/leads/update', async (req, res) => {
   try {
-    const leadData = req.body.lead;
+    const leadData = req.body.lead || (req.body.leadId ? req.body : null);
     if (!leadData || !leadData.leadId) {
       return res.status(400).json({ success: false, error: 'Missing lead object or leadId' });
     }
-    const updated = await updateLead(leadData);
+    const updated = await updateLead(leadData, undefined, undefined, req.user);
     res.json({ success: true, lead: updated });
   } catch (err: any) {
     console.error('API /api/leads/update error:', err);
-    res.status(500).json({ success: false, error: err.message });
+    const status = err.status || 500;
+    res.status(status).json({ success: false, error: err.message });
   }
 });
 
@@ -553,6 +801,14 @@ app.post('/api/leads/mark-reply-read', async (req, res) => {
 
     if (filters.length === 0) {
       return res.status(400).json({ success: false, error: 'leadId or email is required' });
+    }
+
+    const leadDoc = await db.collection<BackendLead>(COLLECTIONS.LEADS).findOne({ $or: filters });
+    if (!leadDoc) {
+      return res.status(404).json({ success: false, error: 'Lead not found' });
+    }
+    if (req.user && req.user.role !== 'admin' && leadDoc.ownerId && leadDoc.ownerId !== req.user.id) {
+      return res.status(404).json({ success: false, error: 'Lead not found' });
     }
 
     await db.collection(COLLECTIONS.LEADS).updateMany(
@@ -573,7 +829,7 @@ app.post('/api/leads/batch', async (req, res) => {
     if (!Array.isArray(leadsData)) {
       return res.status(400).json({ success: false, error: 'Expected leads array' });
     }
-    const created = await batchCreateLeads(leadsData);
+    const created = await batchCreateLeads(leadsData, req.user);
     res.json({ success: true, count: created.length, leads: created });
   } catch (err: any) {
     console.error('API /api/leads/batch error:', err);
@@ -598,11 +854,43 @@ app.post('/api/leads/delete', async (req, res) => {
       }
     }
 
-    const deleted = await deleteLead(leadId);
+    const deleted = await deleteLead(leadId, req.user);
     res.json({ success: true, deleted });
   } catch (err: any) {
     console.error('API /api/leads/delete error:', err);
-    res.status(500).json({ success: false, error: err.message });
+    const status = err.status || 500;
+    res.status(status).json({ success: false, error: err.message });
+  }
+});
+
+// Admin Lead Reassignment Routes
+app.post('/api/leads/:leadId/reassign', requireAdmin, async (req, res) => {
+  try {
+    const { targetUserId } = req.body || {};
+    if (!targetUserId) {
+      return res.status(400).json({ success: false, error: 'targetUserId is required' });
+    }
+    const requestingUser = { id: req.user!.id, name: req.user!.name, role: req.user!.role };
+    const result = await reassignLead(req.params.leadId, targetUserId, requestingUser);
+    res.json(result);
+  } catch (err: any) {
+    const status = err.status || 500;
+    res.status(status).json({ success: false, error: err.message });
+  }
+});
+
+app.post('/api/leads/reassign-all', requireAdmin, async (req, res) => {
+  try {
+    const { fromUserId, toUserId } = req.body || {};
+    if (!fromUserId || !toUserId) {
+      return res.status(400).json({ success: false, error: 'fromUserId and toUserId are required' });
+    }
+    const requestingUser = { id: req.user!.id, name: req.user!.name, role: req.user!.role };
+    const result = await reassignAllLeads(fromUserId, toUserId, requestingUser);
+    res.json(result);
+  } catch (err: any) {
+    const status = err.status || 500;
+    res.status(status).json({ success: false, error: err.message });
   }
 });
 
@@ -624,11 +912,12 @@ app.post(['/api/campaigns', '/api/campaigns/save'], async (req, res) => {
     if (!campaign || !campaign.id) {
       return res.status(400).json({ success: false, error: 'Missing campaign or campaign.id' });
     }
-    const saved = await saveCampaign(campaign);
+    const saved = await saveCampaign(campaign, req.user);
     res.json({ success: true, campaign: saved });
   } catch (err: any) {
     console.error('API /api/campaigns/save error:', err);
-    res.status(500).json({ success: false, error: err.message });
+    const status = err.status || 500;
+    res.status(status).json({ success: false, error: err.message });
   }
 });
 
@@ -638,11 +927,12 @@ app.post('/api/campaigns/delete', async (req, res) => {
     if (!campaignId) {
       return res.status(400).json({ success: false, error: 'Missing campaignId' });
     }
-    const deleted = await deleteCampaign(campaignId);
+    const deleted = await deleteCampaign(campaignId, req.user);
     res.json({ success: true, deleted });
   } catch (err: any) {
     console.error('API /api/campaigns/delete error:', err);
-    res.status(500).json({ success: false, error: err.message });
+    const status = err.status || 500;
+    res.status(status).json({ success: false, error: err.message });
   }
 });
 
@@ -652,11 +942,46 @@ app.post('/api/campaigns/toggle-active', async (req, res) => {
     if (!campaignId || isActive === undefined) {
       return res.status(400).json({ success: false, error: 'Missing campaignId or isActive' });
     }
-    const updated = await toggleCampaignActive(campaignId, Boolean(isActive));
+    const updated = await toggleCampaignActive(campaignId, Boolean(isActive), req.user);
     res.json({ success: true, campaign: updated });
   } catch (err: any) {
     console.error('API /api/campaigns/toggle-active error:', err);
+    const status = err.status || 500;
+    res.status(status).json({ success: false, error: err.message });
+  }
+});
+
+app.get('/api/campaigns/:id/impact', async (req, res) => {
+  try {
+    const result = await checkCampaignImpact(req.params.id, req.user?.id);
+    res.json({ success: true, ...result });
+  } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post('/api/campaigns/:id/duplicate', async (req, res) => {
+  try {
+    const { name } = req.body || {};
+    const duplicated = await duplicateCampaign(req.params.id, req.user, name);
+    res.json({ success: true, campaign: duplicated });
+  } catch (err: any) {
+    const status = err.status || 500;
+    res.status(status).json({ success: false, error: err.message });
+  }
+});
+
+app.post(['/api/campaigns/:id/restore', '/api/campaigns/:id/restore-version'], async (req, res) => {
+  try {
+    const { version } = req.body || {};
+    if (typeof version !== 'number') {
+      return res.status(400).json({ success: false, error: 'Target version number is required' });
+    }
+    const restored = await restoreCampaignVersion(req.params.id, version, req.user);
+    res.json({ success: true, campaign: restored });
+  } catch (err: any) {
+    const status = err.status || 500;
+    res.status(status).json({ success: false, error: err.message });
   }
 });
 
@@ -682,7 +1007,7 @@ app.post('/api/import/parse', async (req, res) => {
 
 // --- Run Due Campaigns Job Endpoint (Manual Trigger) ---
 
-app.post('/api/campaigns/run-due', async (req, res) => {
+app.post('/api/campaigns/run-due', requireAdmin, async (req, res) => {
   try {
     const { token, spreadsheetId } = getAuth(req);
     const { campaignId, userEmail } = req.body;
@@ -694,9 +1019,9 @@ app.post('/api/campaigns/run-due', async (req, res) => {
   }
 });
 
-// --- Settings Persistence Endpoints ---
+// --- Settings Persistence Endpoints (Admin Only) ---
 
-app.get('/api/settings', async (_req, res) => {
+app.get('/api/settings', requireAdmin, async (_req, res) => {
   try {
     const settings = await loadLocalSettings();
     res.json({ success: true, settings });
@@ -705,7 +1030,7 @@ app.get('/api/settings', async (_req, res) => {
   }
 });
 
-app.post('/api/settings', async (req, res) => {
+app.post('/api/settings', requireAdmin, async (req, res) => {
   try {
     const updated = await saveLocalSettings(req.body.settings || req.body);
     res.json({ success: true, settings: updated });
@@ -714,9 +1039,10 @@ app.post('/api/settings', async (req, res) => {
   }
 });
 
-// --- Senders Persistence Endpoints (Stores provider per sender profile) ---
 
-app.get('/api/senders', async (_req, res) => {
+// --- Senders Persistence Endpoints (Admin Only) ---
+
+app.get('/api/senders', requireAdmin, async (_req, res) => {
   try {
     const senders = await loadLocalSenders();
     res.json({ success: true, senders });
@@ -725,7 +1051,7 @@ app.get('/api/senders', async (_req, res) => {
   }
 });
 
-app.post('/api/senders', async (req, res) => {
+app.post('/api/senders', requireAdmin, async (req, res) => {
   try {
     const senders = await saveLocalSenders(req.body.senders || []);
     res.json({ success: true, senders });
@@ -734,11 +1060,12 @@ app.post('/api/senders', async (req, res) => {
   }
 });
 
-// --- Manual Tasks Queue Endpoints ---
+// --- Manual Tasks Queue Endpoints (Scoped to lead owner) ---
 
-app.get('/api/tasks', async (_req, res) => {
+app.get('/api/tasks', async (req, res) => {
   try {
-    const tasks = await loadLocalTasks();
+    const ownerId = (req.user && req.user.role !== 'admin') ? req.user.id : undefined;
+    const tasks = await loadLocalTasks(ownerId);
     res.json({ success: true, tasks });
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });
@@ -747,7 +1074,19 @@ app.get('/api/tasks', async (_req, res) => {
 
 app.post('/api/tasks', async (req, res) => {
   try {
-    const tasks = await saveLocalTasks(req.body.tasks || []);
+    const tasksList = req.body.tasks || [];
+    if (req.user && req.user.role !== 'admin') {
+      const db = await getDb();
+      for (const t of tasksList) {
+        if (t.leadId) {
+          const l = await db.collection<BackendLead>(COLLECTIONS.LEADS).findOne({ leadId: t.leadId });
+          if (!l || (l.ownerId && l.ownerId !== req.user.id)) {
+            return res.status(404).json({ success: false, error: 'Lead not found' });
+          }
+        }
+      }
+    }
+    const tasks = await saveLocalTasks(tasksList);
     res.json({ success: true, tasks });
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });
@@ -757,6 +1096,18 @@ app.post('/api/tasks', async (req, res) => {
 app.post('/api/tasks/update', async (req, res) => {
   try {
     const { taskId, updates } = req.body;
+    if (!taskId) return res.status(400).json({ success: false, error: 'Missing taskId' });
+    const db = await getDb();
+    const existingTask = (await db.collection(COLLECTIONS.TASKS).findOne({ id: taskId })) as unknown as (BackendTask | null);
+    if (!existingTask) {
+      return res.status(404).json({ success: false, error: 'Task not found' });
+    }
+    if (req.user && req.user.role !== 'admin' && existingTask.leadId) {
+      const lead = (await db.collection(COLLECTIONS.LEADS).findOne({ leadId: existingTask.leadId })) as unknown as (BackendLead | null);
+      if (!lead || (lead.ownerId && lead.ownerId !== req.user.id)) {
+        return res.status(404).json({ success: false, error: 'Task not found' });
+      }
+    }
     const task = await updateLocalTask(taskId, updates);
     res.json({ success: true, task });
   } catch (err: any) {
@@ -770,6 +1121,17 @@ app.post('/api/tasks/delete', async (req, res) => {
     if (!taskId) {
       return res.status(400).json({ success: false, error: 'Missing taskId' });
     }
+    const db = await getDb();
+    const existingTask = (await db.collection(COLLECTIONS.TASKS).findOne({ id: taskId })) as unknown as (BackendTask | null);
+    if (!existingTask) {
+      return res.status(404).json({ success: false, error: 'Task not found' });
+    }
+    if (req.user && req.user.role !== 'admin' && existingTask.leadId) {
+      const lead = (await db.collection(COLLECTIONS.LEADS).findOne({ leadId: existingTask.leadId })) as unknown as (BackendLead | null);
+      if (!lead || (lead.ownerId && lead.ownerId !== req.user.id)) {
+        return res.status(404).json({ success: false, error: 'Task not found' });
+      }
+    }
     const deleted = await deleteLocalTask(taskId);
     res.json({ success: true, deleted });
   } catch (err: any) {
@@ -777,9 +1139,69 @@ app.post('/api/tasks/delete', async (req, res) => {
   }
 });
 
-app.get('/api/tasks/alerts-state', async (_req, res) => {
+// --- User-State Persistence Endpoints (MongoDB) ---
+
+app.get('/api/user-state/notes', async (req, res) => {
   try {
-    const state = await loadTaskAlertsState();
+    const notes = await loadUserWorkspaceNotes(req.user!.id);
+    res.json({ success: true, notes });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+const handleSaveNotes = async (req: any, res: any) => {
+  try {
+    const notes = String(req.body.notes || '');
+    await saveUserWorkspaceNotes(req.user!.id, notes);
+    res.json({ success: true, notes });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+};
+app.post('/api/user-state/notes', handleSaveNotes);
+app.put('/api/user-state/notes', handleSaveNotes);
+
+app.get('/api/user-state/alerts', async (req, res) => {
+  try {
+    const state = await loadUserAlertsState(req.user!.id);
+    res.json({ success: true, dismissedAlertIds: state.dismissedAlertIds });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post('/api/user-state/alerts', async (req, res) => {
+  try {
+    const alertIds = Array.isArray(req.body.alertIds)
+      ? req.body.alertIds
+      : Array.isArray(req.body.dismissedIds)
+      ? req.body.dismissedIds
+      : Array.isArray(req.body.dismissedAlertIds)
+      ? req.body.dismissedAlertIds
+      : req.body.alertId
+      ? [req.body.alertId]
+      : [];
+    const dismissedAlertIds = await saveUserDismissedAlerts(req.user!.id, alertIds);
+    res.json({ success: true, dismissedAlertIds });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.delete('/api/user-state/alerts', async (req, res) => {
+  try {
+    await clearUserAlertsState(req.user!.id);
+    res.json({ success: true, dismissedAlertIds: [] });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Backward-compatible alerts state endpoints (scoped to session user)
+app.get('/api/tasks/alerts-state', async (req, res) => {
+  try {
+    const state = await loadUserAlertsState(req.user!.id);
     res.json({ success: true, dismissedAlertIds: state.dismissedAlertIds });
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });
@@ -793,16 +1215,16 @@ app.post('/api/tasks/alerts-state/dismiss', async (req, res) => {
       : req.body.alertId
       ? [req.body.alertId]
       : [];
-    const updated = await saveDismissedTaskAlerts(alertIds);
+    const updated = await saveUserDismissedAlerts(req.user!.id, alertIds);
     res.json({ success: true, dismissedAlertIds: updated });
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });
   }
 });
 
-app.post('/api/tasks/alerts-state/clear', async (_req, res) => {
+app.post('/api/tasks/alerts-state/clear', async (req, res) => {
   try {
-    await clearTaskAlertsState();
+    await clearUserAlertsState(req.user!.id);
     res.json({ success: true, dismissedAlertIds: [] });
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });
@@ -811,9 +1233,10 @@ app.post('/api/tasks/alerts-state/clear', async (_req, res) => {
 
 // --- System Overview & Stats ---
 
-app.get('/api/system/stats', async (_req, res) => {
+app.get('/api/system/stats', async (req, res) => {
   try {
-    const stats = await getSystemStatsSummary();
+    const ownerId = (req.user && req.user.role !== 'admin') ? req.user.id : undefined;
+    const stats = await getSystemStatsSummary(ownerId);
     res.json({ success: true, stats });
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });
@@ -827,6 +1250,17 @@ app.post('/api/emails/send', async (req, res) => {
     const { to, subject, htmlBody, leadId, stage, campaign, senderEmail } = req.body;
     if (!to || !subject) {
       return res.status(400).json({ success: false, error: 'Recipient "to" and "subject" are required' });
+    }
+
+    if (leadId) {
+      const db = await getDb();
+      const lead = await db.collection<BackendLead>(COLLECTIONS.LEADS).findOne({ leadId: leadId.trim() });
+      if (!lead) {
+        return res.status(404).json({ success: false, error: 'Lead not found' });
+      }
+      if (req.user && req.user.role !== 'admin' && lead.ownerId && lead.ownerId !== req.user.id) {
+        return res.status(404).json({ success: false, error: 'Lead not found' });
+      }
     }
 
     const baseUrl = getPublicBaseUrl(req);
@@ -851,7 +1285,7 @@ app.post('/api/emails/send', async (req, res) => {
 
 // --- Microsoft Graph App-Only Service Account Endpoints ---
 
-app.get('/api/email/service-account', async (_req, res) => {
+app.get('/api/email/service-account', requireAdmin, async (_req, res) => {
   try {
     const profile = getServiceAccountProfile();
     const diagnostics = await getAuthDiagnostics();
@@ -868,41 +1302,64 @@ app.post('/api/email/send-stage', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Lead with email is required' });
     }
 
+    // Verify database record as real-time safety and ownership boundary
+    const db = await getDb().catch(() => null);
+    if (!db) return res.status(500).json({ success: false, error: 'Database unavailable' });
+
+    const dbLead = (await db.collection(COLLECTIONS.LEADS).findOne({
+      $or: [
+        ...(lead.leadId ? [{ leadId: lead.leadId }] : []),
+        ...(lead.email ? [{ email: lead.email.trim().toLowerCase() }] : [])
+      ]
+    })) as (BackendLead | null);
+
+    if (!dbLead) {
+      return res.status(404).json({ success: false, error: 'Lead not found' });
+    }
+
+    // Ownership check BEFORE calling Graph API
+    if (req.user && req.user.role !== 'admin' && dbLead.ownerId && dbLead.ownerId !== req.user.id) {
+      return res.status(404).json({ success: false, error: 'Lead not found' });
+    }
+
     // Hard safety check: Refuse to email any lead with status 'Negative Reply' at send time
-    if (lead.status === 'Negative Reply') {
+    if (dbLead.status === 'Negative Reply' || lead.status === 'Negative Reply') {
       return res.status(400).json({
         success: false,
         error: `Cannot email lead ${lead.name || lead.email}: Lead status is "Negative Reply" (do not contact).`
       });
     }
 
-    // Verify database record as real-time safety boundary
-    const db = await getDb().catch(() => null);
-    if (db) {
-      const dbLead = await db.collection(COLLECTIONS.LEADS).findOne({
-        $or: [{ leadId: lead.leadId }, { email: lead.email }]
-      });
-      if (dbLead && dbLead.status === 'Negative Reply') {
-        return res.status(400).json({
-          success: false,
-          error: `Cannot email lead ${lead.name || lead.email}: Lead status is "Negative Reply" (do not contact).`
-        });
-      }
-    }
+    const effectiveStage = stageNum || (dbLead.currentStage != null ? dbLead.currentStage + 1 : 1);
+    const nodeOrStage = (template?.useCustomTemplate && template?.customSubject)
+      ? { data: template }
+      : effectiveStage;
 
-    if (!template || !template.subject || !template.bodyHtml) {
-      return res.status(400).json({ success: false, error: 'Stage template is required' });
-    }
+    const resolved = await resolveEmailContent(dbLead, nodeOrStage);
+    const effectiveTemplate = {
+      stage: resolved.stage || effectiveStage,
+      name: `Stage ${resolved.stage || effectiveStage}`,
+      purpose: 'Outreach',
+      defaultGapDays: 3,
+      subject: resolved.subject,
+      bodyHtml: resolved.bodyHtml
+    };
 
     const baseUrl = getPublicBaseUrl(req);
 
     const result = await sendAppEmail({
-      lead,
-      template,
-      stageNum,
+      lead: dbLead as any,
+      template: effectiveTemplate,
+      stageNum: effectiveStage,
       senderDisplayName: customSenderName,
       baseUrl
     });
+
+    // Record sentBy and lastModifiedBy on the lead
+    await db.collection(COLLECTIONS.LEADS).updateOne(
+      { leadId: dbLead.leadId },
+      { $set: { sentBy: req.user?.name || 'System', lastModifiedBy: req.user?.name || 'System', updatedAt: new Date().toISOString() } }
+    );
 
     // Record outbound email to sent_emails collection so it appears in the thread
     const effectiveSender = customSenderName
@@ -916,15 +1373,204 @@ app.post('/api/email/send-stage', async (req, res) => {
       threadId: result.threadId || lead.threadId,
       from: effectiveSender,
       to: lead.email,
-      subject: result.subject || template.subject,
-      bodyHtml: template.bodyHtml,
-      stage: stageNum || template.stage || 1,
+      subject: result.subject || effectiveTemplate.subject,
+      bodyHtml: result.bodyHtml || effectiveTemplate.bodyHtml,
+      stage: effectiveStage,
       campaign: lead.campaign
     });
 
     res.json(result);
   } catch (err: any) {
     console.error('API /api/email/send-stage error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ===========================================================================
+// TEMPLATE SETS & EMAIL HEADER / FOOTER ENDPOINTS
+// ===========================================================================
+
+// 1. Get Admin Default Template Set
+app.get('/api/template-sets/default', requireAuth, async (_req, res) => {
+  try {
+    const defaultSet = await getDefaultTemplateSet();
+    res.json({ success: true, templateSet: defaultSet });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 2. Get User Personal Template Set
+app.get('/api/template-sets/user/:userId', requireAuth, async (req, res) => {
+  try {
+    const targetUserId = req.params.userId;
+    const isSelf = req.user?.id === targetUserId;
+    const isAdmin = req.user?.role === 'admin';
+    const hasViewAny = req.user?.permissions?.includes('templates.editAny');
+
+    if (!isSelf && !isAdmin && !hasViewAny) {
+      return res.status(403).json({ success: false, error: 'Forbidden: You do not have permission to view other users\' templates' });
+    }
+
+    const userSet = await getUserTemplateSet(targetUserId);
+    res.json({ success: true, templateSet: userSet });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 3. Get Campaign Template Set
+app.get('/api/template-sets/campaign/:campaignId', requireAuth, async (req, res) => {
+  try {
+    const campaignId = req.params.campaignId;
+    const campSet = await getCampaignTemplateSet(campaignId);
+    res.json({ success: true, templateSet: campSet });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 4. Save Template Set (enforces server-side permissions and versioning)
+app.post('/api/template-sets/save', requireAuth, async (req, res) => {
+  try {
+    const { setId, stages } = req.body;
+    if (!setId || !Array.isArray(stages)) {
+      return res.status(400).json({ success: false, error: 'Missing setId or stages array' });
+    }
+
+    const updated = await saveTemplateSet(setId, stages, req.user!);
+    res.json({ success: true, templateSet: updated });
+  } catch (err: any) {
+    const status = err.status || 500;
+    res.status(status).json({ success: false, error: err.message });
+  }
+});
+
+// 5. Restore Previous Template Set Version
+app.post('/api/template-sets/:id/restore', requireAuth, async (req, res) => {
+  try {
+    const setId = req.params.id;
+    const { version } = req.body;
+    if (version === undefined || version === null) {
+      return res.status(400).json({ success: false, error: 'Missing version parameter' });
+    }
+
+    const restored = await restoreTemplateSetVersion(setId, Number(version), req.user!);
+    res.json({ success: true, templateSet: restored });
+  } catch (err: any) {
+    const status = err.status || 500;
+    res.status(status).json({ success: false, error: err.message });
+  }
+});
+
+// 6. Reset User Template Set to Current Admin Default
+app.post('/api/template-sets/user/:userId/reset', requireAuth, async (req, res) => {
+  try {
+    const targetUserId = req.params.userId;
+    const isSelf = req.user?.id === targetUserId;
+    const isAdmin = req.user?.role === 'admin';
+
+    if (!isSelf && !isAdmin) {
+      return res.status(403).json({ success: false, error: 'Forbidden: You can only reset your own template set' });
+    }
+
+    const resetSet = await resetUserTemplateSetToDefault(targetUserId, req.user!);
+    res.json({ success: true, templateSet: resetSet });
+  } catch (err: any) {
+    const status = err.status || 500;
+    res.status(status).json({ success: false, error: err.message });
+  }
+});
+
+// 7. Campaign Template Impact Warning Count
+app.get('/api/template-sets/campaign/:campaignId/impact', requireAuth, async (req, res) => {
+  try {
+    const campaignId = req.params.campaignId;
+    const impact = await getCampaignTemplateImpact(campaignId);
+    res.json({ success: true, impact });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 8. Resolve & Preview Composed Email (desktop & mobile)
+app.post('/api/templates/resolve-preview', requireAuth, async (req, res) => {
+  try {
+    const { lead, stage, node, campaignId } = req.body;
+    const effectiveLead = lead || { leadId: 'preview-lead', name: 'Alex Johnson', email: 'alex@example.com', company: 'Acme Corp', campaignId };
+    if (campaignId && !effectiveLead.campaignId) effectiveLead.campaignId = campaignId;
+
+    const resolved = await resolveEmailContent(effectiveLead, node || stage || 1);
+    const settings = await loadLocalSettings();
+    const baseUrl = getPublicBaseUrl(req);
+
+    const composed = composeFullEmail({
+      bodyHtml: resolved.bodyHtml,
+      headerHtml: settings.emailHeader || '',
+      footerHtml: settings.emailFooter || '',
+      lead: effectiveLead,
+      stage: resolved.stage,
+      senderDisplayName: req.user?.name || 'Outreach Flow',
+      baseUrl,
+      embedTrackingPixel: true
+    });
+
+    res.json({
+      success: true,
+      resolved,
+      composed
+    });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 9. Get Global Header & Footer
+app.get('/api/settings/header-footer', requireAuth, async (_req, res) => {
+  try {
+    const settings = await loadLocalSettings();
+    res.json({
+      success: true,
+      header: settings.emailHeader || '',
+      footer: settings.emailFooter || ''
+    });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 10. Update Global Header & Footer (Admin or templates.editHeaderFooter ONLY)
+app.post('/api/settings/header-footer', requireAuth, async (req, res) => {
+  try {
+    const isAdmin = req.user?.role === 'admin';
+    const hasHeaderFooterPerm = Boolean(req.user?.permissions?.includes('templates.editHeaderFooter'));
+
+    if (!isAdmin && !hasHeaderFooterPerm) {
+      return res.status(403).json({
+        success: false,
+        error: 'Forbidden: Only administrators can modify global email header and footer'
+      });
+    }
+
+    const { header, footer } = req.body;
+    const sanitizedHeader = sanitizeHtml(String(header || ''));
+    const sanitizedFooter = sanitizeHtml(String(footer || ''));
+
+    const currentSettings = await loadLocalSettings();
+    const updatedSettings = {
+      ...currentSettings,
+      emailHeader: sanitizedHeader,
+      emailFooter: sanitizedFooter
+    };
+
+    await saveLocalSettings(updatedSettings);
+
+    res.json({
+      success: true,
+      header: sanitizedHeader,
+      footer: sanitizedFooter
+    });
+  } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });
   }
 });
@@ -1006,41 +1652,55 @@ app.get('/api/email/thread', async (req, res) => {
   try {
     const threadId = (req.query.threadId as string) || '';
     const leadEmail = (req.query.leadEmail as string) || '';
+    const leadId = (req.query.leadId as string) || '';
     const cleanEmail = leadEmail.trim().toLowerCase();
 
-    // 1. Fetch Microsoft Graph messages if configured
-    const graphResult = await getAppConversationThread(threadId, leadEmail).catch(() => ({ messages: [], subject: '' }));
-
     const db = await getDb().catch(() => null);
+    if (!db) return res.status(500).json({ success: false, error: 'Database unavailable' });
+
+    // Verify lead ownership BEFORE calling Microsoft Graph
+    const leadQuery: any = {};
+    if (leadId) {
+      leadQuery.leadId = leadId.trim();
+    } else if (cleanEmail && threadId) {
+      leadQuery.$or = [{ email: cleanEmail }, { threadId }];
+    } else if (cleanEmail) {
+      leadQuery.email = cleanEmail;
+    } else if (threadId) {
+      leadQuery.threadId = threadId;
+    }
+
+    const leadDoc = Object.keys(leadQuery).length > 0
+      ? ((await db.collection(COLLECTIONS.LEADS).findOne(leadQuery)) as (BackendLead | null))
+      : null;
+
+    if (!leadDoc) {
+      return res.status(404).json({ success: false, error: 'Lead not found' });
+    }
+
+    if (req.user && req.user.role !== 'admin' && leadDoc.ownerId && leadDoc.ownerId !== req.user.id) {
+      return res.status(404).json({ success: false, error: 'Lead not found' });
+    }
+
+    // 1. Fetch Microsoft Graph messages now that ownership is confirmed
+    const graphResult = await getAppConversationThread(threadId || leadDoc.threadId, cleanEmail || leadDoc.email).catch(() => ({ messages: [], subject: '' }));
 
     // 2. Query sent_emails collection from database
     let sentMessages: any[] = [];
-    let leadDoc: any = null;
+    try {
+      const sentQuery: any = {};
+      const targetEmail = cleanEmail || leadDoc.email;
+      const targetThreadId = threadId || leadDoc.threadId;
+      if (targetEmail && targetThreadId) {
+        sentQuery.$or = [{ leadEmail: targetEmail }, { threadId: targetThreadId }];
+      } else if (targetEmail) {
+        sentQuery.leadEmail = targetEmail;
+      } else if (targetThreadId) {
+        sentQuery.threadId = targetThreadId;
+      }
+      sentMessages = await db.collection('sent_emails').find(sentQuery).toArray();
+    } catch (_) {}
 
-    if (db) {
-      try {
-        const sentQuery: any = {};
-        if (cleanEmail && threadId) {
-          sentQuery.$or = [{ leadEmail: cleanEmail }, { threadId }];
-        } else if (cleanEmail) {
-          sentQuery.leadEmail = cleanEmail;
-        } else if (threadId) {
-          sentQuery.threadId = threadId;
-        }
-        sentMessages = await db.collection('sent_emails').find(sentQuery).toArray();
-
-        // Also query the lead document to check if we need to backfill past stage emails
-        const leadQuery: any = {};
-        if (cleanEmail && threadId) {
-          leadQuery.$or = [{ email: cleanEmail }, { threadId }];
-        } else if (cleanEmail) {
-          leadQuery.email = cleanEmail;
-        } else if (threadId) {
-          leadQuery.threadId = threadId;
-        }
-        leadDoc = await db.collection(COLLECTIONS.LEADS).findOne(leadQuery);
-      } catch (_) {}
-    }
 
     // 3. If no sent emails are recorded in sent_emails yet, but lead exists and was dispatched to
     if (sentMessages.length === 0 && leadDoc && (leadDoc.lastEmailSentDate || (leadDoc.currentStage || 0) >= 1)) {
@@ -1076,8 +1736,8 @@ app.get('/api/email/thread', async (req, res) => {
             bodyHtml = bodyHtml || defaultTpl.bodyHtml;
           }
 
-          const renderedSubject = renderEmailMergeTags(subject, leadDoc, senderDisplayName);
-          const renderedBody = renderEmailMergeTags(bodyHtml, leadDoc, senderDisplayName);
+          const renderedSubject = renderEmailMergeTags(subject, leadDoc as any, senderDisplayName);
+          const renderedBody = renderEmailMergeTags(bodyHtml, leadDoc as any, senderDisplayName);
 
           const backfilledDoc = {
             id: `sent-${leadDoc.leadId}-stage-${st}`,
@@ -1232,26 +1892,44 @@ app.get('/api/email/thread', async (req, res) => {
 
 app.post('/api/email/check-reply', async (req, res) => {
   try {
-    const { leadEmail, threadId, lastSentDate } = req.body;
-    if (!leadEmail) {
-      return res.status(400).json({ success: false, error: 'leadEmail is required' });
+    const { leadEmail, threadId, lastSentDate, leadId } = req.body;
+    if (!leadEmail && !threadId && !leadId) {
+      return res.status(400).json({ success: false, error: 'leadEmail, threadId, or leadId is required' });
+    }
+
+    const db = await getDb().catch(() => null);
+    if (!db) return res.status(500).json({ success: false, error: 'Database unavailable' });
+
+    const filter: any = {};
+    if (leadId) filter.leadId = leadId.trim();
+    else if (leadEmail) filter.email = leadEmail.trim().toLowerCase();
+    else if (threadId) filter.threadId = threadId.trim();
+
+    const dbLead = (await db.collection(COLLECTIONS.LEADS).findOne(filter)) as (BackendLead | null);
+    if (!dbLead) {
+      return res.status(404).json({ success: false, error: 'Lead not found' });
+    }
+
+    // Ownership check BEFORE calling Microsoft Graph API
+    if (req.user && req.user.role !== 'admin' && dbLead.ownerId && dbLead.ownerId !== req.user.id) {
+      return res.status(404).json({ success: false, error: 'Lead not found' });
     }
 
     const result = await checkAppThreadForReply({
-      leadEmail,
-      threadId,
-      lastSentDate
+      leadEmail: leadEmail || dbLead.email,
+      threadId: threadId || dbLead.threadId,
+      lastSentDate: lastSentDate || dbLead.lastEmailSentDate
     });
 
     if (result.hasReplied) {
       // Process through shared reply logic & rule-based sentiment classification
       const applyResult = await applyLeadReply({
-        leadEmail,
-        threadId,
+        leadEmail: leadEmail || dbLead.email,
+        threadId: threadId || dbLead.threadId,
         messageId: result.replyMessage?.id,
         subject: result.replyMessage?.subject || 'Re: Outreach Flow follow-up',
         body: result.replyMessage?.bodyPreview || result.reason || '',
-        from: result.replyMessage?.from || leadEmail,
+        from: result.replyMessage?.from || leadEmail || dbLead.email,
         receivedDateTime: result.replyMessage?.receivedDateTime,
         source: 'Microsoft Graph Reply Check'
       });
@@ -1270,32 +1948,32 @@ app.post('/api/email/check-reply', async (req, res) => {
     // In production, real Microsoft Graph API is the sole source of truth for reply detection.
     // Stored simulated replies are restricted to local non-production environments.
     if (process.env.NODE_ENV !== 'production') {
+      const effectiveLastSent = lastSentDate || dbLead.lastEmailSentDate;
+      const effectiveThreadId = threadId || dbLead.threadId;
+
       // If no outreach email was ever sent to this lead, it cannot have replied to outreach!
-      if (!lastSentDate && !threadId) {
+      if (!effectiveLastSent && !effectiveThreadId) {
         return res.json({ success: true, hasReplied: false, reason: 'No outreach email sent to this lead yet' });
       }
 
-      const cleanEmail = leadEmail.trim().toLowerCase();
+      const cleanEmail = (leadEmail || dbLead.email).trim().toLowerCase();
       let reply = inMemoryInboundReplies.find(
-        r => r.leadEmail === cleanEmail || (threadId && r.threadId === threadId)
+        r => r.leadEmail === cleanEmail || (effectiveThreadId && r.threadId === effectiveThreadId)
       );
 
       if (!reply) {
-        const db = await getDb().catch(() => null);
-        if (db) {
-          try {
-            const query: any = { $or: [{ leadEmail: cleanEmail }] };
-            if (threadId) query.$or.push({ threadId });
-            const dbReply = await (db.collection('inbound_replies') as any).findOne(query);
-            if (dbReply) reply = dbReply;
-          } catch (_) {}
-        }
+        try {
+          const query: any = { $or: [{ leadEmail: cleanEmail }] };
+          if (effectiveThreadId) query.$or.push({ threadId: effectiveThreadId });
+          const dbReply = await (db.collection('inbound_replies') as any).findOne(query);
+          if (dbReply) reply = dbReply;
+        } catch (_) {}
       }
 
       if (reply) {
         // Enforce timestamp correlation: reply must be received AFTER lastSentDate
-        if (lastSentDate) {
-          const sentTime = new Date(lastSentDate.includes('T') ? lastSentDate : `${lastSentDate}T00:00:00Z`).getTime();
+        if (effectiveLastSent) {
+          const sentTime = new Date(effectiveLastSent.includes('T') ? effectiveLastSent : `${effectiveLastSent}T00:00:00Z`).getTime();
           const replyTime = new Date(reply.receivedDateTime || (reply as any).createdAt || 0).getTime();
           if (!isNaN(sentTime) && !isNaN(replyTime) && replyTime <= sentTime) {
             // Reply is older than outreach dispatch date; ignore as stale previous test reply!
@@ -1306,7 +1984,7 @@ app.post('/api/email/check-reply', async (req, res) => {
         // Process through shared reply logic & rule-based sentiment classification
         const applyResult = await applyLeadReply({
           leadEmail: cleanEmail,
-          threadId: reply.threadId || threadId,
+          threadId: reply.threadId || effectiveThreadId,
           messageId: reply.id,
           subject: reply.subject || 'Re: Outreach Flow follow-up',
           body: reply.body || '',
@@ -1350,6 +2028,15 @@ app.post('/api/leads/override-sentiment', async (req, res) => {
     if (!leadId || !sentiment) {
       return res.status(400).json({ success: false, error: 'leadId and sentiment are required' });
     }
+    const db = await getDb();
+    const lead = (await db.collection(COLLECTIONS.LEADS).findOne({ leadId: leadId.trim() })) as unknown as (BackendLead | null);
+    if (!lead) {
+      return res.status(404).json({ success: false, error: 'Lead not found' });
+    }
+    if (req.user && req.user.role !== 'admin' && lead.ownerId && lead.ownerId !== req.user.id) {
+      return res.status(404).json({ success: false, error: 'Lead not found' });
+    }
+
     const result = await manualOverrideSentiment(leadId, sentiment, reason);
     res.json(result);
   } catch (err: any) {
@@ -1360,11 +2047,26 @@ app.post('/api/leads/override-sentiment', async (req, res) => {
 
 app.post('/api/leads/resume-company', async (req, res) => {
   try {
-    const replyingLeadId = req.body.replyingLeadId || req.body.leadId;
+    const replyingLeadId = (req.body.replyingLeadId || req.body.leadId || '').trim();
     if (!replyingLeadId) {
       return res.status(400).json({ success: false, error: 'replyingLeadId is required' });
     }
+    const db = await getDb();
+    const replyingLead = (await db.collection(COLLECTIONS.LEADS).findOne({ leadId: replyingLeadId })) as unknown as (BackendLead | null);
+    if (!replyingLead) {
+      return res.status(404).json({ success: false, error: 'Lead not found' });
+    }
+
+    const isOwner = replyingLead.ownerId === req.user?.id;
+    const isAdmin = req.user?.role === 'admin';
+    if (!isOwner && !isAdmin) {
+      return res.status(404).json({ success: false, error: 'Lead not found' });
+    }
+
     const result = await resumeCompanyLeads(replyingLeadId);
+    if (!isAdmin) {
+      return res.json({ success: true, count: result.resumedCount });
+    }
     res.json(result);
   } catch (err: any) {
     console.error('API /api/leads/resume-company error:', err);
@@ -1374,11 +2076,26 @@ app.post('/api/leads/resume-company', async (req, res) => {
 
 app.post('/api/leads/confirm-company-pause', async (req, res) => {
   try {
-    const replyingLeadId = req.body.replyingLeadId || req.body.leadId;
+    const replyingLeadId = (req.body.replyingLeadId || req.body.leadId || '').trim();
     if (!replyingLeadId) {
       return res.status(400).json({ success: false, error: 'replyingLeadId is required' });
     }
+    const db = await getDb();
+    const replyingLead = (await db.collection(COLLECTIONS.LEADS).findOne({ leadId: replyingLeadId })) as unknown as (BackendLead | null);
+    if (!replyingLead) {
+      return res.status(404).json({ success: false, error: 'Lead not found' });
+    }
+
+    const isOwner = replyingLead.ownerId === req.user?.id;
+    const isAdmin = req.user?.role === 'admin';
+    if (!isOwner && !isAdmin) {
+      return res.status(404).json({ success: false, error: 'Lead not found' });
+    }
+
     const result = await confirmCompanyPause(replyingLeadId);
+    if (!isAdmin) {
+      return res.json({ success: true, count: result.pausedCount });
+    }
     res.json(result);
   } catch (err: any) {
     console.error('API /api/leads/confirm-company-pause error:', err);
@@ -1387,10 +2104,10 @@ app.post('/api/leads/confirm-company-pause', async (req, res) => {
 });
 
 // ===========================================================================
-// REPLY CLASSIFIER KEYWORD RULES & TEST ENDPOINTS
+// REPLY CLASSIFIER KEYWORD RULES & TEST ENDPOINTS (Admin Only)
 // ===========================================================================
 
-app.get('/api/reply-rules', async (_req, res) => {
+app.get('/api/reply-rules', requireAdmin, async (_req, res) => {
   try {
     const lists = await getActiveKeywords();
     res.json({
@@ -1403,7 +2120,7 @@ app.get('/api/reply-rules', async (_req, res) => {
   }
 });
 
-app.post('/api/reply-rules', async (req, res) => {
+app.post('/api/reply-rules', requireAdmin, async (req, res) => {
   try {
     const { negativePhrases, positivePhrases, deferralPhrases, autoReplyPhrases } = req.body;
 
@@ -1444,7 +2161,7 @@ app.post('/api/reply-rules', async (req, res) => {
   }
 });
 
-app.post('/api/reply-rules/reset', async (req, res) => {
+app.post('/api/reply-rules/reset', requireAdmin, async (req, res) => {
   try {
     const { category } = req.body;
     const updated = await resetKeywordsToDefault(category);
@@ -1458,7 +2175,7 @@ app.post('/api/reply-rules/reset', async (req, res) => {
   }
 });
 
-app.post('/api/reply-rules/test', async (req, res) => {
+app.post('/api/reply-rules/test', requireAdmin, async (req, res) => {
   try {
     const { text, subject } = req.body;
     const activeKeywords = await getActiveKeywords();
@@ -1472,7 +2189,7 @@ app.post('/api/reply-rules/test', async (req, res) => {
   }
 });
 
-app.get('/api/reply-rules/preview-recent', async (_req, res) => {
+app.get('/api/reply-rules/preview-recent', requireAdmin, async (_req, res) => {
   try {
     const db = await getDb();
     const activeKeywords = await getActiveKeywords();
@@ -1615,10 +2332,10 @@ app.all('/api/cron/renew-subscriptions', async (req, res) => {
 });
 
 /**
- * 3. On-demand Subscription Management: /api/webhooks/graph/subscribe
- * Allows admin/test script to inspect or trigger active subscription creation.
+ * 3. On-demand Subscription Management: /api/webhooks/graph/subscribe (Admin Only)
+ * Allows admin to inspect or trigger active subscription creation.
  */
-app.post('/api/webhooks/graph/subscribe', async (req, res) => {
+app.post('/api/webhooks/graph/subscribe', requireAdmin, async (req, res) => {
   try {
     const sub = await createGraphWebhookSubscription();
     res.json({ success: true, subscription: sub });
@@ -1628,8 +2345,13 @@ app.post('/api/webhooks/graph/subscribe', async (req, res) => {
   }
 });
 
-app.post('/api/email/test-send', async (req, res) => {
+// Admin-only test send endpoint with production safeguard
+app.post('/api/email/test-send', requireAdmin, async (req, res) => {
   try {
+    if (process.env.NODE_ENV === 'production' && process.env.ALLOW_PROD_TEST_SEND !== 'true') {
+      return res.status(403).json({ success: false, error: 'Test sending is disabled in production unless ALLOW_PROD_TEST_SEND is enabled' });
+    }
+
     const { to, subject, body } = req.body;
     if (!to) {
       return res.status(400).json({ success: false, error: 'Recipient "to" email address is required' });
@@ -1642,4 +2364,17 @@ app.post('/api/email/test-send', async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 });
+
+// ===========================================================================
+// DENY BY DEFAULT FALLBACK (Requirement 5)
+// Any /api/* endpoint not explicitly handled above requires admin-only access
+// ===========================================================================
+
+app.all('/api/*', (req, res) => {
+  if (req.user?.role !== 'admin') {
+    return res.status(403).json({ success: false, error: 'Forbidden: Admin access required' });
+  }
+  return res.status(404).json({ success: false, error: `API route ${req.method} ${req.path} not found` });
+});
+
 

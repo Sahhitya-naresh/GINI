@@ -6,6 +6,7 @@ import {
   areSameCompany,
   ReplyClassificationResult
 } from './replyRules.ts';
+import { sanitizeHtml } from './templateBackend.ts';
 
 export interface BackendLead {
   leadId: string;
@@ -39,6 +40,13 @@ export interface BackendLead {
   createdAt?: string;
   updatedAt?: string;
 
+  // Ownership & Audit fields
+  ownerId?: string;
+  ownerName?: string;
+  lastModifiedBy?: string;
+  sentBy?: string;
+  templateSource?: 'campaign' | 'own';
+
   // Sentiment and classification fields
   replySentiment?: 'positive' | 'negative' | 'neutral';
   replyClassifiedBy?: 'auto' | 'manual';
@@ -55,6 +63,14 @@ export interface BackendLead {
   [key: string]: any;
 }
 
+export interface CampaignVersionSnapshot {
+  version: number;
+  name: string;
+  workflow_graph: any;
+  editedBy: string;
+  editedAt: string;
+}
+
 export interface BackendCampaign {
   id: string;
   name: string;
@@ -69,8 +85,17 @@ export interface BackendCampaign {
   };
   created_date: string;
   updated_date?: string;
+
+  // Ownership, Audit & Versioning fields
+  ownerId?: string;
+  ownerName?: string;
+  lastEditedBy?: string;
+  lastEditedAt?: string;
+  versions?: CampaignVersionSnapshot[];
+
   [key: string]: any;
 }
+
 
 export interface BackendSender {
   id: string;
@@ -119,6 +144,8 @@ export interface BackendSettings {
   appName?: string;
   updatedAt?: string;
   positiveReplyAction?: 'pause_automatically' | 'ask_first';
+  emailHeader?: string;
+  emailFooter?: string;
 }
 
 export interface TrackingEvent {
@@ -138,12 +165,14 @@ export interface TrackingEvent {
 // LEADS CRUD OPERATIONS (MongoDB)
 // ---------------------------------------------------------------------------
 
-export async function listLeads(token?: string, spreadsheetId?: string): Promise<BackendLead[]> {
+export async function listLeads(token?: string, spreadsheetId?: string, queryFilter?: any): Promise<BackendLead[]> {
   const db = await getDb();
+  const filter = queryFilter || {};
   const leads = await db
     .collection<BackendLead>(COLLECTIONS.LEADS)
-    .find({}, { projection: { _id: 0 } })
+    .find(filter, { projection: { _id: 0 } })
     .toArray();
+
 
   const activeKeywords = await getActiveKeywords().catch(() => undefined);
 
@@ -239,32 +268,55 @@ export async function getNextLeadId(): Promise<string> {
   return `LEAD-${maxNum + 1}`;
 }
 
-export async function createLead(leadData: Partial<BackendLead>): Promise<BackendLead> {
+export async function createLead(leadData: Partial<BackendLead>, requestingUser?: { id: string; name?: string; role?: string }): Promise<BackendLead> {
   const db = await getDb();
   const col = db.collection<BackendLead>(COLLECTIONS.LEADS);
 
   const cleanEmail = (leadData.email || '').trim().toLowerCase();
   const rawId = (leadData.leadId || '').trim();
 
-  // Deduplication check: check if lead with same email or leadId already exists
+  // Deduplication check: check if lead with same email already exists
   if (cleanEmail) {
     const existing = await col.findOne({ email: cleanEmail }, { projection: { _id: 0 } });
     if (existing) {
+      if (requestingUser) {
+        // Duplicate check across users
+        if (existing.ownerId && existing.ownerId !== requestingUser.id) {
+          if (requestingUser.role !== 'admin') {
+            const err: any = new Error("This contact already exists in the system");
+            err.status = 409;
+            throw err;
+          } else {
+            const ownerLabel = existing.ownerName || existing.ownerId;
+            const err: any = new Error(`This contact already exists in the system (owned by ${ownerLabel})`);
+            err.status = 409;
+            throw err;
+          }
+        }
+      }
+
+      const assignedOwnerId = existing.ownerId || (requestingUser?.role === 'admin' ? leadData.ownerId || requestingUser.id : requestingUser?.id || '');
+      const assignedOwnerName = existing.ownerName || (requestingUser?.role === 'admin' ? leadData.ownerName || requestingUser.name : requestingUser?.name || '');
+
       const updatedDoc: BackendLead = {
         ...existing,
         ...leadData,
         leadId: existing.leadId,
-        currentStage: typeof leadData.currentStage === 'number' ? leadData.currentStage : 0,
-        status: leadData.status || 'Active',
-        lastEmailSentDate: leadData.lastEmailSentDate || '',
-        nextSendDate: leadData.nextSendDate || new Date().toISOString().split('T')[0],
-        threadId: leadData.threadId || '',
-        opensCount: typeof leadData.opensCount === 'number' ? leadData.opensCount : 0,
-        clicksCount: typeof leadData.clicksCount === 'number' ? leadData.clicksCount : 0,
-        firstOpenedDate: leadData.firstOpenedDate || '',
-        lastOpenedDate: leadData.lastOpenedDate || '',
-        firstClickedDate: leadData.firstClickedDate || '',
-        lastClickedDate: leadData.lastClickedDate || '',
+        ownerId: assignedOwnerId,
+        ownerName: assignedOwnerName,
+        lastModifiedBy: requestingUser?.name || 'System',
+        currentStage: typeof leadData.currentStage === 'number' ? leadData.currentStage : (existing.currentStage || 0),
+        status: leadData.status || existing.status || 'Active',
+        lastEmailSentDate: leadData.lastEmailSentDate || existing.lastEmailSentDate || '',
+        nextSendDate: leadData.nextSendDate || existing.nextSendDate || new Date().toISOString().split('T')[0],
+        threadId: leadData.threadId || existing.threadId || '',
+        opensCount: typeof leadData.opensCount === 'number' ? leadData.opensCount : (existing.opensCount || 0),
+        clicksCount: typeof leadData.clicksCount === 'number' ? leadData.clicksCount : (existing.clicksCount || 0),
+        firstOpenedDate: leadData.firstOpenedDate || existing.firstOpenedDate || '',
+        lastOpenedDate: leadData.lastOpenedDate || existing.lastOpenedDate || '',
+        firstClickedDate: leadData.firstClickedDate || existing.firstClickedDate || '',
+        lastClickedDate: leadData.lastClickedDate || existing.lastClickedDate || '',
+        templateSource: leadData.templateSource || existing.templateSource || 'campaign',
         updatedAt: new Date().toISOString()
       };
       await col.updateOne({ leadId: existing.leadId }, { $set: updatedDoc });
@@ -323,6 +375,13 @@ export async function createLead(leadData: Partial<BackendLead>): Promise<Backen
     } catch (_) {}
   }
 
+  const assignedOwnerId = (requestingUser?.role === 'admin' && leadData.ownerId)
+    ? leadData.ownerId
+    : (requestingUser?.id || leadData.ownerId || '');
+  const assignedOwnerName = (requestingUser?.role === 'admin' && leadData.ownerName)
+    ? leadData.ownerName
+    : (requestingUser?.name || leadData.ownerName || '');
+
   const now = new Date().toISOString();
   const newLead: BackendLead = {
     leadId: finalLeadId,
@@ -352,6 +411,10 @@ export async function createLead(leadData: Partial<BackendLead>): Promise<Backen
     campaignId: leadData.campaignId || '',
     nodeEnteredDate: leadData.nodeEnteredDate || '',
     senderUsed: leadData.senderUsed || '',
+    ownerId: assignedOwnerId,
+    ownerName: assignedOwnerName,
+    lastModifiedBy: requestingUser?.name || 'System',
+    templateSource: leadData.templateSource || 'campaign',
     createdAt: now,
     updatedAt: now
   };
@@ -369,7 +432,7 @@ export async function createLead(leadData: Partial<BackendLead>): Promise<Backen
   return newLead;
 }
 
-export async function updateLead(leadData: Partial<BackendLead>, token?: string, spreadsheetId?: string): Promise<BackendLead> {
+export async function updateLead(leadData: Partial<BackendLead>, token?: string, spreadsheetId?: string, requestingUser?: { id: string; name?: string; role?: string }): Promise<BackendLead> {
   const db = await getDb();
   const col = db.collection<BackendLead>(COLLECTIONS.LEADS);
 
@@ -379,33 +442,37 @@ export async function updateLead(leadData: Partial<BackendLead>, token?: string,
 
   const existing = await col.findOne({ leadId: leadData.leadId }, { projection: { _id: 0 } });
   if (!existing) {
-    // If not found by leadId, try by email if provided
-    if (leadData.email) {
-      const byEmail = await col.findOne({ email: leadData.email.trim().toLowerCase() }, { projection: { _id: 0 } });
-      if (byEmail) {
-        const merged: BackendLead = {
-          ...byEmail,
-          ...leadData,
-          leadId: byEmail.leadId,
-          updatedAt: new Date().toISOString()
-        };
-        await col.updateOne({ leadId: byEmail.leadId }, { $set: merged });
-        return merged;
-      }
-    }
-    // Fallback: create as new
-    return createLead(leadData);
+    const err: any = new Error('Lead not found');
+    err.status = 404;
+    throw err;
+  }
+
+  // Scoping check: non-admin can only update their own leads
+  if (requestingUser && requestingUser.role !== 'admin' && existing.ownerId && existing.ownerId !== requestingUser.id) {
+    const err: any = new Error('Lead not found');
+    err.status = 404;
+    throw err;
+  }
+
+  const payload: Partial<BackendLead> = {
+    ...leadData
+  };
+  // Non-admins cannot alter ownership fields
+  if (requestingUser && requestingUser.role !== 'admin') {
+    delete (payload as any).ownerId;
+    delete (payload as any).ownerName;
   }
 
   const updated: BackendLead = {
     ...existing,
-    ...leadData,
-    notes: cleanLeadNotes(leadData.notes !== undefined ? leadData.notes : existing.notes),
+    ...payload,
+    notes: cleanLeadNotes(payload.notes !== undefined ? payload.notes : existing.notes),
+    lastModifiedBy: requestingUser?.name || existing.lastModifiedBy || 'System',
     updatedAt: new Date().toISOString()
   };
 
   // Prevent accidental status downgrade of Negative Reply
-  if ((existing.replySentiment === 'negative' || leadData.replySentiment === 'negative') && updated.status === 'Replied') {
+  if ((existing.replySentiment === 'negative' || payload.replySentiment === 'negative') && updated.status === 'Replied') {
     updated.status = 'Negative Reply';
     updated.replySentiment = 'negative';
   } else if (updated.status === 'Negative Reply' && !updated.replySentiment) {
@@ -416,13 +483,26 @@ export async function updateLead(leadData: Partial<BackendLead>, token?: string,
   return updated;
 }
 
-export async function deleteLead(leadId: string): Promise<boolean> {
+export async function deleteLead(leadId: string, requestingUser?: { id: string; name?: string; role?: string }): Promise<boolean> {
   const db = await getDb();
   const col = db.collection<BackendLead>(COLLECTIONS.LEADS);
   const cleanId = leadId.trim();
   const existing = await col.findOne({ leadId: cleanId });
-  const leadEmail = existing?.email?.trim().toLowerCase();
 
+  if (!existing) {
+    const err: any = new Error('Lead not found');
+    err.status = 404;
+    throw err;
+  }
+
+  // Scoping check: non-admin can only delete their own leads
+  if (requestingUser && requestingUser.role !== 'admin' && existing.ownerId && existing.ownerId !== requestingUser.id) {
+    const err: any = new Error('Lead not found');
+    err.status = 404;
+    throw err;
+  }
+
+  const leadEmail = existing.email?.trim().toLowerCase();
   const result = await col.deleteOne({ leadId: cleanId });
 
   // Delete associated tasks
@@ -463,17 +543,16 @@ export async function deleteLead(leadId: string): Promise<boolean> {
   return result.deletedCount > 0;
 }
 
-export async function batchCreateLeads(leadsData: Partial<BackendLead>[]): Promise<BackendLead[]> {
+export async function batchCreateLeads(leadsData: Partial<BackendLead>[], requestingUser?: { id: string; name?: string; role?: string }): Promise<BackendLead[]> {
   const db = await getDb();
   const col = db.collection<BackendLead>(COLLECTIONS.LEADS);
   const createdOrUpdated: BackendLead[] = [];
 
-  // Get current max numeric ID
-  const allLeads = await col.find({}, { projection: { leadId: 1, email: 1 } }).toArray();
+  const allLeads = await col.find({}, { projection: { leadId: 1, email: 1, ownerId: 1, ownerName: 1 } }).toArray();
   let maxNum = 100;
-  const existingEmailMap = new Map<string, string>();
+  const existingEmailMap = new Map<string, { leadId: string; ownerId?: string; ownerName?: string }>();
   for (const l of allLeads) {
-    if (l.email) existingEmailMap.set(l.email.trim().toLowerCase(), l.leadId);
+    if (l.email) existingEmailMap.set(l.email.trim().toLowerCase(), { leadId: l.leadId, ownerId: l.ownerId, ownerName: l.ownerName });
     const m = String(l.leadId || '').match(/LEAD-(\d+)/i);
     if (m) {
       const n = parseInt(m[1], 10);
@@ -485,13 +564,27 @@ export async function batchCreateLeads(leadsData: Partial<BackendLead>[]): Promi
 
   for (const item of leadsData) {
     const cleanEmail = (item.email || '').trim().toLowerCase();
-    const existingLeadId = cleanEmail ? existingEmailMap.get(cleanEmail) : undefined;
+    const existing = cleanEmail ? existingEmailMap.get(cleanEmail) : undefined;
 
-    let targetLeadId = existingLeadId || (item.leadId || '').trim();
+    // Duplicate email check: if already owned by someone else, skip importing
+    if (existing && requestingUser) {
+      if (existing.ownerId && existing.ownerId !== requestingUser.id) {
+        continue;
+      }
+    }
+
+    let targetLeadId = existing?.leadId || (item.leadId || '').trim();
     if (!targetLeadId || targetLeadId.includes('NaN') || targetLeadId.includes('undefined')) {
       maxNum++;
       targetLeadId = `LEAD-${maxNum}`;
     }
+
+    const assignedOwnerId = (requestingUser?.role === 'admin' && item.ownerId)
+      ? item.ownerId
+      : (requestingUser?.id || item.ownerId || '');
+    const assignedOwnerName = (requestingUser?.role === 'admin' && item.ownerName)
+      ? item.ownerName
+      : (requestingUser?.name || item.ownerName || '');
 
     const leadDoc: BackendLead = {
       leadId: targetLeadId,
@@ -521,6 +614,10 @@ export async function batchCreateLeads(leadsData: Partial<BackendLead>[]): Promi
       campaignId: item.campaignId || '',
       nodeEnteredDate: item.nodeEnteredDate || '',
       senderUsed: item.senderUsed || '',
+      ownerId: assignedOwnerId,
+      ownerName: assignedOwnerName,
+      lastModifiedBy: requestingUser?.name || 'System',
+      templateSource: item.templateSource || 'campaign',
       updatedAt: now
     };
 
@@ -534,7 +631,7 @@ export async function batchCreateLeads(leadsData: Partial<BackendLead>[]): Promi
     }
 
     if (cleanEmail) {
-      existingEmailMap.set(cleanEmail, targetLeadId);
+      existingEmailMap.set(cleanEmail, { leadId: targetLeadId, ownerId: assignedOwnerId, ownerName: assignedOwnerName });
     }
 
     await col.updateOne(
@@ -549,9 +646,88 @@ export async function batchCreateLeads(leadsData: Partial<BackendLead>[]): Promi
   return createdOrUpdated;
 }
 
-// ---------------------------------------------------------------------------
-// CAMPAIGNS CRUD OPERATIONS (MongoDB with nested workflow_graph)
-// ---------------------------------------------------------------------------
+export async function reassignLead(leadId: string, targetUserId: string, requestingUser: { id: string; name: string; role: string }) {
+  const db = await getDb();
+  const leadsCol = db.collection<BackendLead>(COLLECTIONS.LEADS);
+  const usersCol = db.collection('users');
+
+  const targetUser = await usersCol.findOne({ id: targetUserId });
+  if (!targetUser || (targetUser as any).isActive === false) {
+    const err: any = new Error('Target user does not exist or is inactive');
+    err.status = 400;
+    throw err;
+  }
+
+  const lead = await leadsCol.findOne({ leadId: leadId.trim() });
+  if (!lead) {
+    const err: any = new Error('Lead not found');
+    err.status = 404;
+    throw err;
+  }
+
+  const now = new Date().toISOString();
+  const prevOwnerName = lead.ownerName || lead.ownerId || 'Unassigned';
+  const prevOwnerId = lead.ownerId || 'none';
+  const newOwnerName = (targetUser as any).name;
+  const auditNote = `[Reassigned from ${prevOwnerName} (${prevOwnerId}) to ${newOwnerName} (${targetUserId}) by ${requestingUser.name} on ${now}]`;
+
+  await leadsCol.updateOne(
+    { leadId: lead.leadId },
+    {
+      $set: {
+        ownerId: targetUserId,
+        ownerName: newOwnerName,
+        lastModifiedBy: requestingUser.name,
+        notes: appendLeadNote(lead.notes, auditNote),
+        updatedAt: now
+      }
+    }
+  );
+
+  const templateNotice = lead.templateSource === 'own'
+    ? `Notice: Lead "${lead.name}" uses personal template sequence, which now switches to ${newOwnerName}'s personal template sequence.`
+    : null;
+
+  return { success: true, leadId: lead.leadId, newOwnerId: targetUserId, newOwnerName, templateNotice };
+}
+
+export async function reassignAllLeads(fromUserId: string, toUserId: string, requestingUser: { id: string; name: string; role: string }) {
+  const db = await getDb();
+  const leadsCol = db.collection<BackendLead>(COLLECTIONS.LEADS);
+  const usersCol = db.collection('users');
+
+  const targetUser = await usersCol.findOne({ id: toUserId });
+  if (!targetUser || (targetUser as any).isActive === false) {
+    const err: any = new Error('Target user does not exist or is inactive');
+    err.status = 400;
+    throw err;
+  }
+
+  const leads = await leadsCol.find({ ownerId: fromUserId }).toArray();
+  const now = new Date().toISOString();
+  const newOwnerName = (targetUser as any).name;
+
+  let count = 0;
+  for (const lead of leads) {
+    const prevOwnerName = lead.ownerName || fromUserId;
+    const auditNote = `[Reassigned from ${prevOwnerName} (${fromUserId}) to ${newOwnerName} (${toUserId}) by ${requestingUser.name} on ${now}]`;
+    await leadsCol.updateOne(
+      { leadId: lead.leadId },
+      {
+        $set: {
+          ownerId: toUserId,
+          ownerName: newOwnerName,
+          lastModifiedBy: requestingUser.name,
+          notes: appendLeadNote(lead.notes, auditNote),
+          updatedAt: now
+        }
+      }
+    );
+    count++;
+  }
+
+  return { success: true, reassignedCount: count, toUserId, toUserName: newOwnerName };
+}
 
 export async function listCampaigns(token?: string, spreadsheetId?: string): Promise<BackendCampaign[]> {
   const db = await getDb();
@@ -562,7 +738,7 @@ export async function listCampaigns(token?: string, spreadsheetId?: string): Pro
   return campaigns;
 }
 
-export async function saveCampaign(campaign: Partial<BackendCampaign>): Promise<BackendCampaign> {
+export async function saveCampaign(campaign: Partial<BackendCampaign>, requestingUser?: { id: string; name?: string; role?: string }): Promise<BackendCampaign> {
   const db = await getDb();
   const col = db.collection<BackendCampaign>(COLLECTIONS.CAMPAIGNS);
 
@@ -570,16 +746,53 @@ export async function saveCampaign(campaign: Partial<BackendCampaign>): Promise<
     throw new Error('saveCampaign requires campaign id');
   }
 
+  const existing = await col.findOne({ id: campaign.id }, { projection: { _id: 0 } });
   const now = new Date().toISOString();
+
+  let versions = existing?.versions || [];
+  let currentVersion = existing?.version || 1;
+
+  if (existing) {
+    // If editing existing: check ownership
+    if (requestingUser && requestingUser.role !== 'admin' && existing.ownerId && existing.ownerId !== requestingUser.id) {
+      const err: any = new Error('Forbidden: only the campaign owner or an admin can edit this campaign');
+      err.status = 403;
+      throw err;
+    }
+
+    // Save previous version snapshot (keep up to 10)
+    const snapshot: CampaignVersionSnapshot = {
+      version: currentVersion,
+      name: existing.name,
+      workflow_graph: existing.workflow_graph,
+      editedBy: existing.lastEditedBy || existing.ownerName || 'Unknown',
+      editedAt: existing.lastEditedAt || existing.updated_date || existing.created_date
+    };
+    versions = [snapshot, ...versions].slice(0, 10);
+    currentVersion += 1;
+  }
+
+  const assignedOwnerId = existing
+    ? (existing.ownerId || requestingUser?.id || '')
+    : (requestingUser?.id || campaign.ownerId || '');
+  const assignedOwnerName = existing
+    ? (existing.ownerName || requestingUser?.name || '')
+    : (requestingUser?.name || campaign.ownerName || '');
+
   const doc: BackendCampaign = {
     id: campaign.id,
-    name: campaign.name || 'Untitled Campaign',
-    description: campaign.description || '',
-    version: campaign.version || 1,
-    is_active: Boolean(campaign.is_active ?? campaign.isActive),
-    workflow_graph: campaign.workflow_graph || { nodes: campaign.nodes || [], edges: campaign.edges || [] },
-    created_date: campaign.created_date || campaign.createdAt || now,
-    updated_date: now
+    name: campaign.name || existing?.name || 'Untitled Campaign',
+    description: campaign.description !== undefined ? campaign.description : (existing?.description || ''),
+    version: currentVersion,
+    is_active: Boolean(campaign.is_active ?? campaign.isActive ?? existing?.is_active ?? true),
+    workflow_graph: campaign.workflow_graph || (campaign.nodes ? { nodes: campaign.nodes || [], edges: campaign.edges || [] } : existing?.workflow_graph || { nodes: [], edges: [] }),
+    created_date: existing?.created_date || campaign.created_date || campaign.createdAt || now,
+    updated_date: now,
+    ownerId: assignedOwnerId,
+    ownerName: assignedOwnerName,
+    lastEditedBy: requestingUser?.name || 'System',
+    lastEditedAt: now,
+    versions
   };
 
   await col.updateOne(
@@ -588,32 +801,217 @@ export async function saveCampaign(campaign: Partial<BackendCampaign>): Promise<
     { upsert: true }
   );
 
+  if (!existing) {
+    try {
+      const { createTemplateSetForNewCampaign } = await import('./templateBackend.ts');
+      await createTemplateSetForNewCampaign(campaign.id, doc.name, requestingUser);
+    } catch (cErr) {
+      console.warn('[Campaign] Failed to create template set for new campaign:', cErr);
+    }
+  }
+
   return doc;
 }
 
-export async function deleteCampaign(campaignId: string): Promise<boolean> {
+export async function deleteCampaign(campaignId: string, requestingUser?: { id: string; name?: string; role?: string }): Promise<boolean> {
   const db = await getDb();
   const col = db.collection(COLLECTIONS.CAMPAIGNS);
-  const result = await col.deleteOne({ id: campaignId.trim() });
+  const cleanId = campaignId.trim();
+
+  const existing = await col.findOne({ id: cleanId });
+  if (!existing) {
+    const err: any = new Error('Campaign not found');
+    err.status = 404;
+    throw err;
+  }
+
+  if (requestingUser && requestingUser.role !== 'admin' && existing.ownerId && existing.ownerId !== requestingUser.id) {
+    const err: any = new Error('Forbidden: only the campaign owner or an admin can delete this campaign');
+    err.status = 403;
+    throw err;
+  }
+
+  // Block deleting a campaign with enrolled active leads
+  const activeLeadsCount = await db.collection(COLLECTIONS.LEADS).countDocuments({
+    campaignId: cleanId,
+    status: 'Active'
+  });
+
+  if (activeLeadsCount > 0) {
+    const err: any = new Error(`Cannot delete campaign with active enrolled leads: ${activeLeadsCount} active lead(s) currently enrolled`);
+    err.status = 400;
+    throw err;
+  }
+
+  const result = await col.deleteOne({ id: cleanId });
   return result.deletedCount > 0;
 }
 
-export async function toggleCampaignActive(campaignId: string, isActive: boolean): Promise<BackendCampaign> {
+export async function toggleCampaignActive(campaignId: string, isActive: boolean, requestingUser?: { id: string; name?: string; role?: string }): Promise<BackendCampaign> {
   const db = await getDb();
   const col = db.collection<BackendCampaign>(COLLECTIONS.CAMPAIGNS);
-  const now = new Date().toISOString();
+  const cleanId = campaignId.trim();
 
+  const existing = await col.findOne({ id: cleanId }, { projection: { _id: 0 } });
+  if (!existing) {
+    const err: any = new Error(`Campaign with id "${campaignId}" not found`);
+    err.status = 404;
+    throw err;
+  }
+
+  if (requestingUser && requestingUser.role !== 'admin' && existing.ownerId && existing.ownerId !== requestingUser.id) {
+    const err: any = new Error('Forbidden: only the campaign owner or an admin can toggle active state');
+    err.status = 403;
+    throw err;
+  }
+
+  const now = new Date().toISOString();
   await col.updateOne(
-    { id: campaignId.trim() },
-    { $set: { is_active: isActive, updated_date: now } }
+    { id: cleanId },
+    { $set: { is_active: isActive, updated_date: now, lastEditedBy: requestingUser?.name || 'System', lastEditedAt: now } }
   );
 
-  const updated = await col.findOne({ id: campaignId.trim() }, { projection: { _id: 0 } });
-  if (!updated) {
-    throw new Error(`Campaign with id "${campaignId}" not found`);
-  }
-  return updated;
+  const updated = await col.findOne({ id: cleanId }, { projection: { _id: 0 } });
+  return updated!;
 }
+
+export async function checkCampaignImpact(campaignId: string, requestingUserId?: string) {
+  const db = await getDb();
+  const leads = await db.collection(COLLECTIONS.LEADS).find({
+    campaignId: campaignId.trim(),
+    status: 'Active'
+  }).toArray();
+
+  const totalActiveLeadsCount = leads.length;
+  const userIds = new Set<string>();
+  const userNames = new Set<string>();
+  let colleagueLeadsCount = 0;
+
+  for (const l of leads) {
+    if (l.ownerId) userIds.add(l.ownerId);
+    if (l.ownerName) userNames.add(l.ownerName);
+    if (requestingUserId && l.ownerId && l.ownerId !== requestingUserId) {
+      colleagueLeadsCount++;
+    }
+  }
+
+  return {
+    colleagueLeadsCount,
+    enrolledOtherUsersLeadsCount: colleagueLeadsCount,
+    totalActiveLeadsCount,
+    userCount: userIds.size,
+    affectedUserNames: Array.from(userNames)
+  };
+}
+
+export async function duplicateCampaign(campaignId: string, requestingUser?: { id: string; name?: string; role?: string }, newName?: string): Promise<BackendCampaign> {
+  const db = await getDb();
+  const col = db.collection<BackendCampaign>(COLLECTIONS.CAMPAIGNS);
+  const existing = await col.findOne({ id: campaignId.trim() }, { projection: { _id: 0 } });
+
+  if (!existing) {
+    const err: any = new Error('Campaign not found');
+    err.status = 404;
+    throw err;
+  }
+
+  const now = new Date().toISOString();
+  const newId = `camp-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
+  const duplicateName = newName || `${existing.name} (Copy)`;
+
+  const doc: BackendCampaign = {
+    id: newId,
+    name: duplicateName,
+    description: existing.description || '',
+    version: 1,
+    is_active: false,
+    workflow_graph: JSON.parse(JSON.stringify(existing.workflow_graph || { nodes: [], edges: [] })),
+    created_date: now,
+    updated_date: now,
+    ownerId: requestingUser?.id || '',
+    ownerName: requestingUser?.name || '',
+    lastEditedBy: requestingUser?.name || '',
+    lastEditedAt: now,
+    versions: []
+  };
+
+  await col.insertOne(doc as any);
+
+  try {
+    const { getCampaignTemplateSet } = await import('./templateBackend.ts');
+    const sourceSet = await getCampaignTemplateSet(existing.id, existing.name);
+    const newCampSet = {
+      id: `tplset-camp-${newId}`,
+      kind: 'campaign' as const,
+      campaignId: newId,
+      name: `${duplicateName} Sequence`,
+      stages: sourceSet.stages.map(s => ({ ...s })),
+      version: 1,
+      history: [],
+      updatedBy: requestingUser?.name || 'System',
+      updatedAt: now,
+      createdAt: now
+    };
+    await db.collection(COLLECTIONS.TEMPLATE_SETS).insertOne(newCampSet as any);
+  } catch (err) {
+    console.warn('[Campaign] Template copy warning during duplicate:', err);
+  }
+
+  return doc;
+}
+
+export async function restoreCampaignVersion(campaignId: string, targetVersion: number, requestingUser?: { id: string; name?: string; role?: string }): Promise<BackendCampaign> {
+  const db = await getDb();
+  const col = db.collection<BackendCampaign>(COLLECTIONS.CAMPAIGNS);
+  const existing = await col.findOne({ id: campaignId.trim() }, { projection: { _id: 0 } });
+
+  if (!existing) {
+    const err: any = new Error('Campaign not found');
+    err.status = 404;
+    throw err;
+  }
+
+  if (requestingUser && requestingUser.role !== 'admin' && existing.ownerId && existing.ownerId !== requestingUser.id) {
+    const err: any = new Error('Forbidden: only the campaign owner or an admin can restore versions');
+    err.status = 403;
+    throw err;
+  }
+
+  const versions = existing.versions || [];
+  const targetSnapshot = versions.find(v => v.version === targetVersion);
+  if (!targetSnapshot) {
+    const err: any = new Error(`Version ${targetVersion} not found in campaign history`);
+    err.status = 404;
+    throw err;
+  }
+
+  const now = new Date().toISOString();
+  const currentSnapshot: CampaignVersionSnapshot = {
+    version: existing.version || 1,
+    name: existing.name,
+    workflow_graph: existing.workflow_graph,
+    editedBy: existing.lastEditedBy || existing.ownerName || 'Unknown',
+    editedAt: existing.lastEditedAt || existing.updated_date || existing.created_date
+  };
+
+  const updatedVersions = [currentSnapshot, ...versions.filter(v => v.version !== targetVersion)].slice(0, 10);
+  const newVersionNumber = (existing.version || 1) + 1;
+
+  const restoredDoc: BackendCampaign = {
+    ...existing,
+    name: targetSnapshot.name,
+    workflow_graph: targetSnapshot.workflow_graph,
+    version: newVersionNumber,
+    lastEditedBy: requestingUser?.name || 'System',
+    lastEditedAt: now,
+    updated_date: now,
+    versions: updatedVersions
+  };
+
+  await col.updateOne({ id: campaignId.trim() }, { $set: restoredDoc });
+  return restoredDoc;
+}
+
 
 // ---------------------------------------------------------------------------
 // SENDERS PERSISTENCE (MongoDB - storing provider per sender profile)
@@ -699,13 +1097,23 @@ export async function saveLocalSenders(senders: BackendSender[]): Promise<Backen
 // TASKS PERSISTENCE (MongoDB)
 // ---------------------------------------------------------------------------
 
-export async function loadLocalTasks(): Promise<BackendTask[]> {
+export async function loadLocalTasks(ownerId?: string): Promise<BackendTask[]> {
   const db = await getDb();
-  const tasks = await db
+  if (ownerId) {
+    const leads = await db
+      .collection<BackendLead>(COLLECTIONS.LEADS)
+      .find({ ownerId }, { projection: { leadId: 1 } })
+      .toArray();
+    const leadIds = leads.map(l => l.leadId);
+    return db
+      .collection<BackendTask>(COLLECTIONS.TASKS)
+      .find({ leadId: { $in: leadIds } }, { projection: { _id: 0 } })
+      .toArray();
+  }
+  return db
     .collection<BackendTask>(COLLECTIONS.TASKS)
     .find({}, { projection: { _id: 0 } })
     .toArray();
-  return tasks;
 }
 
 export async function saveLocalTasks(tasks: BackendTask[]): Promise<BackendTask[]> {
@@ -772,6 +1180,58 @@ export async function clearTaskAlertsState(): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// PER-USER WORKSPACE NOTES & ALERT STATES (MongoDB)
+// ---------------------------------------------------------------------------
+
+export async function loadUserWorkspaceNotes(userId: string): Promise<string> {
+  const db = await getDb();
+  const doc = await db.collection(COLLECTIONS.USER_WORKSPACE_NOTES).findOne({ userId });
+  return (doc as any)?.notes || '';
+}
+
+export async function saveUserWorkspaceNotes(userId: string, notes: string): Promise<string> {
+  const db = await getDb();
+  const now = new Date().toISOString();
+  await db.collection(COLLECTIONS.USER_WORKSPACE_NOTES).updateOne(
+    { userId },
+    { $set: { userId, notes, updatedAt: now } },
+    { upsert: true }
+  );
+  return notes;
+}
+
+export async function loadUserAlertsState(userId: string): Promise<{ dismissedAlertIds: string[] }> {
+  const db = await getDb();
+  const doc = await db.collection(COLLECTIONS.USER_ALERT_STATES).findOne({ userId });
+  return {
+    dismissedAlertIds: Array.isArray((doc as any)?.dismissedAlertIds) ? (doc as any).dismissedAlertIds : []
+  };
+}
+
+export async function saveUserDismissedAlerts(userId: string, alertIds: string[]): Promise<string[]> {
+  const db = await getDb();
+  const existing = await loadUserAlertsState(userId);
+  const merged = Array.from(new Set([...existing.dismissedAlertIds, ...alertIds]));
+  const now = new Date().toISOString();
+  await db.collection(COLLECTIONS.USER_ALERT_STATES).updateOne(
+    { userId },
+    { $set: { userId, dismissedAlertIds: merged, updatedAt: now } },
+    { upsert: true }
+  );
+  return merged;
+}
+
+export async function clearUserAlertsState(userId: string): Promise<void> {
+  const db = await getDb();
+  const now = new Date().toISOString();
+  await db.collection(COLLECTIONS.USER_ALERT_STATES).updateOne(
+    { userId },
+    { $set: { userId, dismissedAlertIds: [], updatedAt: now } },
+    { upsert: true }
+  );
+}
+
+// ---------------------------------------------------------------------------
 // SETTINGS PERSISTENCE (MongoDB)
 // ---------------------------------------------------------------------------
 
@@ -800,8 +1260,13 @@ export async function saveLocalSettings(settings: Partial<BackendSettings>): Pro
   const db = await getDb();
   const col = db.collection<BackendSettings>(COLLECTIONS.SETTINGS);
 
+  const cleanHeader = settings.emailHeader !== undefined ? sanitizeHtml(settings.emailHeader) : undefined;
+  const cleanFooter = settings.emailFooter !== undefined ? sanitizeHtml(settings.emailFooter) : undefined;
+
   const doc: BackendSettings = {
     ...settings,
+    ...(cleanHeader !== undefined ? { emailHeader: cleanHeader } : {}),
+    ...(cleanFooter !== undefined ? { emailFooter: cleanFooter } : {}),
     id: 'app_settings',
     updatedAt: new Date().toISOString()
   };
@@ -819,13 +1284,23 @@ export async function saveLocalSettings(settings: Partial<BackendSettings>): Pro
 // TRACKING EVENTS (MongoDB)
 // ---------------------------------------------------------------------------
 
-export async function loadTrackingEvents(): Promise<TrackingEvent[]> {
+export async function loadTrackingEvents(ownerId?: string): Promise<TrackingEvent[]> {
   const db = await getDb();
-  const events = await db
+  if (ownerId) {
+    const leads = await db
+      .collection<BackendLead>(COLLECTIONS.LEADS)
+      .find({ ownerId }, { projection: { leadId: 1 } })
+      .toArray();
+    const leadIds = leads.map(l => l.leadId);
+    return db
+      .collection<TrackingEvent>(COLLECTIONS.TRACKING_EVENTS)
+      .find({ leadId: { $in: leadIds } }, { projection: { _id: 0 } })
+      .toArray();
+  }
+  return db
     .collection<TrackingEvent>(COLLECTIONS.TRACKING_EVENTS)
     .find({}, { projection: { _id: 0 } })
     .toArray();
-  return events;
 }
 
 export async function recordTrackingEvent(event: TrackingEvent): Promise<TrackingEvent> {
@@ -878,13 +1353,24 @@ export async function clearAllTrackingEvents(): Promise<boolean> {
 // SYSTEM STATS SUMMARY (MongoDB aggregations)
 // ---------------------------------------------------------------------------
 
-export async function getSystemStatsSummary() {
+export async function getSystemStatsSummary(ownerId?: string) {
   const db = await getDb();
   const leadsCol = db.collection<BackendLead>(COLLECTIONS.LEADS);
   const campaignsCol = db.collection<BackendCampaign>(COLLECTIONS.CAMPAIGNS);
   const tasksCol = db.collection<BackendTask>(COLLECTIONS.TASKS);
   const sendersCol = db.collection<BackendSender>(COLLECTIONS.SENDERS);
   const eventsCol = db.collection<TrackingEvent>(COLLECTIONS.TRACKING_EVENTS);
+
+  const leadsFilter = ownerId ? { ownerId } : {};
+  let tasksFilter: any = {};
+  let eventsFilter: any = {};
+
+  if (ownerId) {
+    const leads = await leadsCol.find({ ownerId }, { projection: { leadId: 1 } }).toArray();
+    const leadIds = leads.map(l => l.leadId);
+    tasksFilter = { leadId: { $in: leadIds } };
+    eventsFilter = { leadId: { $in: leadIds } };
+  }
 
   const [
     totalLeads,
@@ -898,16 +1384,16 @@ export async function getSystemStatsSummary() {
     totalOpens,
     totalClicks
   ] = await Promise.all([
-    leadsCol.countDocuments(),
-    leadsCol.countDocuments({ status: 'Active' }),
-    leadsCol.countDocuments({ status: 'Replied' }),
+    leadsCol.countDocuments(leadsFilter),
+    leadsCol.countDocuments({ ...leadsFilter, status: 'Active' }),
+    leadsCol.countDocuments({ ...leadsFilter, status: 'Replied' }),
     campaignsCol.countDocuments(),
     campaignsCol.countDocuments({ is_active: true }),
-    tasksCol.countDocuments(),
-    tasksCol.countDocuments({ isCompleted: false }),
+    tasksCol.countDocuments(tasksFilter),
+    tasksCol.countDocuments({ ...tasksFilter, isCompleted: false }),
     sendersCol.countDocuments(),
-    eventsCol.countDocuments({ type: 'open' }),
-    eventsCol.countDocuments({ type: 'click' })
+    eventsCol.countDocuments({ ...eventsFilter, type: 'open' }),
+    eventsCol.countDocuments({ ...eventsFilter, type: 'click' })
   ]);
 
   return {
@@ -1349,6 +1835,25 @@ export async function resumeCompanyLeads(replyingLeadId: string): Promise<{ succ
     resumedCount++;
   }
 
+  const replyingLead = await leadsCol.findOne({ leadId: replyingLeadId }, { projection: { _id: 0 } });
+  if (replyingLead && replyingLead.status === 'Paused') {
+    await leadsCol.updateOne(
+      { leadId: replyingLeadId },
+      {
+        $set: {
+          status: 'Active',
+          notes: appendLeadNote(replyingLead.notes, `[Resumed company outreach]`),
+          updatedAt: now
+        },
+        $unset: {
+          stoppedReason: "",
+          stoppedByLeadId: ""
+        }
+      }
+    );
+    resumedCount++;
+  }
+
   return {
     success: true,
     resumedCount
@@ -1389,6 +1894,21 @@ export async function confirmCompanyPause(replyingLeadId: string): Promise<{ suc
           stoppedReason: stopReason,
           stoppedByLeadId: replyingLead.leadId,
           notes: appendLeadNote(other.notes, `[Paused: ${stopReason}]`),
+          updatedAt: now
+        }
+      }
+    );
+    pausedCount++;
+  }
+
+  // If replyingLead was also active, pause it as well
+  if (replyingLead.status === 'Active') {
+    await leadsCol.updateOne(
+      { leadId: replyingLeadId },
+      {
+        $set: {
+          status: 'Paused',
+          stoppedReason: 'Positive reply received',
           updatedAt: now
         }
       }

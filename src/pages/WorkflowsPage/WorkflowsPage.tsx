@@ -38,6 +38,10 @@ import {
   AlertTriangle,
   LayoutGrid,
   ArrowRight,
+  History,
+  Shield,
+  AlertCircle,
+  FileText,
   X
 } from 'lucide-react';
 import { 
@@ -48,12 +52,24 @@ import {
   WorkflowNodeData,
   StageTemplate, 
   ConnectedSender, 
-  Lead 
+  Lead,
+  AppUser,
+  TemplateSet,
+  TemplateStageItem
 } from '../../types';
+import {
+  getCampaignTemplateSet,
+  saveTemplateSet,
+  restoreTemplateSetVersion,
+  getCampaignTemplateImpact
+} from '../../services/templateService';
 import { nodeTypes } from './WorkflowNodes';
 import { WorkflowNodeInspector } from './WorkflowNodeInspector';
+import { CampaignTemplatesModal } from '../../components/CampaignTemplatesModal';
 import { 
-  createBlankWorkflow
+  createBlankWorkflow,
+  checkCampaignImpactApi,
+  restoreCampaignVersionApi
 } from '../../services/workflowService';
 
 interface WorkflowCanvasProps {
@@ -61,6 +77,7 @@ interface WorkflowCanvasProps {
   allWorkflows?: CampaignWorkflow[];
   workflow?: CampaignWorkflow;
   activeWorkflowId?: string;
+  currentUser?: AppUser | null;
   onSelectWorkflow: (workflowId: string) => void;
   onSaveWorkflow: (workflow: CampaignWorkflow) => void;
   onCreateWorkflow: (newWorkflow: CampaignWorkflow) => void;
@@ -147,6 +164,7 @@ export const WorkflowCanvas: React.FC<WorkflowCanvasProps> = ({
   allWorkflows,
   workflow,
   activeWorkflowId,
+  currentUser,
   onSelectWorkflow,
   onSaveWorkflow,
   onCreateWorkflow,
@@ -199,6 +217,65 @@ export const WorkflowCanvas: React.FC<WorkflowCanvasProps> = ({
   const [workflowDescription, setWorkflowDescription] = useState(effectiveWorkflow.description);
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   const [saveSuccessMessage, setSaveSuccessMessage] = useState<string | null>(null);
+
+  // Permissions & Ownership
+  const isOwner = useMemo(() => {
+    if (!activeWorkflow || !currentUser) return true;
+    return !activeWorkflow.ownerId || activeWorkflow.ownerId === currentUser.id;
+  }, [activeWorkflow, currentUser]);
+
+  const isAdmin = useMemo(() => {
+    if (!currentUser) return false;
+    return currentUser.role === 'admin' || Boolean(currentUser.permissions?.includes('campaigns.editAny'));
+  }, [currentUser]);
+
+  const canEdit = isOwner || isAdmin;
+
+  // Versions history modal state
+  const [showHistoryModal, setShowHistoryModal] = useState(false);
+  const [isRestoringVersion, setIsRestoringVersion] = useState(false);
+
+  // Colleague enrolled leads impact state
+  const [colleagueImpactCount, setColleagueImpactCount] = useState<number | null>(null);
+
+  // Campaign templates modal state
+  const [showCampaignTemplatesModal, setShowCampaignTemplatesModal] = useState(false);
+
+  // Flow save impact confirmation modal state
+  const [flowImpactConfirm, setFlowImpactConfirm] = useState<{ leadCount: number; userCount: number } | null>(null);
+
+  useEffect(() => {
+    if (activeWorkflow?.id) {
+      checkCampaignImpactApi(activeWorkflow.id).then(res => {
+        if (res.success) {
+          setColleagueImpactCount(res.colleagueLeadsCount);
+        }
+      });
+    }
+  }, [activeWorkflow?.id]);
+
+  const handleRestoreVersion = async (verNum: number) => {
+    if (!activeWorkflow) return;
+    setIsRestoringVersion(true);
+    try {
+      const res = await restoreCampaignVersionApi(activeWorkflow.id, verNum);
+      if (res.success && res.campaign) {
+        onSaveWorkflow(res.campaign);
+        setNodes(normalizeNodesForCanvas(res.campaign.nodes));
+        setEdges(normalizeEdgesForCanvas(res.campaign.edges));
+        setWorkflowName(res.campaign.name);
+        setWorkflowDescription(res.campaign.description);
+        setHasUnsavedChanges(false);
+        setShowHistoryModal(false);
+        setSaveSuccessMessage(`Restored version ${verNum}!`);
+        setTimeout(() => setSaveSuccessMessage(null), 2500);
+      }
+    } catch (e: any) {
+      console.error('Failed to restore version:', e);
+    } finally {
+      setIsRestoringVersion(false);
+    }
+  };
 
   // Sync state whenever activeWorkflow changes or reloads from backend
   useEffect(() => {
@@ -527,8 +604,8 @@ export const WorkflowCanvas: React.FC<WorkflowCanvasProps> = ({
     setTimeout(() => setSaveSuccessMessage(null), 2500);
   };
 
-  // Save current workflow
-  const handleSave = () => {
+  // Save current workflow execution
+  const executeSaveWorkflow = () => {
     if (!activeWorkflow) return;
 
     // Clean and serialize nodes
@@ -574,8 +651,26 @@ export const WorkflowCanvas: React.FC<WorkflowCanvasProps> = ({
     lastLoadedSignatureRef.current = `${updatedWorkflow.id}-${updatedWorkflow.version}-${updatedWorkflow.updatedAt}-${serializedNodes.length}-${serializedEdges.length}`;
     onSaveWorkflow(updatedWorkflow);
     setHasUnsavedChanges(false);
+    setFlowImpactConfirm(null);
     setSaveSuccessMessage('Workflow saved!');
     setTimeout(() => setSaveSuccessMessage(null), 2500);
+  };
+
+  // Save current workflow with impact check confirmation
+  const handleSave = async () => {
+    if (!activeWorkflow) return;
+    try {
+      const impactRes = await checkCampaignImpactApi(activeWorkflow.id);
+      const leadCount = impactRes.totalActiveLeadsCount ?? campaignLeadsCount;
+      const userCount = impactRes.userCount ?? 1;
+      if (leadCount > 0) {
+        setFlowImpactConfirm({ leadCount, userCount });
+        return;
+      }
+    } catch (err) {
+      console.warn('Failed to verify impact before saving workflow:', err);
+    }
+    executeSaveWorkflow();
   };
 
   // Count leads currently running in this campaign
@@ -656,15 +751,25 @@ export const WorkflowCanvas: React.FC<WorkflowCanvasProps> = ({
             <input
               type="text"
               value={workflowName}
+              disabled={!canEdit}
               onChange={(e) => {
+                if (!canEdit) return;
                 setWorkflowName(e.target.value);
                 setHasUnsavedChanges(true);
               }}
-              className="text-xs sm:text-sm font-semibold text-slate-700 bg-transparent hover:bg-slate-100 px-2 py-1 rounded border border-transparent hover:border-slate-300 focus:outline-none focus:bg-white focus:border-red-500 w-48 sm:w-64"
+              className="text-xs sm:text-sm font-semibold text-slate-700 bg-transparent hover:bg-slate-100 px-2 py-1 rounded border border-transparent hover:border-slate-300 focus:outline-none focus:bg-white focus:border-red-500 w-48 sm:w-64 disabled:opacity-75 disabled:hover:bg-transparent"
               placeholder="Flow Name..."
-              title="Click to rename workflow"
+              title={canEdit ? "Click to rename workflow" : "Campaign is read-only"}
             />
           </div>
+
+          {/* Owner badge */}
+          {activeWorkflow.ownerName && (
+            <div className="flex items-center gap-1.5 px-2.5 py-1 bg-slate-100 text-slate-700 rounded-lg text-xs font-semibold border border-slate-200">
+              <Shield className="w-3.5 h-3.5 text-slate-500" />
+              <span>Owner: {isOwner ? 'You' : activeWorkflow.ownerName}</span>
+            </div>
+          )}
 
           {/* Active stats badge */}
           <div className="flex items-center gap-1.5 px-2.5 py-1 bg-red-50 text-red-800 rounded-lg text-xs font-semibold border border-red-200">
@@ -672,10 +777,20 @@ export const WorkflowCanvas: React.FC<WorkflowCanvasProps> = ({
             <span>{campaignLeadsCount} Leads Enrolled</span>
           </div>
 
+          {/* Colleague leads impact badge */}
+          {colleagueImpactCount !== null && colleagueImpactCount > 0 && (
+            <div className="flex items-center gap-1.5 px-2.5 py-1 bg-amber-50 text-amber-800 rounded-lg text-xs font-semibold border border-amber-200" title="Active leads belonging to colleagues are enrolled in this campaign">
+              <Users className="w-3.5 h-3.5 text-amber-600" />
+              <span>{colleagueImpactCount} Colleague Leads</span>
+            </div>
+          )}
+
           {/* Active / Inactive Toggle Switch */}
           <button
             type="button"
+            disabled={!canEdit}
             onClick={() => {
+              if (!canEdit) return;
               const currentActive = Boolean(activeWorkflow.isActive ?? activeWorkflow.is_active);
               const nextState = !currentActive;
               if (onToggleActive) {
@@ -690,12 +805,14 @@ export const WorkflowCanvas: React.FC<WorkflowCanvasProps> = ({
               setSaveSuccessMessage(nextState ? 'Campaign is now ACTIVE' : 'Campaign is now DRAFT');
               setTimeout(() => setSaveSuccessMessage(null), 2500);
             }}
-            className={`flex items-center gap-2 px-3 py-1 rounded-lg text-xs font-bold transition-all border cursor-pointer ${
+            className={`flex items-center gap-2 px-3 py-1 rounded-lg text-xs font-bold transition-all border ${
+              !canEdit ? 'opacity-60 cursor-not-allowed' : 'cursor-pointer'
+            } ${
               Boolean(activeWorkflow.isActive ?? activeWorkflow.is_active)
                 ? 'bg-emerald-50 text-emerald-800 border-emerald-300 hover:bg-emerald-100 shadow-2xs'
                 : 'bg-slate-100 text-slate-600 border-slate-300 hover:bg-slate-200'
             }`}
-            title="Toggle between Active (eligible to run sends) and Inactive Draft"
+            title={canEdit ? "Toggle between Active and Draft" : "Only the owner or admin can toggle campaign state"}
           >
             <span
               className={`w-2 h-2 rounded-full ${
@@ -710,7 +827,7 @@ export const WorkflowCanvas: React.FC<WorkflowCanvasProps> = ({
           </button>
         </div>
 
-        {/* Right: Actions (Save, Duplicate, New, Step Test) */}
+        {/* Right: Actions (Save, Duplicate, New, History) */}
         <div className="flex items-center gap-2 flex-wrap self-end md:self-auto">
           {saveSuccessMessage && (
             <span className="text-xs font-bold text-emerald-600 flex items-center gap-1 animate-in fade-in">
@@ -724,6 +841,27 @@ export const WorkflowCanvas: React.FC<WorkflowCanvasProps> = ({
               Unsaved edits
             </span>
           )}
+
+          {/* Campaign Templates Button */}
+          <button
+            type="button"
+            onClick={() => setShowCampaignTemplatesModal(true)}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-red-700 bg-red-50 hover:bg-red-100 rounded-lg transition-colors border border-red-200 cursor-pointer shadow-2xs"
+            title="Edit the 7 sequence templates for this campaign"
+          >
+            <Mail className="w-3.5 h-3.5 text-red-600" />
+            <span>Campaign Templates</span>
+          </button>
+
+          {/* Version History Button */}
+          <button
+            onClick={() => setShowHistoryModal(true)}
+            className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-semibold text-slate-700 hover:text-slate-900 bg-slate-50 hover:bg-slate-100 rounded-lg transition-colors border border-slate-200 cursor-pointer"
+            title="View version snapshots and restore"
+          >
+            <History className="w-3.5 h-3.5 text-purple-600" />
+            <span>History ({activeWorkflow.versions?.length || 1})</span>
+          </button>
 
           {/* New Campaign Flow */}
           <button
@@ -739,126 +877,151 @@ export const WorkflowCanvas: React.FC<WorkflowCanvasProps> = ({
             <span>+ New Flow</span>
           </button>
 
-          {/* Clear Canvas Trigger Button */}
-          <button
-            onClick={handleClearCanvas}
-            className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-semibold text-slate-700 hover:text-slate-900 bg-slate-50 hover:bg-slate-100 rounded-lg transition-colors border border-slate-200 cursor-pointer"
-            title="Clear canvas steps"
-          >
-            <RotateCcw className="w-3.5 h-3.5 text-slate-500" />
-            <span>Clear Flow</span>
-          </button>
-
-          {/* Tidy Flow Layout Button */}
-          <button
-            onClick={handleAutoArrange}
-            className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-semibold text-slate-700 hover:text-slate-900 bg-slate-50 hover:bg-slate-100 rounded-lg transition-colors border border-slate-200 cursor-pointer"
-            title="Auto-align nodes in clean vertical sequence"
-          >
-            <LayoutGrid className="w-3.5 h-3.5 text-slate-500" />
-            <span>Tidy Layout</span>
-          </button>
-
-          {/* Duplicate Current */}
+          {/* Duplicate Current - ALWAYS accessible to all users */}
           <button
             onClick={() => onDuplicateWorkflow(activeWorkflow.id)}
             className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors border border-slate-200 cursor-pointer"
-            title="Duplicate this flow as a starting point"
+            title="Duplicate this flow into your own workspace"
           >
             <Copy className="w-3.5 h-3.5" />
             <span>Duplicate</span>
           </button>
 
-          {/* Delete Current Flow */}
-          {onDeleteWorkflow && (
-            <button
-              onClick={() => setShowDeleteModal(true)}
-              className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 rounded-lg transition-colors border border-rose-200 cursor-pointer"
-              title="Delete this workflow"
-            >
-              <Trash2 className="w-3.5 h-3.5" />
-              <span>Delete</span>
-            </button>
-          )}
+          {/* Owner/Admin-only Editing actions */}
+          {canEdit && (
+            <>
+              {/* Clear Canvas Trigger Button */}
+              <button
+                onClick={handleClearCanvas}
+                className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-semibold text-slate-700 hover:text-slate-900 bg-slate-50 hover:bg-slate-100 rounded-lg transition-colors border border-slate-200 cursor-pointer"
+                title="Clear canvas steps"
+              >
+                <RotateCcw className="w-3.5 h-3.5 text-slate-500" />
+                <span>Clear Flow</span>
+              </button>
 
-          {/* Save Workflow Button */}
-          <button
-            onClick={handleSave}
-            className={`flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-bold rounded-lg shadow-2xs transition-all cursor-pointer ${
-              hasUnsavedChanges 
-                ? 'bg-red-600 hover:bg-red-700 text-white shadow-red-500/20' 
-                : 'bg-slate-900 hover:bg-slate-800 text-white'
-            }`}
-          >
-            <Save className="w-3.5 h-3.5" />
-            <span>Save Flow</span>
-          </button>
+              {/* Tidy Flow Layout Button */}
+              <button
+                onClick={handleAutoArrange}
+                className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-semibold text-slate-700 hover:text-slate-900 bg-slate-50 hover:bg-slate-100 rounded-lg transition-colors border border-slate-200 cursor-pointer"
+                title="Auto-align nodes in clean vertical sequence"
+              >
+                <LayoutGrid className="w-3.5 h-3.5 text-slate-500" />
+                <span>Tidy Layout</span>
+              </button>
+
+              {/* Delete Current Flow */}
+              {onDeleteWorkflow && (
+                <button
+                  onClick={() => setShowDeleteModal(true)}
+                  className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 rounded-lg transition-colors border border-rose-200 cursor-pointer"
+                  title="Delete this workflow"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  <span>Delete</span>
+                </button>
+              )}
+
+              {/* Save Workflow Button */}
+              <button
+                onClick={handleSave}
+                className={`flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-bold rounded-lg shadow-2xs transition-all cursor-pointer ${
+                  hasUnsavedChanges 
+                    ? 'bg-red-600 hover:bg-red-700 text-white shadow-red-500/20' 
+                    : 'bg-slate-900 hover:bg-slate-800 text-white'
+                }`}
+              >
+                <Save className="w-3.5 h-3.5" />
+                <span>Save Flow</span>
+              </button>
+            </>
+          )}
         </div>
 
       </div>
+
+      {/* Read-Only Notice Banner for non-owners */}
+      {!canEdit && (
+        <div className="bg-amber-50 border-b border-amber-200 px-4 py-2.5 flex items-center justify-between text-xs text-amber-900 shrink-0">
+          <div className="flex items-center gap-2">
+            <Shield className="w-4 h-4 text-amber-600 shrink-0" />
+            <span>
+              <strong>Read-Only Mode:</strong> This campaign is owned by <strong>{activeWorkflow.ownerName || 'another team member'}</strong>. You cannot edit it directly, but you can duplicate it into your own workspace to make changes.
+            </span>
+          </div>
+          <button
+            onClick={() => onDuplicateWorkflow(activeWorkflow.id)}
+            className="px-3 py-1 bg-amber-600 hover:bg-amber-700 text-white font-bold rounded-lg transition-colors cursor-pointer text-xs shrink-0"
+          >
+            Duplicate to My Campaigns
+          </button>
+        </div>
+      )}
 
       {/* ================================================================== */}
       {/* MAIN CANVAS AREA WITH REACT FLOW & PALETTE                         */}
       {/* ================================================================== */}
       <div className="flex-1 min-h-0 relative flex overflow-hidden">
         
-        {/* Floating Add Node Palette on Left */}
-        <div className="absolute top-4 left-4 z-10 bg-white/95 backdrop-blur-xs border border-slate-200 rounded-xl p-2.5 shadow-md space-y-2 w-52">
-          <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block px-1">
-            Add Node to Canvas
-          </span>
+        {/* Floating Add Node Palette on Left (Owners/Admins only) */}
+        {canEdit && (
+          <div className="absolute top-4 left-4 z-10 bg-white/95 backdrop-blur-xs border border-slate-200 rounded-xl p-2.5 shadow-md space-y-2 w-52">
+            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block px-1">
+              Add Node to Canvas
+            </span>
 
-          <div className="space-y-1">
-            <button
-              onClick={() => handleAddNode('start')}
-              className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-xs font-semibold text-slate-800 hover:bg-red-50 hover:text-red-700 border border-transparent hover:border-red-200 transition-all text-left cursor-pointer"
-              title="Add campaign start & trigger node"
-            >
-              <Sparkles className="w-3.5 h-3.5 text-red-600" />
-              <span>Campaign Trigger</span>
-            </button>
+            <div className="space-y-1">
+              <button
+                onClick={() => handleAddNode('start')}
+                className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-xs font-semibold text-slate-800 hover:bg-red-50 hover:text-red-700 border border-transparent hover:border-red-200 transition-all text-left cursor-pointer"
+                title="Add campaign start & trigger node"
+              >
+                <Sparkles className="w-3.5 h-3.5 text-red-600" />
+                <span>Campaign Trigger</span>
+              </button>
 
-            <button
-              onClick={() => handleAddNode('email')}
-              className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-xs font-semibold text-slate-800 hover:bg-red-50 hover:text-red-700 border border-transparent hover:border-red-200 transition-all text-left cursor-pointer"
-            >
-              <Mail className="w-3.5 h-3.5 text-red-600" />
-              <span>Email Step</span>
-            </button>
+              <button
+                onClick={() => handleAddNode('email')}
+                className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-xs font-semibold text-slate-800 hover:bg-red-50 hover:text-red-700 border border-transparent hover:border-red-200 transition-all text-left cursor-pointer"
+              >
+                <Mail className="w-3.5 h-3.5 text-red-600" />
+                <span>Email Step</span>
+              </button>
 
-            <button
-              onClick={() => handleAddNode('wait')}
-              className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-xs font-semibold text-slate-800 hover:bg-amber-50 hover:text-amber-700 border border-transparent hover:border-amber-200 transition-all text-left cursor-pointer"
-            >
-              <Clock className="w-3.5 h-3.5 text-amber-500" />
-              <span>Wait Delay</span>
-            </button>
+              <button
+                onClick={() => handleAddNode('wait')}
+                className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-xs font-semibold text-slate-800 hover:bg-amber-50 hover:text-amber-700 border border-transparent hover:border-amber-200 transition-all text-left cursor-pointer"
+              >
+                <Clock className="w-3.5 h-3.5 text-amber-500" />
+                <span>Wait Delay</span>
+              </button>
 
-            <button
-              onClick={() => handleAddNode('condition')}
-              className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-xs font-semibold text-slate-800 hover:bg-purple-50 hover:text-purple-700 border border-transparent hover:border-purple-200 transition-all text-left cursor-pointer"
-            >
-              <GitBranch className="w-3.5 h-3.5 text-purple-600" />
-              <span>Condition Split (Yes/No)</span>
-            </button>
+              <button
+                onClick={() => handleAddNode('condition')}
+                className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-xs font-semibold text-slate-800 hover:bg-purple-50 hover:text-purple-700 border border-transparent hover:border-purple-200 transition-all text-left cursor-pointer"
+              >
+                <GitBranch className="w-3.5 h-3.5 text-purple-600" />
+                <span>Condition Split (Yes/No)</span>
+              </button>
 
-            <button
-              onClick={() => handleAddNode('manual_task')}
-              className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-xs font-semibold text-slate-800 hover:bg-blue-50 hover:text-blue-700 border border-transparent hover:border-blue-200 transition-all text-left cursor-pointer"
-            >
-              <Phone className="w-3.5 h-3.5 text-blue-600" />
-              <span>Call / Manual Task</span>
-            </button>
+              <button
+                onClick={() => handleAddNode('manual_task')}
+                className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-xs font-semibold text-slate-800 hover:bg-blue-50 hover:text-blue-700 border border-transparent hover:border-blue-200 transition-all text-left cursor-pointer"
+              >
+                <Phone className="w-3.5 h-3.5 text-blue-600" />
+                <span>Call / Manual Task</span>
+              </button>
 
-            <button
-              onClick={() => handleAddNode('merge')}
-              className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-xs font-semibold text-slate-800 hover:bg-slate-100 hover:text-slate-900 border border-transparent hover:border-slate-300 transition-all text-left cursor-pointer"
-            >
-              <GitMerge className="w-3.5 h-3.5 text-slate-700" />
-              <span>Merge Point</span>
-            </button>
+              <button
+                onClick={() => handleAddNode('merge')}
+                className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-xs font-semibold text-slate-800 hover:bg-slate-100 hover:text-slate-900 border border-transparent hover:border-slate-300 transition-all text-left cursor-pointer"
+              >
+                <GitMerge className="w-3.5 h-3.5 text-slate-700" />
+                <span>Merge Point</span>
+              </button>
+            </div>
           </div>
-        </div>
+        )}
 
         {/* Hint helper when building from scratch */}
         {nodes.length <= 1 && (
@@ -900,15 +1063,20 @@ export const WorkflowCanvas: React.FC<WorkflowCanvasProps> = ({
           <ReactFlow
             nodes={nodes}
             edges={styledEdges}
+            nodesDraggable={canEdit}
+            nodesConnectable={canEdit}
+            elementsSelectable={true}
             onNodesChange={(changes) => {
+              if (!canEdit) return;
               onNodesChange(changes);
               setHasUnsavedChanges(true);
             }}
             onEdgesChange={(changes) => {
+              if (!canEdit) return;
               onEdgesChange(changes);
               setHasUnsavedChanges(true);
             }}
-            onConnect={onConnect}
+            onConnect={canEdit ? onConnect : undefined}
             onNodeClick={onNodeClick}
             onEdgeClick={onEdgeClick}
             onPaneClick={onPaneClick}
@@ -940,15 +1108,17 @@ export const WorkflowCanvas: React.FC<WorkflowCanvasProps> = ({
 
         {/* Slide-over Side Panel Inspector */}
         {selectedNode && (
-          <WorkflowNodeInspector
-            node={selectedNode}
-            templates={templates}
-            senders={senders}
-            onUpdateNodeData={handleUpdateNodeData}
-            onDeleteNode={handleDeleteNode}
-            onDuplicateNode={handleDuplicateNode}
-            onClose={() => setSelectedNodeId(null)}
-          />
+          <div className={!canEdit ? 'pointer-events-none opacity-80' : ''}>
+            <WorkflowNodeInspector
+              node={selectedNode}
+              templates={templates}
+              senders={senders}
+              onUpdateNodeData={canEdit ? handleUpdateNodeData : () => {}}
+              onDeleteNode={canEdit ? handleDeleteNode : () => {}}
+              onDuplicateNode={canEdit ? handleDuplicateNode : () => {}}
+              onClose={() => setSelectedNodeId(null)}
+            />
+          </div>
         )}
 
       </div>
@@ -1013,9 +1183,16 @@ export const WorkflowCanvas: React.FC<WorkflowCanvasProps> = ({
               </div>
             </div>
 
-            <p className="text-xs text-slate-600 leading-relaxed">
-              Are you sure you want to permanently delete <strong>"{workflowName}"</strong>?
-            </p>
+            {campaignLeadsCount > 0 ? (
+              <div className="p-3 bg-red-50 border border-red-200 rounded-xl text-xs text-red-700 font-semibold flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 shrink-0 text-red-600" />
+                <span>Cannot delete: {campaignLeadsCount} lead(s) are currently enrolled in this workflow. Please unenroll or reassign them first.</span>
+              </div>
+            ) : (
+              <p className="text-xs text-slate-600 leading-relaxed">
+                Are you sure you want to permanently delete <strong>"{workflowName}"</strong>?
+              </p>
+            )}
 
             <div className="pt-2 border-t border-slate-100 flex items-center justify-end gap-2">
               <button
@@ -1025,13 +1202,142 @@ export const WorkflowCanvas: React.FC<WorkflowCanvasProps> = ({
                 Cancel
               </button>
               <button
+                disabled={campaignLeadsCount > 0}
                 onClick={() => {
+                  if (campaignLeadsCount > 0) return;
                   onDeleteWorkflow(activeWorkflow.id);
                   setShowDeleteModal(false);
                 }}
-                className="px-4 py-2 text-xs font-bold text-white bg-rose-600 hover:bg-rose-700 rounded-lg transition-colors cursor-pointer shadow-2xs"
+                className="px-4 py-2 text-xs font-bold text-white bg-rose-600 hover:bg-rose-700 disabled:opacity-40 disabled:cursor-not-allowed rounded-lg transition-colors cursor-pointer shadow-2xs"
               >
                 Delete Flow
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ================================================================== */}
+      {/* VERSION HISTORY MODAL                                             */}
+      {/* ================================================================== */}
+      {showHistoryModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-4 animate-in fade-in duration-150">
+          <div className="w-full max-w-lg bg-white rounded-2xl shadow-2xl border border-slate-200 p-6 space-y-4">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+              <div className="flex items-center gap-2.5">
+                <div className="w-9 h-9 rounded-xl bg-purple-100 text-purple-700 flex items-center justify-center shrink-0">
+                  <History className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-slate-900">Version History</h3>
+                  <p className="text-[11px] text-slate-500">Restore past snapshots (last 10 versions)</p>
+                </div>
+              </div>
+              <button
+                onClick={() => setShowHistoryModal(false)}
+                className="p-1 text-slate-400 hover:text-slate-600 rounded-lg cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="max-h-80 overflow-y-auto space-y-2.5 divide-y divide-slate-100 pr-1">
+              {(!activeWorkflow.versions || activeWorkflow.versions.length === 0) ? (
+                <div className="text-center py-8 text-slate-400 text-xs">
+                  <Clock className="w-8 h-8 mx-auto mb-2 text-slate-300" />
+                  <p className="font-semibold text-slate-600">No version snapshots yet</p>
+                  <p className="text-[11px] text-slate-400 mt-0.5">Snapshots are saved automatically when you save changes.</p>
+                </div>
+              ) : (
+                activeWorkflow.versions.map((ver) => (
+                  <div key={ver.version} className="pt-2.5 flex items-center justify-between gap-3 text-xs">
+                    <div>
+                      <div className="font-bold text-slate-900 flex items-center gap-1.5">
+                        <span className="px-2 py-0.5 rounded bg-purple-100 text-purple-700 font-mono text-[11px]">
+                          v{ver.version}
+                        </span>
+                        <span>{ver.name || activeWorkflow.name}</span>
+                        {ver.version === activeWorkflow.version && (
+                          <span className="px-1.5 py-0.2 rounded bg-emerald-100 text-emerald-700 text-[10px] font-semibold">
+                            Current
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-[11px] text-slate-400 mt-0.5">
+                        Saved by {ver.savedBy || 'User'} • {new Date(ver.savedAt).toLocaleString()} • {ver.nodes?.length || 0} nodes
+                      </p>
+                    </div>
+
+                    {canEdit && ver.version !== activeWorkflow.version && (
+                      <button
+                        type="button"
+                        disabled={isRestoringVersion}
+                        onClick={() => handleRestoreVersion(ver.version)}
+                        className="px-3 py-1 bg-slate-900 hover:bg-slate-800 disabled:opacity-50 text-white rounded-lg font-bold text-[11px] transition-colors cursor-pointer shrink-0"
+                      >
+                        {isRestoringVersion ? 'Restoring...' : 'Restore'}
+                      </button>
+                    )}
+                  </div>
+                ))
+              )}
+            </div>
+
+            <div className="pt-3 border-t border-slate-100 flex justify-end">
+              <button
+                type="button"
+                onClick={() => setShowHistoryModal(false)}
+                className="px-4 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-100 rounded-lg transition-colors cursor-pointer"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Campaign Templates Modal */}
+      {activeWorkflow && (
+        <CampaignTemplatesModal
+          isOpen={showCampaignTemplatesModal}
+          onClose={() => setShowCampaignTemplatesModal(false)}
+          campaignId={activeWorkflow.id}
+          campaignName={activeWorkflow.name}
+          canEdit={canEdit}
+          currentUser={currentUser}
+        />
+      )}
+
+      {/* Confirmation Modal for Flow Save Impact Warning */}
+      {flowImpactConfirm && (
+        <div className="fixed inset-0 z-60 flex items-center justify-center p-4 bg-slate-950/70 backdrop-blur-xs">
+          <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 max-w-md w-full p-6 text-center animate-in zoom-in-95 duration-150">
+            <div className="w-12 h-12 rounded-2xl bg-amber-100 text-amber-700 flex items-center justify-center mx-auto mb-4 border border-amber-200">
+              <AlertTriangle className="w-6 h-6" />
+            </div>
+            <h3 className="text-base font-bold text-slate-900 mb-2">Confirm Flow Changes</h3>
+            <p className="text-xs text-slate-600 mb-6 leading-relaxed">
+              <strong className="text-slate-900">{flowImpactConfirm.leadCount} leads</strong> from{' '}
+              <strong className="text-slate-900">{flowImpactConfirm.userCount} users</strong> are running on this campaign flow and will be affected.
+              <br />
+              <span className="text-[11px] text-slate-500 mt-2 block">
+                The updated flow steps and schedules will apply to subsequent sequence execution steps.
+              </span>
+            </p>
+            <div className="flex items-center justify-end gap-3">
+              <button
+                type="button"
+                onClick={() => setFlowImpactConfirm(null)}
+                className="px-4 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-100 rounded-xl transition-colors cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={executeSaveWorkflow}
+                className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white text-xs font-bold rounded-xl shadow-xs transition-colors cursor-pointer"
+              >
+                Confirm & Save
               </button>
             </div>
           </div>

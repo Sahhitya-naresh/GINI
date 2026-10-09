@@ -21,7 +21,8 @@ import {
   AlertTriangle,
   Info,
   Sparkles,
-  RotateCcw
+  RotateCcw,
+  FileText
 } from 'lucide-react';
 import { Lead, StageTemplate, EmailThreadMessage, CampaignWorkflow } from '../types';
 import { getOutlookThread } from '../services/outlookService';
@@ -640,6 +641,19 @@ export const LeadDetailModal: React.FC<LeadDetailModalProps> = ({
                       </option>
                     );
                   })}
+                </select>
+              </div>
+              <div className="flex justify-between items-center py-1 border-b border-slate-100">
+                <span className="text-slate-500 flex items-center gap-1">
+                  <FileText className="w-3 h-3 text-slate-400" /> Template Source:
+                </span>
+                <select
+                  value={lead.templateSource || 'campaign'}
+                  onChange={(e) => onUpdateLead({ ...lead, templateSource: e.target.value as 'campaign' | 'own' })}
+                  className="text-xs px-2 py-1 border border-slate-300 rounded-md bg-white text-slate-800 font-medium focus:ring-2 focus:ring-red-500 max-w-[200px]"
+                >
+                  <option value="campaign">Campaign Template</option>
+                  <option value="own">Owner&apos;s Personal Set</option>
                 </select>
               </div>
               {lead.currentNodeId && (

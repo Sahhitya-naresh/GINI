@@ -12,6 +12,7 @@ import {
 import { checkAppThreadForReply, sendAppEmail } from './msGraphService.ts';
 import { getPublicBaseUrl } from './urlHelper.ts';
 import { DEFAULT_STAGE_TEMPLATES } from '../src/data/defaultTemplates.ts';
+import { resolveEmailContent } from './templateBackend.ts';
 import { getDb } from './mongodb.ts';
 
 export interface CampaignRunResult {
@@ -677,17 +678,19 @@ export async function runDueCampaignsJob(
         // 6.5 ONLY THEN EXECUTE THE SEND:
         const stageNum = currentNode.data?.templateStage || (lead.currentStage + 1);
         const sendFromAccount = sender ? sender.email : (currentNode.data?.senderEmail || userEmail || 'Default Inbox');
-        let template = DEFAULT_STAGE_TEMPLATES.find(t => t.stage === stageNum) || DEFAULT_STAGE_TEMPLATES[0];
-
-        // Respect custom subject & body configured on the Email node
-        if (currentNode.data?.useCustomTemplate && currentNode.data?.customSubject) {
-          template = {
-            ...template,
-            stage: stageNum,
-            subject: String(currentNode.data.customSubject),
-            bodyHtml: (String(currentNode.data.customBody || '')).replace(/\n/g, '<br/>')
-          };
-        }
+        // Resolve template content via single resolver (handles custom node, lead's own, campaign, no campaign, default)
+        const resolved = await resolveEmailContent(
+          { ...lead, campaignId: campaign.id },
+          currentNode
+        );
+        const template = {
+          stage: resolved.stage || stageNum,
+          name: `Stage ${resolved.stage || stageNum}`,
+          purpose: 'Outreach',
+          defaultGapDays: 3,
+          subject: resolved.subject,
+          bodyHtml: resolved.bodyHtml
+        };
 
         const baseUrl = getPublicBaseUrl();
         try {

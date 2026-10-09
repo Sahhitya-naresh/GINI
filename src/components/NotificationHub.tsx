@@ -26,6 +26,7 @@ import {
   Calendar
 } from 'lucide-react';
 import { Lead, TaskAlertItem } from '../types';
+import { getUserWorkspaceNotes, saveUserWorkspaceNotes } from '../services/leadBackendService';
 
 export interface AppActionLog {
   id: string;
@@ -218,12 +219,31 @@ export const NotificationHub: React.FC<NotificationHubProps> = ({
     return () => window.removeEventListener('resize', handleResize);
   }, []);
 
-  // Save notes to localStorage
+  // Load notes from MongoDB on mount
+  const hasLoadedNotesFromBackend = useRef(false);
+  useEffect(() => {
+    getUserWorkspaceNotes().then(saved => {
+      if (saved) {
+        try {
+          const parsed = JSON.parse(saved);
+          if (Array.isArray(parsed)) {
+            setNotes(parsed);
+          }
+        } catch {}
+      }
+      hasLoadedNotesFromBackend.current = true;
+    });
+  }, []);
+
+  // Save notes to localStorage and MongoDB
   useEffect(() => {
     try {
       localStorage.setItem(NOTES_STORAGE_KEY, JSON.stringify(notes));
     } catch (e) {
       console.error('Failed to save user notes:', e);
+    }
+    if (hasLoadedNotesFromBackend.current) {
+      saveUserWorkspaceNotes(JSON.stringify(notes)).catch(() => {});
     }
   }, [notes]);
 

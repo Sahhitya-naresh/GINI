@@ -1,4 +1,4 @@
-import React, { useState, useId, useRef } from 'react';
+import React, { useState, useId, useRef, useEffect, useMemo } from 'react';
 import * as XLSX from 'xlsx';
 import { 
   UploadCloud, 
@@ -13,10 +13,14 @@ import {
   ShieldCheck, 
   HelpCircle,
   FolderPlus,
-  Users
+  Users,
+  FileText,
+  UserCheck,
+  ArrowLeft
 } from 'lucide-react';
-import { Lead, ImportCandidate, CampaignWorkflow } from '../types';
+import { Lead, ImportCandidate, CampaignWorkflow, TemplateSet } from '../types';
 import { getTodayDateString } from '../utils/dateUtils';
+import { getCampaignTemplateSet, getUserTemplateSet } from '../services/templateService';
 
 interface ImportLeadsModalProps {
   isOpen: boolean;
@@ -25,6 +29,7 @@ interface ImportLeadsModalProps {
   onCommitImport: (newLeads: Lead[], summary: { imported: number; skippedDuplicates: number; invalid: number }) => Promise<void>;
   isImporting?: boolean;
   campaigns?: CampaignWorkflow[];
+  currentUser?: { id: string; name?: string } | null;
 }
 
 type TargetField = 
@@ -58,11 +63,12 @@ export const ImportLeadsModal: React.FC<ImportLeadsModalProps> = ({
   existingLeads,
   onCommitImport,
   isImporting,
-  campaigns = []
+  campaigns = [],
+  currentUser
 }) => {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const [step, setStep] = useState<'upload' | 'mapping' | 'preview'>('upload');
+  const [step, setStep] = useState<'upload' | 'mapping' | 'preview' | 'template_choice'>('upload');
   const [fileName, setFileName] = useState('');
   const [fileSize, setFileSize] = useState('');
   const [rawHeaders, setRawHeaders] = useState<string[]>([]);
@@ -87,6 +93,12 @@ export const ImportLeadsModal: React.FC<ImportLeadsModalProps> = ({
   const [commitError, setCommitError] = useState<string | null>(null);
   const [parseError, setParseError] = useState<string | null>(null);
   const [isParsing, setIsParsing] = useState<boolean>(false);
+
+  // Template choices for candidate leads (Step 2)
+  const [leadTemplateChoices, setLeadTemplateChoices] = useState<Record<string, 'campaign' | 'own'>>({});
+  const [tickedLeadIds, setTickedLeadIds] = useState<Set<string>>(new Set());
+  const [campaignTplSet, setCampaignTplSet] = useState<TemplateSet | null>(null);
+  const [userTplSet, setUserTplSet] = useState<TemplateSet | null>(null);
 
   // Auto-detect header mapping based on common column name variations or server hints
   const autoDetectMapping = (headers: string[], serverDetected?: Record<string, string>) => {
@@ -364,6 +376,28 @@ export const ImportLeadsModal: React.FC<ImportLeadsModalProps> = ({
         return candidates;
     }
   }, [candidates, previewTab, skipDuplicates]);
+  // Initialize template choices for all valid candidates (default 'campaign' so nothing is left unset)
+  useEffect(() => {
+    setLeadTemplateChoices(prev => {
+      const next = { ...prev };
+      validToImport.forEach(c => {
+        if (!next[c.id]) next[c.id] = 'campaign';
+      });
+      return next;
+    });
+  }, [validToImport]);
+
+  // Load preview templates when entering template_choice step
+  useEffect(() => {
+    if (step === 'template_choice' && selectedCampaignId) {
+      getCampaignTemplateSet(selectedCampaignId)
+        .then(setCampaignTplSet)
+        .catch(() => setCampaignTplSet(null));
+      getUserTemplateSet(currentUser?.id || 'current')
+        .then(setUserTplSet)
+        .catch(() => setUserTplSet(null));
+    }
+  }, [step, selectedCampaignId, currentUser?.id]);
 
   // Handle final commit
   const handleConfirmCommit = async () => {
@@ -416,6 +450,7 @@ export const ImportLeadsModal: React.FC<ImportLeadsModalProps> = ({
         notes: c.notes,
         campaign: c.campaign || 'Default',
         campaignId: c.campaignId || '',
+        templateSource: selectedCampaignId ? (leadTemplateChoices[c.id] || 'campaign') : 'own',
         currentStage: 0, // Starts at Stage 0
         status: 'Active', // Active sequence
         lastEmailSentDate: '',
@@ -1026,6 +1061,196 @@ export const ImportLeadsModal: React.FC<ImportLeadsModalProps> = ({
             </div>
           )}
 
+          {/* STEP 4 / STEP 2 OF FLOW: TEMPLATE SELECTION FOR CAMPAIGN LEADS */}
+          {step === 'template_choice' && (
+            <div className="space-y-5">
+              <div className="p-4 bg-red-50/70 border border-red-200 rounded-xl text-xs text-red-950 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div>
+                  <h4 className="font-bold text-sm text-slate-900">Step 2: Assign Template Source</h4>
+                  <p className="text-xs text-slate-600 mt-0.5">
+                    Target Campaign: <strong>{campaigns.find(c => c.id === selectedCampaignId)?.name || 'Selected Campaign'}</strong>.
+                    Choose whether leads use the campaign's sequence or your personal sequence.
+                  </p>
+                </div>
+                <div className="text-[11px] text-slate-500 bg-white px-3 py-1.5 rounded-lg border border-red-100 font-semibold shrink-0">
+                  {validToImport.length} valid leads ready
+                </div>
+              </div>
+
+              {/* Action Toolbar */}
+              <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl flex flex-wrap items-center justify-between gap-2.5">
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-bold text-slate-700 uppercase tracking-wider">
+                    Bulk Choices:
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const updated: Record<string, 'campaign' | 'own'> = {};
+                      validToImport.forEach(c => { updated[c.id] = 'campaign'; });
+                      setLeadTemplateChoices(updated);
+                    }}
+                    className="px-2.5 py-1 text-xs font-semibold bg-white border border-slate-300 hover:bg-slate-100 rounded-lg text-slate-800 transition-colors shadow-2xs"
+                  >
+                    Use campaign template for all
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const updated: Record<string, 'campaign' | 'own'> = {};
+                      validToImport.forEach(c => { updated[c.id] = 'own'; });
+                      setLeadTemplateChoices(updated);
+                    }}
+                    className="px-2.5 py-1 text-xs font-semibold bg-white border border-slate-300 hover:bg-slate-100 rounded-lg text-slate-800 transition-colors shadow-2xs"
+                  >
+                    Use my template for all
+                  </button>
+                </div>
+
+                {tickedLeadIds.size > 0 && (
+                  <div className="flex items-center gap-2">
+                    <span className="text-[11px] font-semibold text-red-700">
+                      {tickedLeadIds.size} ticked:
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setLeadTemplateChoices(prev => {
+                          const next = { ...prev };
+                          tickedLeadIds.forEach(id => { next[id] = 'campaign'; });
+                          return next;
+                        });
+                      }}
+                      className="px-2.5 py-1 text-xs font-semibold bg-red-50 text-red-700 border border-red-200 hover:bg-red-100 rounded-lg transition-colors"
+                    >
+                      Set to Campaign
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setLeadTemplateChoices(prev => {
+                          const next = { ...prev };
+                          tickedLeadIds.forEach(id => { next[id] = 'own'; });
+                          return next;
+                        });
+                      }}
+                      className="px-2.5 py-1 text-xs font-semibold bg-red-50 text-red-700 border border-red-200 hover:bg-red-100 rounded-lg transition-colors"
+                    >
+                      Set to My Template
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              {/* Table of Leads with Checkbox & Choice Dropdown */}
+              <div className="border border-slate-200 rounded-xl overflow-hidden shadow-2xs">
+                <div className="max-h-64 overflow-y-auto">
+                  <table className="w-full text-left text-xs border-collapse">
+                    <thead className="bg-slate-50 sticky top-0 border-b border-slate-200 text-slate-600 font-semibold text-[11px]">
+                      <tr>
+                        <th className="py-2.5 px-3 w-8">
+                          <input
+                            type="checkbox"
+                            checked={tickedLeadIds.size === validToImport.length && validToImport.length > 0}
+                            onChange={(e) => {
+                              if (e.target.checked) {
+                                setTickedLeadIds(new Set(validToImport.map(c => c.id)));
+                              } else {
+                                setTickedLeadIds(new Set());
+                              }
+                            }}
+                            className="w-3.5 h-3.5 text-red-600 rounded border-slate-300 focus:ring-red-500 cursor-pointer"
+                          />
+                        </th>
+                        <th className="py-2.5 px-3">Lead</th>
+                        <th className="py-2.5 px-3">Company</th>
+                        <th className="py-2.5 px-3">Email</th>
+                        <th className="py-2.5 px-3">Assigned Template</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {validToImport.slice(0, 100).map((c) => {
+                        const isTicked = tickedLeadIds.has(c.id);
+                        const choice = leadTemplateChoices[c.id] || 'campaign';
+                        return (
+                          <tr key={c.id} className={isTicked ? 'bg-red-50/30' : 'hover:bg-slate-50/50'}>
+                            <td className="py-2.5 px-3">
+                              <input
+                                type="checkbox"
+                                checked={isTicked}
+                                onChange={(e) => {
+                                  setTickedLeadIds(prev => {
+                                    const next = new Set(prev);
+                                    if (e.target.checked) next.add(c.id);
+                                    else next.delete(c.id);
+                                    return next;
+                                  });
+                                }}
+                                className="w-3.5 h-3.5 text-red-600 rounded border-slate-300 focus:ring-red-500 cursor-pointer"
+                              />
+                            </td>
+                            <td className="py-2.5 px-3 font-bold text-slate-900">{c.name}</td>
+                            <td className="py-2.5 px-3 text-slate-700">{c.company}</td>
+                            <td className="py-2.5 px-3 font-mono text-slate-600 text-[11px]">{c.email}</td>
+                            <td className="py-2.5 px-3">
+                              <select
+                                value={choice}
+                                onChange={(e) => {
+                                  const val = e.target.value as 'campaign' | 'own';
+                                  setLeadTemplateChoices(prev => ({ ...prev, [c.id]: val }));
+                                }}
+                                className="px-2 py-1 text-xs border border-slate-300 rounded-lg bg-white font-medium text-slate-800 focus:ring-1 focus:ring-red-500"
+                              >
+                                <option value="campaign">Campaign Template</option>
+                                <option value="own">My Personal Template</option>
+                              </select>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              {/* Stage 1 Preview Comparison */}
+              <div className="space-y-2 pt-1">
+                <span className="text-xs font-bold text-slate-700 uppercase tracking-wider block">
+                  Stage 1 Content Preview
+                </span>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div className="p-3 rounded-xl border border-slate-200 bg-slate-50/50 text-xs space-y-1.5">
+                    <span className="font-bold text-slate-800 flex items-center gap-1">
+                      <FileText className="w-3.5 h-3.5 text-red-600" />
+                      Campaign Template Stage 1
+                    </span>
+                    <div className="text-[11px] text-slate-600">
+                      Subject: <span className="font-mono text-slate-900">{campaignTplSet?.stages[0]?.subject || 'Introduction {{company}}'}</span>
+                    </div>
+                    <div 
+                      className="p-2 bg-white rounded-lg border border-slate-200 text-[11px] text-slate-600 max-h-24 overflow-y-auto leading-relaxed"
+                      dangerouslySetInnerHTML={{ __html: campaignTplSet?.stages[0]?.bodyHtml || '<p>Hi {{first_name}}, reaching out...</p>' }}
+                    />
+                  </div>
+
+                  <div className="p-3 rounded-xl border border-slate-200 bg-slate-50/50 text-xs space-y-1.5">
+                    <span className="font-bold text-slate-800 flex items-center gap-1">
+                      <UserCheck className="w-3.5 h-3.5 text-red-600" />
+                      My Personal Template Stage 1
+                    </span>
+                    <div className="text-[11px] text-slate-600">
+                      Subject: <span className="font-mono text-slate-900">{userTplSet?.stages[0]?.subject || 'Introduction {{company}}'}</span>
+                    </div>
+                    <div 
+                      className="p-2 bg-white rounded-lg border border-slate-200 text-[11px] text-slate-600 max-h-24 overflow-y-auto leading-relaxed"
+                      dangerouslySetInnerHTML={{ __html: userTplSet?.stages[0]?.bodyHtml || '<p>Hi {{first_name}}, reaching out...</p>' }}
+                    />
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
         </div>
 
         {/* Modal Footer */}
@@ -1047,6 +1272,15 @@ export const ImportLeadsModal: React.FC<ImportLeadsModalProps> = ({
                 className="px-3.5 py-2 text-xs font-semibold text-slate-600 hover:text-slate-900 hover:bg-slate-200 rounded-lg transition-colors"
               >
                 &larr; Back to Mapping
+              </button>
+            )}
+            {step === 'template_choice' && (
+              <button
+                type="button"
+                onClick={() => setStep('preview')}
+                className="px-3.5 py-2 text-xs font-semibold text-slate-600 hover:text-slate-900 hover:bg-slate-200 rounded-lg transition-colors"
+              >
+                &larr; Back to Preview
               </button>
             )}
           </div>
@@ -1073,11 +1307,44 @@ export const ImportLeadsModal: React.FC<ImportLeadsModalProps> = ({
             )}
 
             {step === 'preview' && (
+              selectedCampaignId ? (
+                <button
+                  type="button"
+                  disabled={validToImport.length === 0}
+                  onClick={() => setStep('template_choice')}
+                  className="flex items-center gap-2 px-6 py-2.5 bg-red-600 hover:bg-red-700 active:bg-red-800 disabled:opacity-50 text-white rounded-lg text-xs sm:text-sm font-bold shadow-xs shadow-red-500/20 transition-all cursor-pointer"
+                >
+                  <span>Next: Choose Template (Step 2)</span>
+                  <ArrowRight className="w-4 h-4" />
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  disabled={validToImport.length === 0 || isImporting}
+                  onClick={handleConfirmCommit}
+                  className="flex items-center gap-2 px-6 py-2.5 bg-red-600 hover:bg-red-700 active:bg-red-800 disabled:opacity-50 text-white rounded-lg text-xs sm:text-sm font-bold shadow-xs shadow-red-500/20 transition-all"
+                >
+                  {isImporting ? (
+                    <>
+                      <RefreshCw className="w-4 h-4 animate-spin" />
+                      <span>Saving to Database...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Users className="w-4 h-4" />
+                      <span>Commit &amp; Import {validToImport.length} Leads (No Campaign)</span>
+                    </>
+                  )}
+                </button>
+              )
+            )}
+
+            {step === 'template_choice' && (
               <button
                 type="button"
                 disabled={validToImport.length === 0 || isImporting}
                 onClick={handleConfirmCommit}
-                className="flex items-center gap-2 px-6 py-2.5 bg-red-600 hover:bg-red-700 active:bg-red-800 disabled:opacity-50 text-white rounded-lg text-xs sm:text-sm font-bold shadow-xs shadow-red-500/20 transition-all"
+                className="flex items-center gap-2 px-6 py-2.5 bg-red-600 hover:bg-red-700 active:bg-red-800 disabled:opacity-50 text-white rounded-lg text-xs sm:text-sm font-bold shadow-xs shadow-red-500/20 transition-all cursor-pointer"
               >
                 {isImporting ? (
                   <>

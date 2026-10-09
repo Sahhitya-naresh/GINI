@@ -933,20 +933,20 @@ export async function previewRecentReplyClassifications(): Promise<{ success: bo
 
 export async function getTaskAlertsState(): Promise<string[]> {
   try {
-    const res = await fetch('/api/tasks/alerts-state');
+    const res = await fetch('/api/user-state/alerts');
     if (res.ok) {
       const data = await res.json();
       return Array.isArray(data.dismissedAlertIds) ? data.dismissedAlertIds : [];
     }
   } catch (err) {
-    console.warn('Failed to load task alerts state from backend:', err);
+    console.warn('Failed to load alerts state from backend:', err);
   }
   return [];
 }
 
 export async function dismissTaskAlertsOnBackend(alertIds: string[]): Promise<string[]> {
   try {
-    const res = await fetch('/api/tasks/alerts-state/dismiss', {
+    const res = await fetch('/api/user-state/alerts', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ alertIds })
@@ -956,16 +956,88 @@ export async function dismissTaskAlertsOnBackend(alertIds: string[]): Promise<st
       return Array.isArray(data.dismissedAlertIds) ? data.dismissedAlertIds : [];
     }
   } catch (err) {
-    console.warn('Failed to dismiss task alerts on backend:', err);
+    console.warn('Failed to dismiss alerts on backend:', err);
   }
   return alertIds;
 }
 
 export async function clearDismissedTaskAlertsOnBackend(): Promise<void> {
   try {
-    await fetch('/api/tasks/alerts-state/clear', { method: 'POST' });
+    await fetch('/api/user-state/alerts', { method: 'DELETE' });
   } catch (err) {
-    console.warn('Failed to clear dismissed task alerts on backend:', err);
+    console.warn('Failed to clear dismissed alerts on backend:', err);
   }
 }
+
+export async function getUserWorkspaceNotes(): Promise<string> {
+  try {
+    const res = await fetch('/api/user-state/notes');
+    if (res.ok) {
+      const data = await res.json();
+      return typeof data.notes === 'string' ? data.notes : '';
+    }
+  } catch (err) {
+    console.warn('Failed to load user workspace notes:', err);
+  }
+  return '';
+}
+
+export async function saveUserWorkspaceNotes(notes: string): Promise<string> {
+  try {
+    const res = await fetch('/api/user-state/notes', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ notes })
+    });
+    if (res.ok) {
+      const data = await res.json();
+      return typeof data.notes === 'string' ? data.notes : notes;
+    }
+  } catch (err) {
+    console.warn('Failed to save user workspace notes:', err);
+  }
+  return notes;
+}
+
+export async function reassignLeadApi(
+  leadId: string,
+  targetUserId: string
+): Promise<{ success: boolean; lead?: Lead; error?: string }> {
+  try {
+    const res = await fetch(`/api/leads/${leadId}/reassign`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ targetUserId })
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) {
+      return { success: false, error: data.error || 'Failed to reassign lead' };
+    }
+    return { success: true, lead: data.lead };
+  } catch (err: any) {
+    return { success: false, error: err.message };
+  }
+}
+
+export async function reassignAllLeadsApi(
+  fromUserId: string,
+  toUserId: string
+): Promise<{ success: boolean; modifiedCount?: number; error?: string }> {
+  try {
+    const res = await fetch('/api/leads/reassign-all', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fromUserId, toUserId })
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) {
+      return { success: false, error: data.error || 'Failed to reassign all leads' };
+    }
+    return { success: true, modifiedCount: data.modifiedCount };
+  } catch (err: any) {
+    return { success: false, error: err.message };
+  }
+}
+
+
 

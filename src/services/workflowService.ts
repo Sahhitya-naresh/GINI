@@ -122,7 +122,12 @@ export async function fetchCampaignsFromBackend(token?: string, spreadsheetId?: 
           updatedAt: c.updated_date || c.updatedAt || new Date().toISOString(),
           updated_date: c.updated_date || new Date().toISOString(),
           nodes: c.workflow_graph?.nodes || [],
-          edges: c.workflow_graph?.edges || []
+          edges: c.workflow_graph?.edges || [],
+          ownerId: c.ownerId,
+          ownerName: c.ownerName,
+          lastEditedBy: c.lastEditedBy,
+          lastEditedAt: c.lastEditedAt,
+          versions: c.versions || []
         }));
 
         saveWorkflows(mapped);
@@ -153,7 +158,12 @@ export async function saveCampaignToBackend(
       description: campaign.description || '',
       version: campaign.version || 1
     },
-    created_date: campaign.created_date || campaign.createdAt || new Date().toISOString()
+    created_date: campaign.created_date || campaign.createdAt || new Date().toISOString(),
+    ownerId: campaign.ownerId,
+    ownerName: campaign.ownerName,
+    lastEditedBy: campaign.lastEditedBy,
+    lastEditedAt: campaign.lastEditedAt,
+    versions: campaign.versions
   };
 
   try {
@@ -172,7 +182,11 @@ export async function saveCampaignToBackend(
       if (data.campaign) {
         const saved = {
           ...campaign,
-          updatedAt: data.campaign.updated_date || new Date().toISOString()
+          updatedAt: data.campaign.updated_date || new Date().toISOString(),
+          version: data.campaign.version || campaign.version,
+          versions: data.campaign.versions || campaign.versions,
+          ownerId: data.campaign.ownerId || campaign.ownerId,
+          ownerName: data.campaign.ownerName || campaign.ownerName
         };
         // Update local cache
         const all = loadSavedWorkflows();
@@ -200,24 +214,89 @@ export async function deleteCampaignFromBackend(
   campaignId: string,
   token?: string,
   spreadsheetId?: string
-): Promise<boolean> {
+): Promise<{ success: boolean; error?: string }> {
   try {
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     if (token) headers['Authorization'] = `Bearer ${token}`;
     if (spreadsheetId) headers['x-spreadsheet-id'] = spreadsheetId;
 
-    await fetch('/api/campaigns/delete', {
+    const res = await fetch('/api/campaigns/delete', {
       method: 'POST',
       headers,
       body: JSON.stringify({ campaignId, spreadsheetId })
     });
-  } catch (err) {
+    const data = await res.json();
+    if (!res.ok || !data.success) {
+      return { success: false, error: data.error || 'Failed to delete campaign' };
+    }
+  } catch (err: any) {
     console.error('Error deleting campaign on backend:', err);
+    return { success: false, error: err.message };
   }
 
   const all = loadSavedWorkflows().filter(w => w.id !== campaignId);
   saveWorkflows(all);
-  return true;
+  return { success: true };
+}
+
+export async function checkCampaignImpactApi(
+  campaignId: string
+): Promise<{ success: boolean; colleagueLeadsCount: number; totalActiveLeadsCount?: number; userCount?: number }> {
+  try {
+    const res = await fetch(`/api/campaigns/${campaignId}/impact`);
+    if (res.ok) {
+      const data = await res.json();
+      return {
+        success: true,
+        colleagueLeadsCount: data.colleagueLeadsCount || 0,
+        totalActiveLeadsCount: data.totalActiveLeadsCount || 0,
+        userCount: data.userCount || 0
+      };
+    }
+  } catch (err) {
+    console.warn('Failed to check campaign impact:', err);
+  }
+  return { success: false, colleagueLeadsCount: 0, totalActiveLeadsCount: 0, userCount: 0 };
+}
+
+export async function restoreCampaignVersionApi(
+  campaignId: string,
+  versionNumber: number
+): Promise<{ success: boolean; campaign?: CampaignWorkflow; error?: string }> {
+  try {
+    const res = await fetch(`/api/campaigns/${campaignId}/restore`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ version: versionNumber })
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) {
+      return { success: false, error: data.error || 'Failed to restore version' };
+    }
+    return { success: true, campaign: data.campaign };
+  } catch (err: any) {
+    return { success: false, error: err.message };
+  }
+}
+
+export async function duplicateCampaignApi(
+  campaignId: string,
+  newName?: string
+): Promise<{ success: boolean; campaign?: CampaignWorkflow; error?: string }> {
+  try {
+    const res = await fetch(`/api/campaigns/${campaignId}/duplicate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: newName })
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) {
+      return { success: false, error: data.error || 'Failed to duplicate campaign' };
+    }
+    return { success: true, campaign: data.campaign };
+  } catch (err: any) {
+    return { success: false, error: err.message };
+  }
 }
 
 export async function toggleCampaignActiveOnBackend(

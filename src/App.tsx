@@ -21,7 +21,8 @@ import {
   fetchCampaignsFromBackend,
   saveCampaignToBackend,
   deleteCampaignFromBackend,
-  toggleCampaignActiveOnBackend
+  toggleCampaignActiveOnBackend,
+  duplicateCampaignApi
 } from './services/workflowService';
 import {
   listLeads,
@@ -47,8 +48,19 @@ import {
   WorkflowsPage,
   TasksPage,
   TemplatesPage,
-  AnalyticsPage
+  AnalyticsPage,
+  UsersPage
 } from './pages';
+
+// Auth Components & Services
+import { AppUser } from './types';
+import { LoginPage } from './components/LoginPage';
+import { ChangePasswordModal } from './components/ChangePasswordModal';
+import {
+  getMeApi,
+  logoutApi,
+  registerUnauthorizedHandler
+} from './services/authService';
 
 // Components & Modals
 import { Header } from './components/Header';
@@ -59,6 +71,7 @@ import { ImportLeadsModal } from './components/ImportLeadsModal';
 import { SettingsModal } from './components/SettingsModal';
 import { ConfirmationModal } from './components/ConfirmationModal';
 import { NotificationHub, AppActionLog } from './components/NotificationHub';
+
 
 // Icons
 import { AlertCircle, CheckCircle2, FileSpreadsheet, PlusCircle, Sparkles, Send, AlertTriangle, X } from 'lucide-react';
@@ -304,7 +317,46 @@ export default function App() {
   const location = useLocation();
   const navigate = useNavigate();
 
-  const currentTab = useMemo<'leads' | 'replied' | 'workflows' | 'tasks' | 'templates' | 'analytics' | 'settings'>(() => {
+  // User Authentication & Session State
+  const [currentUser, setCurrentUser] = useState<AppUser | null>(null);
+  const [isAuthChecking, setIsAuthChecking] = useState(true);
+  const [authErrorMessage, setAuthErrorMessage] = useState<string | null>(null);
+
+  useEffect(() => {
+    registerUnauthorizedHandler((msg) => {
+      setCurrentUser(null);
+      setAuthErrorMessage(msg || 'Your session has expired. Please log in again.');
+    });
+
+    getMeApi()
+      .then((res) => {
+        if (res.success && res.user) {
+          setCurrentUser(res.user);
+        } else {
+          setCurrentUser(null);
+        }
+      })
+      .catch(() => {
+        setCurrentUser(null);
+      })
+      .finally(() => {
+        setIsAuthChecking(false);
+      });
+  }, []);
+
+  const handleLogout = useCallback(async () => {
+    try {
+      await logoutApi();
+    } catch (err) {
+      console.error('Logout error:', err);
+    } finally {
+      setCurrentUser(null);
+      setAuthErrorMessage(null);
+      navigate('/leads');
+    }
+  }, [navigate]);
+
+  const currentTab = useMemo<'leads' | 'replied' | 'workflows' | 'tasks' | 'templates' | 'analytics' | 'users' | 'settings'>(() => {
     const segment = location.pathname.replace(/^\//, '').split('/')[0];
     switch (segment) {
       case 'replied': return 'replied';
@@ -312,6 +364,7 @@ export default function App() {
       case 'tasks': return 'tasks';
       case 'templates': return 'templates';
       case 'analytics': return 'analytics';
+      case 'users': return 'users';
       case 'settings': return 'settings';
       case 'leads':
       default:
@@ -319,13 +372,16 @@ export default function App() {
     }
   }, [location.pathname]);
 
-  const handleTabChange = useCallback((tab: 'leads' | 'replied' | 'workflows' | 'tasks' | 'templates' | 'analytics' | 'settings') => {
+  const handleTabChange = useCallback((tab: 'leads' | 'replied' | 'workflows' | 'tasks' | 'templates' | 'analytics' | 'users' | 'settings') => {
     if (tab === 'settings') {
-      setIsSettingsOpen(true);
+      if (currentUser?.permissions?.includes('settings.edit')) {
+        setIsSettingsOpen(true);
+      }
     } else {
       navigate(`/${tab}`);
     }
-  }, [navigate]);
+  }, [navigate, currentUser]);
+
 
   const [leadsCampaignFilter, setLeadsCampaignFilter] = useState<string>('ALL');
   const [trackingEvents, setTrackingEvents] = useState<TrackingEvent[]>([]);
@@ -710,20 +766,23 @@ export default function App() {
   };
 
   const handleDeleteWorkflow = async (workflowId: string) => {
-    setWorkflows(prev => {
-      const nextList = prev.filter(w => w.id !== workflowId);
-      saveWorkflows(nextList);
-      if (activeWorkflowId === workflowId) {
-        setActiveWorkflowId(nextList[0]?.id || '');
-      }
-      return nextList;
-    });
-
     try {
-      await deleteCampaignFromBackend(workflowId, undefined, spreadsheetId || undefined);
+      const res = await deleteCampaignFromBackend(workflowId, undefined, spreadsheetId || undefined);
+      if (!res.success) {
+        showToast(res.error || 'Cannot delete campaign', 'error');
+        return;
+      }
+      setWorkflows(prev => {
+        const nextList = prev.filter(w => w.id !== workflowId);
+        saveWorkflows(nextList);
+        if (activeWorkflowId === workflowId) {
+          setActiveWorkflowId(nextList[0]?.id || '');
+        }
+        return nextList;
+      });
       showToast('Workflow deleted', 'info');
     } catch (err: any) {
-      showToast('Workflow removed locally', 'info');
+      showToast(err.message || 'Error deleting workflow', 'error');
     }
   };
 
@@ -750,7 +809,27 @@ export default function App() {
     showToast('Reset to a fresh workflow from scratch', 'success');
   };
 
-  const handleDuplicateWorkflow = (workflowId: string) => {
+  const handleDuplicateWorkflow = async (workflowId: string) => {
+    try {
+      const res = await duplicateCampaignApi(workflowId);
+      if (res.success && res.campaign) {
+        setWorkflows(prev => {
+          const nextList = [...prev, res.campaign!];
+          saveWorkflows(nextList);
+          return nextList;
+        });
+        setActiveWorkflowId(res.campaign.id);
+        showToast(`Duplicated campaign "${res.campaign.name}"`, 'success');
+        return;
+      }
+      if (res.error) {
+        showToast(res.error, 'error');
+        return;
+      }
+    } catch (err: any) {
+      console.warn('Backend duplicate warning, falling back locally:', err);
+    }
+
     const target = workflows.find(w => w.id === workflowId);
     if (!target) return;
     const duplicated: CampaignWorkflow = {
@@ -1925,11 +2004,48 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
   const dueCount = leads.filter(l => l.status === 'Active' && isLeadDueForNextSend(l.nextSendDate)).length;
   const repliedCount = leads.filter(l => l.status === 'Replied').length;
 
+  if (isAuthChecking) {
+    return (
+      <div className="min-h-screen w-full flex flex-col items-center justify-center bg-slate-50 gap-3">
+        <div className="w-8 h-8 border-3 border-red-600 border-t-transparent rounded-full animate-spin" />
+        <span className="text-xs font-semibold text-slate-500">Checking credentials...</span>
+      </div>
+    );
+  }
+
+  if (!currentUser) {
+    return (
+      <LoginPage
+        onLoginSuccess={(user) => {
+          setCurrentUser(user);
+          setAuthErrorMessage(null);
+        }}
+        initialError={authErrorMessage}
+        customLogoUrl={settings.customLogoUrl}
+      />
+    );
+  }
+
+  if (currentUser.mustChangePassword) {
+    return (
+      <div className="min-h-screen bg-slate-100 flex items-center justify-center">
+        <ChangePasswordModal
+          user={currentUser}
+          onSuccess={(updated) => {
+            setCurrentUser(updated);
+          }}
+        />
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-slate-100/70 text-slate-900 flex flex-col font-sans antialiased">
       {/* Header */}
       <Header
-        userEmail={userEmail}
+        currentUser={currentUser}
+        onLogout={handleLogout}
+        userEmail={currentUser.email || userEmail}
         spreadsheetId={spreadsheetId}
         spreadsheetName={spreadsheetName}
         dueCount={dueCount}
@@ -1945,6 +2061,7 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
         customLogoUrl={settings.customLogoUrl}
         onLogoChange={handleLogoChange}
       />
+
 
       {/* Floating Toast Notification */}
       {toastMessage && (
@@ -1977,6 +2094,8 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
                 leads={leads}
                 templates={templates}
                 campaigns={workflows}
+                currentUser={currentUser}
+                onRefreshLeads={syncData}
                 onBulkAssignCampaign={handleBulkAssignCampaign}
                 initialCampaignFilter={leadsCampaignFilter}
                 onSelectLead={handleSelectLead}
@@ -2013,6 +2132,7 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
                 senders={senders}
                 templates={templates}
                 leads={leads}
+                currentUser={currentUser}
                 onSaveWorkflow={handleSaveWorkflow}
                 onSelectWorkflow={(id) => setActiveWorkflowId(id)}
                 onCreateWorkflow={handleCreateWorkflow}
@@ -2043,6 +2163,7 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
                 leads={leads}
                 senderName={settings.senderName}
                 senders={senders}
+                currentUser={currentUser}
               />
             } 
           />
@@ -2063,8 +2184,20 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
               />
             } 
           />
+          <Route 
+            path="/users" 
+            element={
+              currentUser.permissions?.includes('users.manage') ? (
+                <UsersPage currentUser={currentUser} />
+              ) : (
+                <Navigate to="/leads" replace />
+              )
+            } 
+          />
           <Route path="*" element={<Navigate to="/leads" replace />} />
+
         </Routes>
+
       </main>
 
       {/* Lead Detail & Thread Modal */}

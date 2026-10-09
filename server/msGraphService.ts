@@ -49,6 +49,7 @@ export interface SendAppEmailResult {
   timestamp: string;
   to: string;
   subject: string;
+  bodyHtml?: string;
   statusCode: number;
 }
 
@@ -116,10 +117,25 @@ export async function sendAppEmail(params: SendAppEmailParams): Promise<SendAppE
   const stage = params.stageNum || params.template.stage || 1;
   const effectiveSenderName = params.senderDisplayName || config.displayName || 'Outreach Flow';
 
-  // Render merge tags
+  // Load settings to obtain emailHeader and emailFooter
+  const { loadLocalSettings } = await import('./mongoBackend.ts');
+  const settings = await loadLocalSettings().catch(() => null);
+  const headerHtml = settings?.emailHeader || '';
+  const footerHtml = settings?.emailFooter || '';
+
+  const { composeFullEmail } = await import('./templateBackend.ts');
   const renderedSubject = renderEmailMergeTags(params.template.subject, params.lead as any, effectiveSenderName);
-  const renderedBody = renderEmailMergeTags(params.template.bodyHtml, params.lead as any, effectiveSenderName);
-  const finalHtmlBody = wrapLinksAndEmbedTrackingPixel(renderedBody, params.lead, stage, params.baseUrl);
+  const { composedHtml } = composeFullEmail({
+    bodyHtml: params.template.bodyHtml,
+    headerHtml,
+    footerHtml,
+    lead: params.lead,
+    stage,
+    senderDisplayName: effectiveSenderName,
+    baseUrl: params.baseUrl,
+    embedTrackingPixel: true
+  });
+  const finalHtmlBody = composedHtml;
 
   // If Microsoft Graph is not configured in this environment, provide development simulated send
   if (!config.serviceAccount || !config.tenantId || !config.clientId) {
@@ -135,6 +151,7 @@ export async function sendAppEmail(params: SendAppEmailParams): Promise<SendAppE
       timestamp: new Date().toISOString(),
       to: params.lead.email,
       subject: renderedSubject,
+      bodyHtml: finalHtmlBody,
       statusCode: 200
     };
   }
