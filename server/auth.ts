@@ -94,7 +94,7 @@ const SESSION_DURATION_MS = 8 * 60 * 60 * 1000; // 8 hours
 export const SESSION_COOKIE_NAME = 'gini_auth_token';
 
 function getAuthSecret(): string {
-  return process.env.AUTH_SECRET || 'gini_outreach_flow_stateless_secret_key_2026';
+  return process.env.AUTH_SECRET || process.env.auth_secret || 'gini_outreach_flow_stateless_secret_key_2026';
 }
 
 function base64UrlEncode(str: string): string {
@@ -378,54 +378,93 @@ export async function seedInitialUsers(): Promise<void> {
     const db = await getDb();
     const usersCol = db.collection<UserDocument>('users');
 
-    const count = await usersCol.countDocuments();
-    if (count > 0) {
-      return; // Already initialized; never overwrite existing users
-    }
+    // 1. Seed/Ensure Admin User from environment
+    const adminEmail = (
+      process.env.ADMIN_EMAIL ||
+      process.env.admin_email ||
+      'admin@example.com'
+    ).toLowerCase().trim();
 
-    console.log('[Auth] "users" collection is empty. Checking seed credentials...');
+    const adminPassword =
+      process.env.ADMIN_PASSWORD ||
+      process.env.admin_password ||
+      'AdminPassword123!';
 
-    // 1. Seed ONE Admin
-    const adminEmail = (process.env.ADMIN_EMAIL || 'admin@example.com').toLowerCase().trim();
-    const adminPassword = process.env.ADMIN_PASSWORD || 'AdminPassword123!';
     const now = new Date().toISOString();
 
-    const adminHash = await hashPassword(adminPassword);
-    const adminUser: UserDocument = {
-      id: `usr_${Date.now()}_admin`,
-      name: 'System Admin',
-      email: adminEmail,
-      passwordHash: adminHash,
-      role: 'admin',
-      isActive: true,
-      mustChangePassword: false,
-      createdAt: now,
-      lastLoginAt: null
-    };
-
-    await usersCol.insertOne(adminUser as any);
-    console.log(`[Auth] Seeded initial admin user: ${adminEmail}`);
-
-    // 2. Seed normal User ONLY if USER_EMAIL and USER_PASSWORD are set
-    if (process.env.USER_EMAIL && process.env.USER_PASSWORD) {
-      const userEmail = process.env.USER_EMAIL.toLowerCase().trim();
-      const userPassword = process.env.USER_PASSWORD;
-      const userHash = await hashPassword(userPassword);
-
-      const standardUser: UserDocument = {
-        id: `usr_${Date.now() + 1}_user`,
-        name: 'Standard User',
-        email: userEmail,
-        passwordHash: userHash,
-        role: 'user',
+    const existingAdmin = await usersCol.findOne({ email: adminEmail });
+    if (!existingAdmin) {
+      const adminHash = await hashPassword(adminPassword);
+      const adminUser: UserDocument = {
+        id: `usr_${Date.now()}_admin`,
+        name: process.env.ADMIN_NAME || process.env.admin_name || 'System Admin',
+        email: adminEmail,
+        passwordHash: adminHash,
+        role: 'admin',
         isActive: true,
         mustChangePassword: false,
         createdAt: now,
         lastLoginAt: null
       };
 
-      await usersCol.insertOne(standardUser as any);
-      console.log(`[Auth] Seeded standard user from environment: ${userEmail}`);
+      await usersCol.insertOne(adminUser as any);
+      console.log(`[Auth] Created admin user: ${adminEmail}`);
+
+      // Ensure personal template set exists for new admin
+      try {
+        const { createTemplateSetForNewUser } = await import('./templateBackend.ts');
+        await createTemplateSetForNewUser(adminUser.id, adminUser.name);
+      } catch (err) {
+        console.warn('[Auth] Note on admin template set creation:', err);
+      }
+    } else {
+      // If admin exists and ADMIN_PASSWORD / admin_password is set, ensure password is synced
+      const explicitPassword = process.env.ADMIN_PASSWORD || process.env.admin_password;
+      if (explicitPassword) {
+        const adminHash = await hashPassword(explicitPassword);
+        await usersCol.updateOne(
+          { email: adminEmail },
+          { $set: { passwordHash: adminHash, isActive: true, role: 'admin' } }
+        );
+        console.log(`[Auth] Synced admin password from environment for: ${adminEmail}`);
+      }
+    }
+
+    // 2. Seed/Ensure standard user if provided in environment
+    const userEmailRaw = process.env.USER_EMAIL || process.env.user_email;
+    const userPasswordRaw = process.env.USER_PASSWORD || process.env.user_password;
+    if (userEmailRaw && userPasswordRaw) {
+      const userEmail = userEmailRaw.toLowerCase().trim();
+      const existingUser = await usersCol.findOne({ email: userEmail });
+      if (!existingUser) {
+        const userHash = await hashPassword(userPasswordRaw);
+        const standardUser: UserDocument = {
+          id: `usr_${Date.now() + 1}_user`,
+          name: process.env.USER_NAME || process.env.user_name || 'Standard User',
+          email: userEmail,
+          passwordHash: userHash,
+          role: 'user',
+          isActive: true,
+          mustChangePassword: false,
+          createdAt: now,
+          lastLoginAt: null
+        };
+
+        await usersCol.insertOne(standardUser as any);
+        console.log(`[Auth] Seeded standard user: ${userEmail}`);
+        try {
+          const { createTemplateSetForNewUser } = await import('./templateBackend.ts');
+          await createTemplateSetForNewUser(standardUser.id, standardUser.name);
+        } catch {
+          // ignore
+        }
+      } else {
+        const userHash = await hashPassword(userPasswordRaw);
+        await usersCol.updateOne(
+          { email: userEmail },
+          { $set: { passwordHash: userHash, isActive: true } }
+        );
+      }
     }
   } catch (err) {
     console.error('[Auth] Error seeding initial users:', err);
