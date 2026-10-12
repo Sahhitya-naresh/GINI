@@ -1514,61 +1514,6 @@ async function getMongoStatus() {
     };
   }
 }
-async function updateMongoUri(newUri) {
-  const trimmed = newUri.trim();
-  if (!trimmed) {
-    return { success: false, error: "URI cannot be empty" };
-  }
-  if (/:\s*@/.test(trimmed)) {
-    return {
-      success: false,
-      error: "Password cannot be empty. Please include your database user password: mongodb+srv://<username>:<password>@cluster0.zebcge8.mongodb.net/..."
-    };
-  }
-  const testClient = new MongoClient(trimmed, {
-    serverSelectionTimeoutMS: 5e3,
-    connectTimeoutMS: 5e3
-  });
-  try {
-    await testClient.connect();
-    const dbName = process.env.MONGODB_DB_NAME || "outreach_flow";
-    const testDb = testClient.db(dbName);
-    await testDb.command({ ping: 1 });
-    await testDb.collection("settings").findOne({});
-    if (state.client) {
-      try {
-        await state.client.close();
-      } catch {
-      }
-    }
-    state.client = testClient;
-    state.db = testDb;
-    state.promise = Promise.resolve(testClient);
-    state.uriSource = "env_uri";
-    state.lastError = void 0;
-    process.env.MONGODB_URI = trimmed;
-    try {
-      const envPath = path.join(process.cwd(), ".env");
-      fs.writeFileSync(envPath, `MONGODB_URI="${trimmed}"
-MONGODB_DB_NAME="${dbName}"
-`, "utf-8");
-    } catch (e) {
-      console.warn("Could not write to .env:", e);
-    }
-    await ensureIndexesAndSeed(testDb);
-    return { success: true, database: dbName };
-  } catch (err) {
-    try {
-      await testClient.close();
-    } catch {
-    }
-    return {
-      success: false,
-      error: err.message || "Connection failed",
-      code: err.code
-    };
-  }
-}
 var DEFAULT_MONGODB_URI, isMongoPackageLoaded, COLLECTIONS, state;
 var init_mongodb = __esm({
   "server/mongodb.ts"() {
@@ -3529,7 +3474,6 @@ init_mongoBackend();
 init_replyRules();
 init_mongodb();
 import express from "express";
-import { MongoClient as MongoClient2 } from "mongodb";
 
 // server/importBackend.ts
 import * as XLSX from "xlsx";
@@ -5901,74 +5845,19 @@ app.get("/api/mongodb/status", requireAdmin, async (_req, res) => {
     res.status(500).json({ connected: false, error: err.message });
   }
 });
-app.get("/api/mongodb/test-atlas", requireAdmin, async (req, res) => {
-  const customUri = req.query.uri || "";
-  const variations = customUri ? [{ name: "custom", uri: customUri }] : [
-    {
-      name: "Original with appName",
-      uri: "mongodb+srv://sahhityanaresh_db_user:outreachconnect@cluster0.zebcge8.mongodb.net/?appName=Cluster0"
-    },
-    {
-      name: "With dbName in path (outreach_flow)",
-      uri: "mongodb+srv://sahhityanaresh_db_user:outreachconnect@cluster0.zebcge8.mongodb.net/outreach_flow?retryWrites=true&w=majority&appName=Cluster0"
-    },
-    {
-      name: "With authSource=admin",
-      uri: "mongodb+srv://sahhityanaresh_db_user:outreachconnect@cluster0.zebcge8.mongodb.net/?authSource=admin&appName=Cluster0"
-    },
-    {
-      name: "With authMechanism=SCRAM-SHA-1",
-      uri: "mongodb+srv://sahhityanaresh_db_user:outreachconnect@cluster0.zebcge8.mongodb.net/?authSource=admin&authMechanism=SCRAM-SHA-1"
-    },
-    {
-      name: "With authMechanism=SCRAM-SHA-256",
-      uri: "mongodb+srv://sahhityanaresh_db_user:outreachconnect@cluster0.zebcge8.mongodb.net/?authSource=admin&authMechanism=SCRAM-SHA-256"
-    }
-  ];
-  const results = [];
-  for (const item of variations) {
-    const testClient = new MongoClient2(item.uri, {
-      serverSelectionTimeoutMS: 3e3,
-      connectTimeoutMS: 3e3
-    });
-    try {
-      await testClient.connect();
-      const ping = await testClient.db("admin").command({ ping: 1 });
-      results.push({
-        name: item.name,
-        success: true,
-        ping
-      });
-      await testClient.close();
-      break;
-    } catch (e) {
-      results.push({
-        name: item.name,
-        success: false,
-        error: e.message,
-        code: e.code,
-        codeName: e.codeName
-      });
-      try {
-        await testClient.close();
-      } catch {
-      }
-    }
+app.get("/api/mongodb/test-atlas", requireAdmin, async (_req, res) => {
+  try {
+    const status = await getMongoStatus();
+    res.json({ success: true, connected: status.connected, database: status.database });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
   }
-  res.json({ results });
 });
-app.post("/api/mongodb/update-uri", requireAdmin, async (req, res) => {
-  const { uri } = req.body || {};
-  if (!uri || typeof uri !== "string") {
-    return res.status(400).json({ success: false, error: 'Valid "uri" string is required.' });
-  }
-  const result = await updateMongoUri(uri);
-  const status = await getMongoStatus();
-  if (result.success) {
-    res.json({ success: true, database: result.database, status });
-  } else {
-    res.status(400).json({ success: false, error: result.error, code: result.code, status });
-  }
+app.post("/api/mongodb/update-uri", requireAdmin, async (_req, res) => {
+  return res.status(403).json({
+    success: false,
+    error: "Runtime database URI modification is disabled for security. Configure MONGODB_URI in your environment variables."
+  });
 });
 app.post("/api/mongodb/migrate", requireAdmin, async (_req, res) => {
   try {
@@ -6662,7 +6551,12 @@ app.post("/api/emails/send", async (req, res) => {
 app.get("/api/email/service-account", requireAdmin, async (_req, res) => {
   try {
     const profile = getServiceAccountProfile();
-    const diagnostics = await getAuthDiagnostics();
+    const rawDiagnostics = await getAuthDiagnostics();
+    const diagnostics = {
+      ...rawDiagnostics,
+      tenantId: rawDiagnostics?.tenantId ? `${rawDiagnostics.tenantId.slice(0, 4)}\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022` : void 0,
+      clientId: rawDiagnostics?.clientId ? `${rawDiagnostics.clientId.slice(0, 4)}\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022` : void 0
+    };
     res.json({ success: true, profile, diagnostics });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });

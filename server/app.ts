@@ -389,74 +389,20 @@ app.get('/api/mongodb/status', requireAdmin, async (_req, res) => {
   }
 });
 
-app.get('/api/mongodb/test-atlas', requireAdmin, async (req, res) => {
-  const customUri = (req.query.uri as string) || '';
-  const variations: { name: string; uri: string }[] = customUri ? [{ name: 'custom', uri: customUri }] : [
-    {
-      name: 'Original with appName',
-      uri: 'mongodb+srv://sahhityanaresh_db_user:outreachconnect@cluster0.zebcge8.mongodb.net/?appName=Cluster0'
-    },
-    {
-      name: 'With dbName in path (outreach_flow)',
-      uri: 'mongodb+srv://sahhityanaresh_db_user:outreachconnect@cluster0.zebcge8.mongodb.net/outreach_flow?retryWrites=true&w=majority&appName=Cluster0'
-    },
-    {
-      name: 'With authSource=admin',
-      uri: 'mongodb+srv://sahhityanaresh_db_user:outreachconnect@cluster0.zebcge8.mongodb.net/?authSource=admin&appName=Cluster0'
-    },
-    {
-      name: 'With authMechanism=SCRAM-SHA-1',
-      uri: 'mongodb+srv://sahhityanaresh_db_user:outreachconnect@cluster0.zebcge8.mongodb.net/?authSource=admin&authMechanism=SCRAM-SHA-1'
-    },
-    {
-      name: 'With authMechanism=SCRAM-SHA-256',
-      uri: 'mongodb+srv://sahhityanaresh_db_user:outreachconnect@cluster0.zebcge8.mongodb.net/?authSource=admin&authMechanism=SCRAM-SHA-256'
-    }
-  ];
-
-  const results: any[] = [];
-  for (const item of variations) {
-    const testClient = new MongoClient(item.uri, {
-      serverSelectionTimeoutMS: 3000,
-      connectTimeoutMS: 3000
-    });
-    try {
-      await testClient.connect();
-      const ping = await testClient.db('admin').command({ ping: 1 });
-      results.push({
-        name: item.name,
-        success: true,
-        ping
-      });
-      await testClient.close();
-      break; // Successfully connected!
-    } catch (e: any) {
-      results.push({
-        name: item.name,
-        success: false,
-        error: e.message,
-        code: e.code,
-        codeName: e.codeName
-      });
-      try { await testClient.close(); } catch {}
-    }
+app.get('/api/mongodb/test-atlas', requireAdmin, async (_req, res) => {
+  try {
+    const status = await getMongoStatus();
+    res.json({ success: true, connected: status.connected, database: status.database });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
   }
-
-  res.json({ results });
 });
 
-app.post('/api/mongodb/update-uri', requireAdmin, async (req, res) => {
-  const { uri } = req.body || {};
-  if (!uri || typeof uri !== 'string') {
-    return res.status(400).json({ success: false, error: 'Valid "uri" string is required.' });
-  }
-  const result = await updateMongoUri(uri);
-  const status = await getMongoStatus();
-  if (result.success) {
-    res.json({ success: true, database: result.database, status });
-  } else {
-    res.status(400).json({ success: false, error: result.error, code: result.code, status });
-  }
+app.post('/api/mongodb/update-uri', requireAdmin, async (_req, res) => {
+  return res.status(403).json({
+    success: false,
+    error: 'Runtime database URI modification is disabled for security. Configure MONGODB_URI in your environment variables.'
+  });
 });
 
 app.post('/api/mongodb/migrate', requireAdmin, async (_req, res) => {
@@ -1289,7 +1235,12 @@ app.post('/api/emails/send', async (req, res) => {
 app.get('/api/email/service-account', requireAdmin, async (_req, res) => {
   try {
     const profile = getServiceAccountProfile();
-    const diagnostics = await getAuthDiagnostics();
+    const rawDiagnostics: any = await getAuthDiagnostics();
+    const diagnostics = {
+      ...rawDiagnostics,
+      tenantId: rawDiagnostics?.tenantId ? `${rawDiagnostics.tenantId.slice(0, 4)}••••••••` : undefined,
+      clientId: rawDiagnostics?.clientId ? `${rawDiagnostics.clientId.slice(0, 4)}••••••••` : undefined
+    };
     res.json({ success: true, profile, diagnostics });
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });

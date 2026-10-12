@@ -19,9 +19,7 @@ import {
   Menu,
   ChevronDown,
   Layers,
-  CheckSquare,
-  Eye,
-  EyeOff
+  CheckSquare
 } from 'lucide-react';
 import { BrandLogo } from './BrandLogo';
 import { AppUser } from '../types';
@@ -76,11 +74,6 @@ export const Header: React.FC<HeaderProps> = ({
     diagnostics?: any;
   }>({ connected: false, status: 'connecting', database: 'outreach_flow' });
 
-  const [showMongoModal, setShowMongoModal] = useState(false);
-  const [mongoUriInput, setMongoUriInput] = useState('');
-  const [showUriPassword, setShowUriPassword] = useState(false);
-  const [isTestingMongo, setIsTestingMongo] = useState(false);
-  const [mongoFeedback, setMongoFeedback] = useState<{ success?: boolean; message: string; code?: any } | null>(null);
 
   // Right-side Navigation Menu Dropdown state
   const [isNavMenuOpen, setIsNavMenuOpen] = useState(false);
@@ -143,41 +136,7 @@ export const Header: React.FC<HeaderProps> = ({
     };
   }, []);
 
-  const handleTestAndConnect = async () => {
-    if (!mongoUriInput.trim()) return;
-    setIsTestingMongo(true);
-    setMongoFeedback(null);
-    try {
-      const res = await fetch('/api/mongodb/update-uri', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ uri: mongoUriInput.trim() })
-      });
-      const data = await res.json();
-      if (res.ok && data.success) {
-        setMongoStatus(data.status || { connected: true, status: 'connected', database: data.database });
-        setMongoFeedback({
-          success: true,
-          message: `Successfully connected to MongoDB database "${data.database || 'outreach_flow'}"!`
-        });
-        setMongoUriInput('');
-        setShowUriPassword(false);
-      } else {
-        setMongoFeedback({
-          success: false,
-          message: data.error || 'Connection failed',
-          code: data.code
-        });
-        if (data.status) {
-          setMongoStatus(data.status);
-        }
-      }
-    } catch (e: any) {
-      setMongoFeedback({ success: false, message: e.message || 'Network request error' });
-    } finally {
-      setIsTestingMongo(false);
-    }
-  };
+
   return (
     <header className="bg-white border-b border-red-100 sticky top-0 z-30 shadow-xs">
       <div className="w-full px-3 sm:px-5">
@@ -210,22 +169,20 @@ export const Header: React.FC<HeaderProps> = ({
               )}
             </button>
 
-            {/* Discreet Storage Connection Status Indicator (Hides loud MongoDB icon) */}
-            <button 
+            {/* Discreet Storage Connection Status Indicator (Read-only status badge) */}
+            <div 
               id="connection-status-indicator"
-              onClick={() => setShowMongoModal(true)}
-              type="button"
-              className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold shadow-2xs transition-all shrink-0 cursor-pointer ${
+              className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold shadow-2xs transition-all shrink-0 select-none ${
                 mongoStatus.connected 
-                  ? 'bg-slate-50 border border-slate-200/90 text-slate-700 hover:bg-slate-100 hover:border-slate-300' 
-                  : 'bg-amber-50 border border-amber-300 text-amber-900 hover:bg-amber-100'
+                  ? 'bg-slate-50 border border-slate-200/90 text-slate-700' 
+                  : 'bg-amber-50 border border-amber-300 text-amber-900'
               }`}
-              title={`Storage: MongoDB (${mongoStatus.database || 'outreach_flow'}) — ${mongoStatus.connected ? 'Connected' : 'Disconnected'}. Click to view connection status.`}
+              title={`Storage: MongoDB (${mongoStatus.database || 'outreach_flow'}) — ${mongoStatus.connected ? 'Connected' : 'Disconnected'}`}
             >
               <span className={`w-2 h-2 rounded-full shrink-0 ${mongoStatus.connected ? 'bg-emerald-500 animate-pulse' : 'bg-amber-500'}`} />
               <span className="font-semibold text-slate-700 hidden sm:inline">Storage Connected</span>
               <span className="font-semibold text-slate-700 sm:hidden">Connected</span>
-            </button>
+            </div>
 
             {/* Sync Button */}
             <button
@@ -532,158 +489,7 @@ export const Header: React.FC<HeaderProps> = ({
       </div>
 
 
-      {/* MongoDB Atlas Connection Modal */}
-      {showMongoModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs animate-in fade-in duration-150">
-          <div className="bg-white rounded-2xl max-w-xl w-full p-6 shadow-2xl border border-slate-200 relative overflow-hidden">
-            {/* Modal Header */}
-            <div className="flex items-center justify-between pb-4 border-b border-slate-100">
-              <div className="flex items-center gap-3">
-                <div className={`p-2.5 rounded-xl ${mongoStatus.connected ? 'bg-emerald-50 text-emerald-600' : 'bg-amber-50 text-amber-600'}`}>
-                  <Database className="w-5 h-5" />
-                </div>
-                <div>
-                  <h3 className="text-base font-bold text-slate-900">MongoDB Atlas Connection</h3>
-                  <p className="text-xs text-slate-500">Persistent database storage for leads, campaigns & workflows</p>
-                </div>
-              </div>
-              <button
-                onClick={() => setShowMongoModal(false)}
-                className="p-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg transition-colors"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
 
-            {/* Current Status Card */}
-            <div className="mt-4">
-              {mongoStatus.connected ? (
-                <div className="p-3.5 bg-emerald-50/80 border border-emerald-200 rounded-xl flex items-start gap-3">
-                  <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0 mt-0.5" />
-                  <div className="flex-1">
-                    <div className="flex items-center justify-between">
-                      <div className="text-xs font-bold text-emerald-900">Connected to MongoDB Atlas</div>
-                      <span className="px-2 py-0.5 bg-emerald-100 text-emerald-800 text-[10px] font-bold rounded-full">Secure &amp; Protected</span>
-                    </div>
-                    <div className="text-xs text-emerald-700 mt-1">
-                      Database: <span className="font-semibold">{mongoStatus.database || 'outreach_flow'}</span>
-                    </div>
-                    <div className="text-[11px] text-emerald-800/80 mt-1 font-mono flex items-center gap-1.5 flex-wrap">
-                      <span>Connection:</span>
-                      <code className="bg-emerald-100/70 px-1.5 py-0.5 rounded text-[10px]">mongodb+srv://••••••••:••••••••@cluster0.••••••••/outreach_flow</code>
-                    </div>
-                  </div>
-                </div>
-              ) : (
-                <div className="p-3.5 bg-amber-50/90 border border-amber-200 rounded-xl flex items-start gap-3">
-                  <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
-                  <div className="flex-1">
-                    <div className="text-xs font-bold text-amber-900">Storage Offline / Connection Required</div>
-                    <div className="text-xs text-amber-800 mt-1 leading-relaxed">
-                      MongoDB connection not established. Configure your connection string securely below or via your server environment.
-                    </div>
-                  </div>
-                </div>
-              )}
-            </div>
-
-            {/* Connection URI Form */}
-            <div className="mt-5">
-              <label className="block text-xs font-semibold text-slate-700 mb-1.5 flex items-center justify-between">
-                <span>Update MongoDB Connection String:</span>
-                <span className="text-[11px] text-slate-400 font-normal">Hidden for privacy &amp; security</span>
-              </label>
-              <div className="relative">
-                <input
-                  type={showUriPassword ? "text" : "password"}
-                  value={mongoUriInput}
-                  onChange={(e) => setMongoUriInput(e.target.value)}
-                  placeholder="Paste new connection string to update (e.g. mongodb+srv://...)"
-                  autoComplete="off"
-                  className="w-full text-xs font-mono px-3 py-2.5 bg-slate-50 border border-slate-300 rounded-lg text-slate-800 focus:outline-hidden focus:ring-2 focus:ring-red-500/20 focus:border-red-500 transition-all pr-20"
-                />
-                <button
-                  type="button"
-                  onClick={() => setShowUriPassword(!showUriPassword)}
-                  className="absolute right-2 top-2 px-2 py-1 text-[11px] font-semibold text-slate-500 hover:text-slate-700 hover:bg-slate-200/60 rounded cursor-pointer transition-colors flex items-center gap-1"
-                >
-                  {showUriPassword ? (
-                    <>
-                      <EyeOff className="w-3.5 h-3.5" />
-                      <span>Hide</span>
-                    </>
-                  ) : (
-                    <>
-                      <Eye className="w-3.5 h-3.5" />
-                      <span>Show</span>
-                    </>
-                  )}
-                </button>
-              </div>
-              <p className="text-[11px] text-slate-400 mt-1.5">
-                Existing connection credentials are encrypted and never shown publicly in the browser.
-              </p>
-            </div>
-
-            {/* Feedback Message */}
-            {mongoFeedback && (
-              <div className={`mt-3 p-3 rounded-lg text-xs leading-relaxed ${
-                mongoFeedback.success 
-                  ? 'bg-emerald-50 text-emerald-800 border border-emerald-200' 
-                  : 'bg-red-50 text-red-800 border border-red-200'
-              }`}>
-                {mongoFeedback.message}
-                {mongoFeedback.code && <span className="font-mono ml-1 text-[11px]">({mongoFeedback.code})</span>}
-              </div>
-            )}
-
-            {/* Atlas Security & Setup Guide */}
-            <div className="mt-4 p-3.5 bg-slate-50 border border-slate-200 rounded-xl text-xs space-y-2">
-              <div className="font-semibold text-slate-800">Atlas Security &amp; Setup Best Practices:</div>
-              <ul className="list-disc pl-4 space-y-1 text-slate-600 text-[11px] leading-relaxed">
-                <li>
-                  <strong className="text-slate-700">Database User Access:</strong> Ensure your user is created in Atlas under <span className="font-medium">Security &rarr; Database Access</span> with read/write privileges.
-                </li>
-                <li>
-                  <strong className="text-slate-700">Secret Management:</strong> Keep your MongoDB URI secure and configure it via the server environment (<code className="bg-slate-200 px-1 rounded font-mono">MONGODB_URI</code>).
-                </li>
-                <li>
-                  <strong className="text-slate-700">Network Access:</strong> Verify IP <code className="bg-slate-200 px-1 rounded font-mono">0.0.0.0/0</code> or your deployment server IP is whitelisted under <span className="font-medium">Security &rarr; Network Access</span>.
-                </li>
-              </ul>
-            </div>
-
-            {/* Modal Footer */}
-            <div className="mt-5 pt-3 border-t border-slate-100 flex items-center justify-end gap-2">
-              <button
-                type="button"
-                onClick={() => setShowMongoModal(false)}
-                className="px-4 py-2 text-xs font-semibold text-slate-600 hover:text-slate-800 hover:bg-slate-100 rounded-lg transition-colors"
-              >
-                Close
-              </button>
-              <button
-                type="button"
-                onClick={handleTestAndConnect}
-                disabled={isTestingMongo || !mongoUriInput.trim()}
-                className="flex items-center gap-2 px-4 py-2 text-xs font-semibold bg-red-600 hover:bg-red-700 text-white rounded-lg shadow-xs shadow-red-600/20 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
-              >
-                {isTestingMongo ? (
-                  <>
-                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                    <span>Connecting...</span>
-                  </>
-                ) : (
-                  <>
-                    <Database className="w-3.5 h-3.5" />
-                    <span>Test & Save Connection</span>
-                  </>
-                )}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </header>
   );
 };
