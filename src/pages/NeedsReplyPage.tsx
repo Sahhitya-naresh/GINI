@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useMemo } from 'react';
 import { Lead } from '../types';
 import { 
   Building2, 
@@ -6,7 +6,8 @@ import {
   ExternalLink, 
   CheckCircle2, 
   Eye, 
-  Flame
+  Flame,
+  Reply
 } from 'lucide-react';
 
 interface NeedsManualReplyViewProps {
@@ -14,15 +15,31 @@ interface NeedsManualReplyViewProps {
   onSelectLead: (lead: Lead) => void;
   onUpdateStatus: (lead: Lead, newStatus: Lead['status']) => void;
   onOverrideSentiment?: (lead: Lead, sentiment: 'positive' | 'negative' | 'neutral') => void;
+  onOpenManualReply?: (lead: Lead) => void;
 }
 
 export const NeedsManualReplyView: React.FC<NeedsManualReplyViewProps> = ({
   leads,
   onSelectLead,
   onUpdateStatus,
-  onOverrideSentiment
+  onOverrideSentiment,
+  onOpenManualReply
 }) => {
-  const repliedLeads = leads.filter(l => l.status === 'Replied');
+  // Sort leads that still need an answer above the ones already answered
+  const repliedLeads = useMemo(() => {
+    return leads
+      .filter(l => l.status === 'Replied')
+      .sort((a, b) => {
+        const aAnswered = Boolean(a.lastManualReplyAt && !(a as any).hasUnreadReply);
+        const bAnswered = Boolean(b.lastManualReplyAt && !(b as any).hasUnreadReply);
+        if (aAnswered !== bAnswered) {
+          return aAnswered ? 1 : -1; // Unanswered first
+        }
+        const aDate = a.lastManualReplyAt || a.lastEmailSentDate || '';
+        const bDate = b.lastManualReplyAt || b.lastEmailSentDate || '';
+        return bDate.localeCompare(aDate);
+      });
+  }, [leads]);
 
   return (
     <div className="space-y-4 w-full pb-8">
@@ -82,9 +99,17 @@ export const NeedsManualReplyView: React.FC<NeedsManualReplyViewProps> = ({
                     </div>
                   </div>
 
-                  <span className="px-2.5 py-1 text-xs font-semibold bg-red-50 text-red-800 border border-red-200 rounded-full shrink-0">
-                    Stage {lead.currentStage} Replied
-                  </span>
+                  <div className="flex flex-col items-end gap-1.5 shrink-0">
+                    <span className="px-2.5 py-1 text-xs font-semibold bg-red-50 text-red-800 border border-red-200 rounded-full shrink-0">
+                      Stage {lead.currentStage} Replied
+                    </span>
+                    {lead.lastManualReplyAt && (
+                      <span className="px-2 py-0.5 text-[10px] font-semibold bg-emerald-100 text-emerald-800 border border-emerald-200 rounded-full flex items-center gap-1 shadow-2xs">
+                        <CheckCircle2 className="w-3 h-3 text-emerald-600" />
+                        <span>You replied on {new Date(lead.lastManualReplyAt).toLocaleDateString([], { month: 'short', day: 'numeric' })}</span>
+                      </span>
+                    )}
+                  </div>
                 </div>
 
                 {/* Pain Point summary */}
@@ -170,8 +195,17 @@ export const NeedsManualReplyView: React.FC<NeedsManualReplyViewProps> = ({
               <div className="pt-4 mt-4 border-t border-slate-100 flex items-center justify-between gap-2">
                 <div className="flex items-center gap-2">
                   <button
+                    onClick={() => onOpenManualReply?.(lead)}
+                    className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-white bg-red-600 hover:bg-red-700 rounded-lg shadow-2xs transition-colors cursor-pointer"
+                    title="Write manual reply with CC"
+                  >
+                    <Reply className="w-3.5 h-3.5" />
+                    <span>Reply</span>
+                  </button>
+
+                  <button
                     onClick={() => onSelectLead(lead)}
-                    className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-red-700 bg-red-50 hover:bg-red-100 rounded-lg transition-colors"
+                    className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-red-700 bg-red-50 hover:bg-red-100 rounded-lg transition-colors cursor-pointer"
                   >
                     <Eye className="w-3.5 h-3.5" />
                     <span>View Email Thread</span>

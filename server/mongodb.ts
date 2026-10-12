@@ -27,7 +27,10 @@ export const COLLECTIONS = {
   AUTH_LOCKOUTS: 'auth_lockouts',
   USER_WORKSPACE_NOTES: 'user_workspace_notes',
   USER_ALERT_STATES: 'user_alert_states',
-  TEMPLATE_SETS: 'templateSets'
+  TEMPLATE_SETS: 'templateSets',
+  SENT_EMAILS: 'sent_emails',
+  MANUAL_REPLY_DRAFTS: 'manual_reply_drafts',
+  USER_RECENT_CC: 'user_recent_cc'
 } as const;
 
 export interface MongoStatusInfo {

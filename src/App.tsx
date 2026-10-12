@@ -71,6 +71,7 @@ import { ImportLeadsModal } from './components/ImportLeadsModal';
 import { SettingsModal } from './components/SettingsModal';
 import { ConfirmationModal } from './components/ConfirmationModal';
 import { NotificationHub, AppActionLog } from './components/NotificationHub';
+import { ManualReplyModal } from './components/ManualReplyModal';
 
 
 // Icons
@@ -395,6 +396,7 @@ export default function App() {
   const [leadsCampaignFilter, setLeadsCampaignFilter] = useState<string>('ALL');
   const [trackingEvents, setTrackingEvents] = useState<TrackingEvent[]>([]);
   const [selectedLead, setSelectedLead] = useState<Lead | null>(null);
+  const [replyModalLead, setReplyModalLead] = useState<Lead | null>(null);
   const [isLeadDetailOpen, setIsLeadDetailOpen] = useState(false);
   const [isSchedulerOpen, setIsSchedulerOpen] = useState(false);
   const [isConnectSheetOpen, setIsConnectSheetOpen] = useState(false);
@@ -2134,6 +2136,7 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
                 onSelectLead={handleSelectLead}
                 onUpdateStatus={handleUpdateLeadStatus}
                 onOverrideSentiment={handleOverrideSentiment}
+                onOpenManualReply={(lead) => setReplyModalLead(lead)}
               />
             } 
           />
@@ -2234,7 +2237,28 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
         onResumeCompanyLeads={handleResumeCompanyLeads}
         onConfirmCompanyPause={handleConfirmCompanyPause}
         campaigns={workflows}
+        onOpenManualReply={(lead) => setReplyModalLead(lead)}
       />
+
+      {/* Manual Reply Compose Modal */}
+      {replyModalLead && (
+        <ManualReplyModal
+          lead={replyModalLead}
+          isOpen={Boolean(replyModalLead)}
+          onClose={() => setReplyModalLead(null)}
+          onReplySent={(updatedLead) => {
+            setLeads(prev => prev.map(l => l.leadId === updatedLead.leadId ? { ...l, ...updatedLead } : l));
+            if (selectedLead?.leadId === updatedLead.leadId) {
+              setSelectedLead(prev => prev ? { ...prev, ...updatedLead } : null);
+            }
+            logAppAction('email_sent', 'Manual Reply Sent', `Manual reply sent to ${updatedLead.name} (${updatedLead.email})`);
+            showToast(`Manual reply sent to ${updatedLead.name}!`, 'success');
+          }}
+          currentUser={currentUser}
+          adminHeader={settings.emailHeader}
+          adminFooter={settings.emailFooter}
+        />
+      )}
 
       {/* Campaign Sequencing Runner Modal */}
       <CampaignSchedulerModal

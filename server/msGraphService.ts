@@ -1003,3 +1003,162 @@ export async function processGraphWebhookNotification(notification: any) {
   return replyResult;
 }
 
+export interface SendManualReplyEmailParams {
+  lead: {
+    leadId: string;
+    email: string;
+    name?: string;
+    firstName?: string;
+    threadId?: string;
+  };
+  subject: string;
+  finalHtmlBody: string;
+  cc?: string[];
+  senderDisplayName?: string;
+}
+
+export interface SendManualReplyEmailResult {
+  success: boolean;
+  messageId: string;
+  threadId: string;
+  timestamp: string;
+  to: string;
+  cc: string[];
+  subject: string;
+  bodyHtml: string;
+  headers?: Record<string, string>;
+  statusCode: number;
+  simulated?: boolean;
+}
+
+/**
+ * Sends a manual reply email via Microsoft Graph API using the service account mailbox.
+ * Supports CC recipients and maintains conversation threading headers.
+ */
+export async function sendManualReplyEmail(params: SendManualReplyEmailParams): Promise<SendManualReplyEmailResult> {
+  const config = getGraphConfig();
+  const effectiveSenderName = params.senderDisplayName || config.displayName || 'Outreach Flow';
+  const cleanLeadEmail = params.lead.email.trim().toLowerCase();
+  const cleanCc = (params.cc || []).map(c => c.trim().toLowerCase()).filter(Boolean);
+
+  // If Microsoft Graph is not configured in this environment, provide development simulated send
+  if (!config.serviceAccount || !config.tenantId || !config.clientId) {
+    console.warn(
+      `[MS Graph] Notice: Microsoft Graph credentials not configured in environment. Using development simulated send for manual reply to ${cleanLeadEmail}.`
+    );
+    const simulatedMsgId = `dev-msg-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
+    const simulatedThreadId = params.lead.threadId || `conv-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
+    const simulatedHeaders: Record<string, string> = {
+      'In-Reply-To': `<prev-${simulatedThreadId}@giniiris.ai>`,
+      'References': `<prev-${simulatedThreadId}@giniiris.ai>`
+    };
+    return {
+      success: true,
+      messageId: simulatedMsgId,
+      threadId: simulatedThreadId,
+      timestamp: new Date().toISOString(),
+      to: cleanLeadEmail,
+      cc: cleanCc,
+      subject: params.subject,
+      bodyHtml: params.finalHtmlBody,
+      headers: simulatedHeaders,
+      statusCode: 200,
+      simulated: true
+    };
+  }
+
+  const token = await getAppAccessToken();
+  const endpoint = `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(config.serviceAccount)}/sendMail`;
+
+  const emailMessage: any = {
+    message: {
+      subject: params.subject,
+      body: {
+        contentType: 'HTML',
+        content: params.finalHtmlBody
+      },
+      toRecipients: [
+        {
+          emailAddress: {
+            address: cleanLeadEmail,
+            name: params.lead.name || params.lead.firstName || cleanLeadEmail.split('@')[0]
+          }
+        }
+      ],
+      from: {
+        emailAddress: {
+          address: config.serviceAccount,
+          name: effectiveSenderName
+        }
+      }
+    },
+    saveToSentItems: true
+  };
+
+  if (cleanCc.length > 0) {
+    emailMessage.message.ccRecipients = cleanCc.map(addr => ({
+      emailAddress: { address: addr }
+    }));
+  }
+
+  const headers: Record<string, string> = {};
+
+  // Threading headers
+  if (params.lead.threadId && !params.lead.threadId.startsWith('graph-conv-')) {
+    try {
+      const threadCheckUrl = `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(config.serviceAccount)}/messages?$filter=conversationId eq '${encodeURIComponent(params.lead.threadId)}'&$top=1&$orderby=sentDateTime desc&$select=id,internetMessageId,subject`;
+      const threadRes = await fetch(threadCheckUrl, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (threadRes.ok) {
+        const threadData = await threadRes.json();
+        const prevMsg = threadData.value?.[0];
+        if (prevMsg?.internetMessageId) {
+          headers['In-Reply-To'] = prevMsg.internetMessageId;
+          headers['References'] = prevMsg.internetMessageId;
+          emailMessage.message.internetMessageHeaders = [
+            { name: 'In-Reply-To', value: prevMsg.internetMessageId },
+            { name: 'References', value: prevMsg.internetMessageId }
+          ];
+        }
+      }
+    } catch (e) {
+      console.warn('[MS Graph] Could not fetch previous message in conversation for manual reply headers:', e);
+    }
+  }
+
+  const response = await fetch(endpoint, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify(emailMessage)
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    let parsedErr: any;
+    try {
+      parsedErr = JSON.parse(errorText);
+    } catch {
+      parsedErr = { error: { message: errorText } };
+    }
+    const msg = parsedErr.error?.message || `HTTP ${response.status} ${response.statusText}`;
+    throw new Error(`Microsoft Graph sendMail failed (${response.status}): ${msg}`);
+  }
+
+  return {
+    success: true,
+    messageId: `graph-msg-${Date.now()}`,
+    threadId: params.lead.threadId || `conv-${Date.now()}`,
+    timestamp: new Date().toISOString(),
+    to: cleanLeadEmail,
+    cc: cleanCc,
+    subject: params.subject,
+    bodyHtml: params.finalHtmlBody,
+    headers,
+    statusCode: 200
+  };
+}
+

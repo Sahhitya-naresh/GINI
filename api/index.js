@@ -1593,7 +1593,10 @@ var init_mongodb = __esm({
       AUTH_LOCKOUTS: "auth_lockouts",
       USER_WORKSPACE_NOTES: "user_workspace_notes",
       USER_ALERT_STATES: "user_alert_states",
-      TEMPLATE_SETS: "templateSets"
+      TEMPLATE_SETS: "templateSets",
+      SENT_EMAILS: "sent_emails",
+      MANUAL_REPLY_DRAFTS: "manual_reply_drafts",
+      USER_RECENT_CC: "user_recent_cc"
     };
     state = global.__mongoGlobalState || {
       client: null,
@@ -3053,16 +3056,18 @@ async function recordTrackingEvent(event) {
       filterConditions.push({ email: event.email });
     }
     if (filterConditions.length > 0) {
-      const updateDoc = {
-        $set: {
-          updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
-          ...event.type === "open" ? { lastOpenedDate: event.timestamp } : { lastClickedDate: event.timestamp }
-        },
-        $inc: {
-          ...event.type === "open" ? { opensCount: 1 } : { clicksCount: 1 }
-        }
-      };
-      await leadsCol.updateOne({ $or: filterConditions }, updateDoc);
+      if (event.type === "open" || event.type === "click") {
+        const updateDoc = {
+          $set: {
+            updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+            ...event.type === "open" ? { lastOpenedDate: event.timestamp } : { lastClickedDate: event.timestamp }
+          },
+          $inc: {
+            ...event.type === "open" ? { opensCount: 1 } : { clicksCount: 1 }
+          }
+        };
+        await leadsCol.updateOne({ $or: filterConditions }, updateDoc);
+      }
     }
   } catch (leadUpdateErr) {
     console.warn("Could not update lead engagement counters on tracking event:", leadUpdateErr);
@@ -4585,6 +4590,121 @@ async function processGraphWebhookNotification(notification) {
   });
   return replyResult;
 }
+async function sendManualReplyEmail(params) {
+  const config = getGraphConfig();
+  const effectiveSenderName = params.senderDisplayName || config.displayName || "Outreach Flow";
+  const cleanLeadEmail = params.lead.email.trim().toLowerCase();
+  const cleanCc = (params.cc || []).map((c) => c.trim().toLowerCase()).filter(Boolean);
+  if (!config.serviceAccount || !config.tenantId || !config.clientId) {
+    console.warn(
+      `[MS Graph] Notice: Microsoft Graph credentials not configured in environment. Using development simulated send for manual reply to ${cleanLeadEmail}.`
+    );
+    const simulatedMsgId = `dev-msg-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
+    const simulatedThreadId = params.lead.threadId || `conv-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
+    const simulatedHeaders = {
+      "In-Reply-To": `<prev-${simulatedThreadId}@giniiris.ai>`,
+      "References": `<prev-${simulatedThreadId}@giniiris.ai>`
+    };
+    return {
+      success: true,
+      messageId: simulatedMsgId,
+      threadId: simulatedThreadId,
+      timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+      to: cleanLeadEmail,
+      cc: cleanCc,
+      subject: params.subject,
+      bodyHtml: params.finalHtmlBody,
+      headers: simulatedHeaders,
+      statusCode: 200,
+      simulated: true
+    };
+  }
+  const token = await getAppAccessToken();
+  const endpoint = `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(config.serviceAccount)}/sendMail`;
+  const emailMessage = {
+    message: {
+      subject: params.subject,
+      body: {
+        contentType: "HTML",
+        content: params.finalHtmlBody
+      },
+      toRecipients: [
+        {
+          emailAddress: {
+            address: cleanLeadEmail,
+            name: params.lead.name || params.lead.firstName || cleanLeadEmail.split("@")[0]
+          }
+        }
+      ],
+      from: {
+        emailAddress: {
+          address: config.serviceAccount,
+          name: effectiveSenderName
+        }
+      }
+    },
+    saveToSentItems: true
+  };
+  if (cleanCc.length > 0) {
+    emailMessage.message.ccRecipients = cleanCc.map((addr) => ({
+      emailAddress: { address: addr }
+    }));
+  }
+  const headers = {};
+  if (params.lead.threadId && !params.lead.threadId.startsWith("graph-conv-")) {
+    try {
+      const threadCheckUrl = `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(config.serviceAccount)}/messages?$filter=conversationId eq '${encodeURIComponent(params.lead.threadId)}'&$top=1&$orderby=sentDateTime desc&$select=id,internetMessageId,subject`;
+      const threadRes = await fetch(threadCheckUrl, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (threadRes.ok) {
+        const threadData = await threadRes.json();
+        const prevMsg = threadData.value?.[0];
+        if (prevMsg?.internetMessageId) {
+          headers["In-Reply-To"] = prevMsg.internetMessageId;
+          headers["References"] = prevMsg.internetMessageId;
+          emailMessage.message.internetMessageHeaders = [
+            { name: "In-Reply-To", value: prevMsg.internetMessageId },
+            { name: "References", value: prevMsg.internetMessageId }
+          ];
+        }
+      }
+    } catch (e) {
+      console.warn("[MS Graph] Could not fetch previous message in conversation for manual reply headers:", e);
+    }
+  }
+  const response = await fetch(endpoint, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(emailMessage)
+  });
+  if (!response.ok) {
+    const errorText = await response.text();
+    let parsedErr;
+    try {
+      parsedErr = JSON.parse(errorText);
+    } catch {
+      parsedErr = { error: { message: errorText } };
+    }
+    const msg = parsedErr.error?.message || `HTTP ${response.status} ${response.statusText}`;
+    throw new Error(`Microsoft Graph sendMail failed (${response.status}): ${msg}`);
+  }
+  return {
+    success: true,
+    messageId: `graph-msg-${Date.now()}`,
+    threadId: params.lead.threadId || `conv-${Date.now()}`,
+    timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+    to: cleanLeadEmail,
+    cc: cleanCc,
+    subject: params.subject,
+    bodyHtml: params.finalHtmlBody,
+    headers,
+    statusCode: 200
+  };
+}
 
 // server/runnerBackend.ts
 init_templateBackend();
@@ -5215,7 +5335,8 @@ var ROLE_PERMISSIONS = {
     "templates.editAny",
     "templates.editDefault",
     "templates.editHeaderFooter",
-    "settings.edit"
+    "settings.edit",
+    "emails.replyManual"
   ],
   user: [
     "leads.create",
@@ -5223,7 +5344,8 @@ var ROLE_PERMISSIONS = {
     "campaigns.create",
     "campaigns.run",
     "campaigns.editOwn",
-    "templates.editOwn"
+    "templates.editOwn",
+    "emails.replyManual"
   ]
 };
 function getPermissionsForRole(role) {
@@ -6614,6 +6736,257 @@ app.post("/api/email/send-stage", async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 });
+app.post("/api/email/manual-reply", requirePermission("emails.replyManual"), async (req, res) => {
+  try {
+    const { leadId, subject, bodyHtml, cc, confirmNegativeReply } = req.body || {};
+    if (!leadId) {
+      return res.status(400).json({ success: false, error: "leadId is required" });
+    }
+    const db = await getDb().catch(() => null);
+    if (!db) return res.status(500).json({ success: false, error: "Database unavailable" });
+    const cleanLeadId = String(leadId).trim();
+    const leadDoc = await db.collection(COLLECTIONS.LEADS).findOne({ leadId: cleanLeadId });
+    if (!leadDoc) {
+      return res.status(404).json({ success: false, error: "Lead not found" });
+    }
+    if (req.user && req.user.role !== "admin" && leadDoc.ownerId && leadDoc.ownerId !== req.user.id) {
+      return res.status(404).json({ success: false, error: "Lead not found" });
+    }
+    if (leadDoc.status === "Negative Reply" && !confirmNegativeReply) {
+      return res.status(400).json({
+        success: false,
+        error: "Explicit confirmation required to email a prospect with Negative Reply status"
+      });
+    }
+    if (typeof subject !== "string" || !subject.trim()) {
+      return res.status(400).json({ success: false, error: "Subject is required" });
+    }
+    if (typeof bodyHtml !== "string") {
+      return res.status(400).json({ success: false, error: "bodyHtml is required" });
+    }
+    const strippedBody = stripHtmlTags(bodyHtml).trim();
+    if (!strippedBody) {
+      return res.status(400).json({ success: false, error: "Body text is required" });
+    }
+    if (bodyHtml.length > 1e5) {
+      return res.status(400).json({ success: false, error: "Body exceeds maximum allowed size (100KB)" });
+    }
+    let rawCc = [];
+    if (cc !== void 0 && cc !== null) {
+      if (!Array.isArray(cc)) {
+        return res.status(400).json({ success: false, error: "cc must be an array of email strings" });
+      }
+      rawCc = cc;
+    }
+    if (rawCc.length > 10) {
+      return res.status(400).json({ success: false, error: "Maximum 10 CC recipients allowed" });
+    }
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    const validatedCc = [];
+    const leadLowerEmail = leadDoc.email.trim().toLowerCase();
+    for (const item of rawCc) {
+      if (typeof item !== "string") {
+        return res.status(400).json({ success: false, error: "All CC entries must be valid email strings" });
+      }
+      const trimmed = item.trim().toLowerCase();
+      if (!trimmed || !emailRegex.test(trimmed)) {
+        return res.status(400).json({ success: false, error: `Invalid CC email format: ${item}` });
+      }
+      if (trimmed === leadLowerEmail) {
+        return res.status(400).json({ success: false, error: "CC cannot contain the lead's own email address" });
+      }
+      if (validatedCc.includes(trimmed)) {
+        return res.status(400).json({ success: false, error: `Duplicate CC address: ${trimmed}` });
+      }
+      validatedCc.push(trimmed);
+    }
+    const settings = await loadLocalSettings().catch(() => null);
+    const serverHeader = settings?.emailHeader || "";
+    const serverFooter = settings?.emailFooter || "";
+    const senderDisplayName = req.user?.name || "Outreach Flow";
+    const composed = composeFullEmail({
+      bodyHtml: sanitizeHtml(bodyHtml),
+      headerHtml: serverHeader,
+      footerHtml: serverFooter,
+      lead: leadDoc,
+      senderDisplayName,
+      embedTrackingPixel: false
+    });
+    const sendResult = await sendManualReplyEmail({
+      lead: leadDoc,
+      subject: subject.trim(),
+      finalHtmlBody: composed.composedHtml,
+      cc: validatedCc,
+      senderDisplayName
+    });
+    const nowIso = (/* @__PURE__ */ new Date()).toISOString();
+    const config = getGraphConfig();
+    const senderAddress = config.serviceAccount || "care@giniiris.ai";
+    const sentEmailDoc = {
+      id: sendResult.messageId || `sent-manual-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+      leadId: leadDoc.leadId,
+      leadEmail: leadDoc.email.toLowerCase(),
+      threadId: leadDoc.threadId || sendResult.threadId || "",
+      from: `"${senderDisplayName}" <${senderAddress}>`,
+      to: leadDoc.email,
+      cc: validatedCc,
+      subject: subject.trim(),
+      bodyHtml: composed.composedHtml,
+      bodyText: stripHtmlTags(composed.composedHtml),
+      snippet: strippedBody.substring(0, 160),
+      date: nowIso,
+      sentBy: { id: req.user.id, name: req.user.name, email: req.user.email },
+      sentAt: nowIso,
+      isManualReply: true,
+      isFromLead: false
+    };
+    await db.collection(COLLECTIONS.SENT_EMAILS).updateOne(
+      { id: sentEmailDoc.id },
+      { $set: sentEmailDoc },
+      { upsert: true }
+    ).catch(() => {
+    });
+    await recordTrackingEvent({
+      id: `evt-manual-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      leadId: leadDoc.leadId,
+      campaign: leadDoc.campaign || "Default",
+      stage: leadDoc.currentStage || 1,
+      type: "manual_reply_sent",
+      timestamp: nowIso,
+      email: leadDoc.email,
+      metadata: {
+        subject: subject.trim(),
+        cc: validatedCc,
+        sentBy: req.user.name || req.user.email
+      }
+    }).catch(() => {
+    });
+    const replyNote = `[Manual reply sent by ${req.user.name || req.user.email} on ${(/* @__PURE__ */ new Date()).toLocaleDateString()}]`;
+    const updatedNotes = leadDoc.notes ? `${leadDoc.notes}
+${replyNote}` : replyNote;
+    const threadIdToKeep = leadDoc.threadId || sendResult.threadId || "";
+    await db.collection(COLLECTIONS.LEADS).updateOne(
+      { leadId: leadDoc.leadId },
+      {
+        $set: {
+          lastManualReplyAt: nowIso,
+          lastManualReplyBy: { id: req.user.id, name: req.user.name, email: req.user.email },
+          hasUnreadReply: false,
+          notes: updatedNotes,
+          threadId: threadIdToKeep,
+          updatedAt: nowIso
+        }
+      }
+    );
+    if (validatedCc.length > 0) {
+      await db.collection(COLLECTIONS.USER_RECENT_CC).updateOne(
+        { userId: req.user.id },
+        {
+          $addToSet: { recentCc: { $each: validatedCc } },
+          $set: { updatedAt: nowIso }
+        },
+        { upsert: true }
+      ).catch(() => {
+      });
+    }
+    await db.collection(COLLECTIONS.MANUAL_REPLY_DRAFTS).deleteOne({
+      userId: req.user.id,
+      leadId: leadDoc.leadId
+    }).catch(() => {
+    });
+    const updatedLead = {
+      ...leadDoc,
+      lastManualReplyAt: nowIso,
+      lastManualReplyBy: { id: req.user.id, name: req.user.name, email: req.user.email },
+      hasUnreadReply: false,
+      notes: updatedNotes,
+      threadId: threadIdToKeep,
+      updatedAt: nowIso
+    };
+    res.json({
+      success: true,
+      messageId: sendResult.messageId,
+      threadId: threadIdToKeep,
+      sentEmail: sentEmailDoc,
+      lead: updatedLead,
+      simulatedPayload: sendResult.simulated ? {
+        recipient: leadDoc.email,
+        ccRecipients: validatedCc,
+        subject: subject.trim(),
+        headers: sendResult.headers,
+        finalHtml: composed.composedHtml
+      } : void 0
+    });
+  } catch (err) {
+    console.error("API /api/email/manual-reply error:", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+app.get("/api/email/manual-reply/draft", requireAuth, async (req, res) => {
+  try {
+    const leadId = req.query.leadId || "";
+    if (!leadId) return res.status(400).json({ success: false, error: "leadId is required" });
+    const db = await getDb().catch(() => null);
+    if (!db) return res.status(500).json({ success: false, error: "Database unavailable" });
+    const draft = await db.collection(COLLECTIONS.MANUAL_REPLY_DRAFTS).findOne({
+      userId: req.user.id,
+      leadId: leadId.trim()
+    });
+    res.json({ success: true, draft: draft || null });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+app.post("/api/email/manual-reply/draft", requireAuth, async (req, res) => {
+  try {
+    const { leadId, subject, bodyHtml, cc } = req.body || {};
+    if (!leadId) return res.status(400).json({ success: false, error: "leadId is required" });
+    const db = await getDb().catch(() => null);
+    if (!db) return res.status(500).json({ success: false, error: "Database unavailable" });
+    await db.collection(COLLECTIONS.MANUAL_REPLY_DRAFTS).updateOne(
+      { userId: req.user.id, leadId: String(leadId).trim() },
+      {
+        $set: {
+          userId: req.user.id,
+          leadId: String(leadId).trim(),
+          subject: subject || "",
+          bodyHtml: bodyHtml || "",
+          cc: Array.isArray(cc) ? cc : [],
+          updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+        }
+      },
+      { upsert: true }
+    );
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+app.delete("/api/email/manual-reply/draft", requireAuth, async (req, res) => {
+  try {
+    const leadId = req.query.leadId || "";
+    if (!leadId) return res.status(400).json({ success: false, error: "leadId is required" });
+    const db = await getDb().catch(() => null);
+    if (!db) return res.status(500).json({ success: false, error: "Database unavailable" });
+    await db.collection(COLLECTIONS.MANUAL_REPLY_DRAFTS).deleteOne({
+      userId: req.user.id,
+      leadId: leadId.trim()
+    });
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+app.get("/api/email/manual-reply/recent-cc", requireAuth, async (req, res) => {
+  try {
+    const db = await getDb().catch(() => null);
+    if (!db) return res.status(500).json({ success: false, error: "Database unavailable" });
+    const doc = await db.collection(COLLECTIONS.USER_RECENT_CC).findOne({ userId: req.user.id });
+    res.json({ success: true, recentCc: doc?.recentCc || [] });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
 app.get("/api/template-sets/default", requireAuth, async (_req, res) => {
   try {
     const defaultSet = await getDefaultTemplateSet();
@@ -6934,12 +7307,15 @@ app.get("/api/email/thread", async (req, res) => {
         threadId: sent.threadId || threadId,
         from: sent.from || "You <care@giniiris.ai>",
         to: sent.to || cleanEmail,
+        cc: sent.cc || [],
         date: sent.date,
         subject: sent.subject,
         snippet: sent.snippet || stripHtmlTags(sent.bodyHtml),
         bodyHtml: sent.bodyHtml,
         bodyText: sent.bodyText || stripHtmlTags(sent.bodyHtml),
-        isFromLead: false
+        isFromLead: false,
+        isManualReply: Boolean(sent.isManualReply),
+        sentBy: sent.sentBy
       });
     }
     for (const inb of inboundReplies) {

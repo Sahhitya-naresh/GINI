@@ -65,9 +65,10 @@ import {
   verifyWebhookClientState,
   createGraphWebhookSubscription,
   renewExpiringGraphSubscriptions,
-  processGraphWebhookNotification
+  processGraphWebhookNotification,
+  sendManualReplyEmail
 } from './msGraphService.ts';
-import { getAuthDiagnostics } from './msGraphAuth.ts';
+import { getAuthDiagnostics, getGraphConfig } from './msGraphAuth.ts';
 import { getPublicBaseUrl } from './urlHelper.ts';
 import { renderEmailMergeTags, DEFAULT_STAGE_TEMPLATES } from '../src/data/defaultTemplates.ts';
 import {
@@ -1387,6 +1388,313 @@ app.post('/api/email/send-stage', async (req, res) => {
 });
 
 // ===========================================================================
+// MANUAL REPLY & CC EMAIL ENDPOINTS
+// ===========================================================================
+
+app.post('/api/email/manual-reply', requirePermission('emails.replyManual'), async (req, res) => {
+  try {
+    const { leadId, subject, bodyHtml, cc, confirmNegativeReply } = req.body || {};
+
+    if (!leadId) {
+      return res.status(400).json({ success: false, error: 'leadId is required' });
+    }
+
+    const db = await getDb().catch(() => null);
+    if (!db) return res.status(500).json({ success: false, error: 'Database unavailable' });
+
+    const cleanLeadId = String(leadId).trim();
+    const leadDoc = (await db.collection(COLLECTIONS.LEADS).findOne({ leadId: cleanLeadId })) as (BackendLead | null);
+
+    if (!leadDoc) {
+      return res.status(404).json({ success: false, error: 'Lead not found' });
+    }
+
+    // Verify ownership BEFORE calling Microsoft Graph
+    if (req.user && req.user.role !== 'admin' && leadDoc.ownerId && leadDoc.ownerId !== req.user.id) {
+      return res.status(404).json({ success: false, error: 'Lead not found' });
+    }
+
+    // Negative Reply confirmation check
+    if (leadDoc.status === 'Negative Reply' && !confirmNegativeReply) {
+      return res.status(400).json({
+        success: false,
+        error: 'Explicit confirmation required to email a prospect with Negative Reply status'
+      });
+    }
+
+    // Subject validation
+    if (typeof subject !== 'string' || !subject.trim()) {
+      return res.status(400).json({ success: false, error: 'Subject is required' });
+    }
+
+    // Body validation
+    if (typeof bodyHtml !== 'string') {
+      return res.status(400).json({ success: false, error: 'bodyHtml is required' });
+    }
+    const strippedBody = stripHtmlTags(bodyHtml).trim();
+    if (!strippedBody) {
+      return res.status(400).json({ success: false, error: 'Body text is required' });
+    }
+    if (bodyHtml.length > 100000) {
+      return res.status(400).json({ success: false, error: 'Body exceeds maximum allowed size (100KB)' });
+    }
+
+    // CC validation
+    let rawCc: any[] = [];
+    if (cc !== undefined && cc !== null) {
+      if (!Array.isArray(cc)) {
+        return res.status(400).json({ success: false, error: 'cc must be an array of email strings' });
+      }
+      rawCc = cc;
+    }
+
+    if (rawCc.length > 10) {
+      return res.status(400).json({ success: false, error: 'Maximum 10 CC recipients allowed' });
+    }
+
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    const validatedCc: string[] = [];
+    const leadLowerEmail = leadDoc.email.trim().toLowerCase();
+
+    for (const item of rawCc) {
+      if (typeof item !== 'string') {
+        return res.status(400).json({ success: false, error: 'All CC entries must be valid email strings' });
+      }
+      const trimmed = item.trim().toLowerCase();
+      if (!trimmed || !emailRegex.test(trimmed)) {
+        return res.status(400).json({ success: false, error: `Invalid CC email format: ${item}` });
+      }
+      if (trimmed === leadLowerEmail) {
+        return res.status(400).json({ success: false, error: "CC cannot contain the lead's own email address" });
+      }
+      if (validatedCc.includes(trimmed)) {
+        return res.status(400).json({ success: false, error: `Duplicate CC address: ${trimmed}` });
+      }
+      validatedCc.push(trimmed);
+    }
+
+    // Load server settings for admin header and footer (ignore any client-provided header/footer)
+    const settings = await loadLocalSettings().catch(() => null);
+    const serverHeader = settings?.emailHeader || '';
+    const serverFooter = settings?.emailFooter || '';
+    const senderDisplayName = req.user?.name || 'Outreach Flow';
+
+    // Compose WITHOUT tracking pixel and WITHOUT link tracking wrapping (no baseUrl, embedTrackingPixel: false)
+    const composed = composeFullEmail({
+      bodyHtml: sanitizeHtml(bodyHtml),
+      headerHtml: serverHeader,
+      footerHtml: serverFooter,
+      lead: leadDoc,
+      senderDisplayName,
+      embedTrackingPixel: false
+    });
+
+    // Send via Microsoft Graph or dev simulation
+    const sendResult = await sendManualReplyEmail({
+      lead: leadDoc,
+      subject: subject.trim(),
+      finalHtmlBody: composed.composedHtml,
+      cc: validatedCc,
+      senderDisplayName
+    });
+
+    const nowIso = new Date().toISOString();
+    const config = getGraphConfig();
+    const senderAddress = config.serviceAccount || 'care@giniiris.ai';
+
+    // Record to sent_emails collection
+    const sentEmailDoc = {
+      id: sendResult.messageId || `sent-manual-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+      leadId: leadDoc.leadId,
+      leadEmail: leadDoc.email.toLowerCase(),
+      threadId: leadDoc.threadId || sendResult.threadId || '',
+      from: `"${senderDisplayName}" <${senderAddress}>`,
+      to: leadDoc.email,
+      cc: validatedCc,
+      subject: subject.trim(),
+      bodyHtml: composed.composedHtml,
+      bodyText: stripHtmlTags(composed.composedHtml),
+      snippet: strippedBody.substring(0, 160),
+      date: nowIso,
+      sentBy: { id: req.user.id, name: req.user.name, email: req.user.email },
+      sentAt: nowIso,
+      isManualReply: true,
+      isFromLead: false
+    };
+
+    await db.collection(COLLECTIONS.SENT_EMAILS).updateOne(
+      { id: sentEmailDoc.id },
+      { $set: sentEmailDoc },
+      { upsert: true }
+    ).catch(() => {});
+
+    // Record Activity Hub tracking event
+    await recordTrackingEvent({
+      id: `evt-manual-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      leadId: leadDoc.leadId,
+      campaign: leadDoc.campaign || 'Default',
+      stage: leadDoc.currentStage || 1,
+      type: 'manual_reply_sent',
+      timestamp: nowIso,
+      email: leadDoc.email,
+      metadata: {
+        subject: subject.trim(),
+        cc: validatedCc,
+        sentBy: req.user.name || req.user.email
+      }
+    }).catch(() => {});
+
+    // Update lead in MongoDB (status remains Replied, currentStage unchanged, clear hasUnreadReply)
+    const replyNote = `[Manual reply sent by ${req.user.name || req.user.email} on ${new Date().toLocaleDateString()}]`;
+    const updatedNotes = leadDoc.notes ? `${leadDoc.notes}\n${replyNote}` : replyNote;
+    const threadIdToKeep = leadDoc.threadId || sendResult.threadId || '';
+
+    await db.collection(COLLECTIONS.LEADS).updateOne(
+      { leadId: leadDoc.leadId },
+      {
+        $set: {
+          lastManualReplyAt: nowIso,
+          lastManualReplyBy: { id: req.user.id, name: req.user.name, email: req.user.email },
+          hasUnreadReply: false,
+          notes: updatedNotes,
+          threadId: threadIdToKeep,
+          updatedAt: nowIso
+        }
+      }
+    );
+
+    // Save user's recent CC list in MongoDB
+    if (validatedCc.length > 0) {
+      await db.collection(COLLECTIONS.USER_RECENT_CC).updateOne(
+        { userId: req.user.id },
+        {
+          $addToSet: { recentCc: { $each: validatedCc } },
+          $set: { updatedAt: nowIso }
+        },
+        { upsert: true }
+      ).catch(() => {});
+    }
+
+    // Clear draft
+    await db.collection(COLLECTIONS.MANUAL_REPLY_DRAFTS).deleteOne({
+      userId: req.user.id,
+      leadId: leadDoc.leadId
+    }).catch(() => {});
+
+    const updatedLead: BackendLead = {
+      ...leadDoc,
+      lastManualReplyAt: nowIso,
+      lastManualReplyBy: { id: req.user.id, name: req.user.name, email: req.user.email },
+      hasUnreadReply: false,
+      notes: updatedNotes,
+      threadId: threadIdToKeep,
+      updatedAt: nowIso
+    };
+
+    res.json({
+      success: true,
+      messageId: sendResult.messageId,
+      threadId: threadIdToKeep,
+      sentEmail: sentEmailDoc,
+      lead: updatedLead,
+      simulatedPayload: sendResult.simulated ? {
+        recipient: leadDoc.email,
+        ccRecipients: validatedCc,
+        subject: subject.trim(),
+        headers: sendResult.headers,
+        finalHtml: composed.composedHtml
+      } : undefined
+    });
+  } catch (err: any) {
+    console.error('API /api/email/manual-reply error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 1. Get manual reply draft
+app.get('/api/email/manual-reply/draft', requireAuth, async (req, res) => {
+  try {
+    const leadId = (req.query.leadId as string) || '';
+    if (!leadId) return res.status(400).json({ success: false, error: 'leadId is required' });
+
+    const db = await getDb().catch(() => null);
+    if (!db) return res.status(500).json({ success: false, error: 'Database unavailable' });
+
+    const draft = await db.collection(COLLECTIONS.MANUAL_REPLY_DRAFTS).findOne({
+      userId: req.user.id,
+      leadId: leadId.trim()
+    });
+
+    res.json({ success: true, draft: draft || null });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 2. Save manual reply draft
+app.post('/api/email/manual-reply/draft', requireAuth, async (req, res) => {
+  try {
+    const { leadId, subject, bodyHtml, cc } = req.body || {};
+    if (!leadId) return res.status(400).json({ success: false, error: 'leadId is required' });
+
+    const db = await getDb().catch(() => null);
+    if (!db) return res.status(500).json({ success: false, error: 'Database unavailable' });
+
+    await db.collection(COLLECTIONS.MANUAL_REPLY_DRAFTS).updateOne(
+      { userId: req.user.id, leadId: String(leadId).trim() },
+      {
+        $set: {
+          userId: req.user.id,
+          leadId: String(leadId).trim(),
+          subject: subject || '',
+          bodyHtml: bodyHtml || '',
+          cc: Array.isArray(cc) ? cc : [],
+          updatedAt: new Date().toISOString()
+        }
+      },
+      { upsert: true }
+    );
+
+    res.json({ success: true });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 3. Delete manual reply draft
+app.delete('/api/email/manual-reply/draft', requireAuth, async (req, res) => {
+  try {
+    const leadId = (req.query.leadId as string) || '';
+    if (!leadId) return res.status(400).json({ success: false, error: 'leadId is required' });
+
+    const db = await getDb().catch(() => null);
+    if (!db) return res.status(500).json({ success: false, error: 'Database unavailable' });
+
+    await db.collection(COLLECTIONS.MANUAL_REPLY_DRAFTS).deleteOne({
+      userId: req.user.id,
+      leadId: leadId.trim()
+    });
+
+    res.json({ success: true });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 4. Get user's recent CC list
+app.get('/api/email/manual-reply/recent-cc', requireAuth, async (req, res) => {
+  try {
+    const db = await getDb().catch(() => null);
+    if (!db) return res.status(500).json({ success: false, error: 'Database unavailable' });
+
+    const doc = await db.collection(COLLECTIONS.USER_RECENT_CC).findOne({ userId: req.user.id });
+    res.json({ success: true, recentCc: doc?.recentCc || [] });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ===========================================================================
 // TEMPLATE SETS & EMAIL HEADER / FOOTER ENDPOINTS
 // ===========================================================================
 
@@ -1810,12 +2118,15 @@ app.get('/api/email/thread', async (req, res) => {
         threadId: sent.threadId || threadId,
         from: sent.from || 'You <care@giniiris.ai>',
         to: sent.to || cleanEmail,
+        cc: sent.cc || [],
         date: sent.date,
         subject: sent.subject,
         snippet: sent.snippet || stripHtmlTags(sent.bodyHtml),
         bodyHtml: sent.bodyHtml,
         bodyText: sent.bodyText || stripHtmlTags(sent.bodyHtml),
-        isFromLead: false
+        isFromLead: false,
+        isManualReply: Boolean(sent.isManualReply),
+        sentBy: sent.sentBy
       });
     }
 

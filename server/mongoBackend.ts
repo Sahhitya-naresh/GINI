@@ -46,6 +46,12 @@ export interface BackendLead {
   lastModifiedBy?: string;
   sentBy?: string;
   templateSource?: 'campaign' | 'own';
+  lastManualReplyAt?: string;
+  lastManualReplyBy?: {
+    id?: string;
+    name?: string;
+    email?: string;
+  };
 
   // Sentiment and classification fields
   replySentiment?: 'positive' | 'negative' | 'neutral';
@@ -150,7 +156,7 @@ export interface BackendSettings {
 
 export interface TrackingEvent {
   id: string;
-  type: 'open' | 'click';
+  type: 'open' | 'click' | 'manual_reply_sent';
   leadId: string;
   email?: string;
   stage: number;
@@ -159,6 +165,7 @@ export interface TrackingEvent {
   targetUrl?: string;
   ip?: string;
   userAgent?: string;
+  metadata?: any;
 }
 
 // ---------------------------------------------------------------------------
@@ -1324,16 +1331,18 @@ export async function recordTrackingEvent(event: TrackingEvent): Promise<Trackin
       filterConditions.push({ email: event.email });
     }
     if (filterConditions.length > 0) {
-      const updateDoc: any = {
-        $set: {
-          updatedAt: new Date().toISOString(),
-          ...(event.type === 'open' ? { lastOpenedDate: event.timestamp } : { lastClickedDate: event.timestamp })
-        },
-        $inc: {
-          ...(event.type === 'open' ? { opensCount: 1 } : { clicksCount: 1 })
-        }
-      };
-      await leadsCol.updateOne({ $or: filterConditions }, updateDoc);
+      if (event.type === 'open' || event.type === 'click') {
+        const updateDoc: any = {
+          $set: {
+            updatedAt: new Date().toISOString(),
+            ...(event.type === 'open' ? { lastOpenedDate: event.timestamp } : { lastClickedDate: event.timestamp })
+          },
+          $inc: {
+            ...(event.type === 'open' ? { opensCount: 1 } : { clicksCount: 1 })
+          }
+        };
+        await leadsCol.updateOne({ $or: filterConditions }, updateDoc);
+      }
     }
   } catch (leadUpdateErr) {
     console.warn('Could not update lead engagement counters on tracking event:', leadUpdateErr);

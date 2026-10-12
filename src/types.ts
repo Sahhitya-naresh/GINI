@@ -57,6 +57,14 @@ export interface Lead {
   lastModifiedBy?: string;
   sentBy?: string;
   templateSource?: 'campaign' | 'own';
+
+  // Manual reply tracking
+  lastManualReplyAt?: string;
+  lastManualReplyBy?: {
+    id?: string;
+    name?: string;
+    email?: string;
+  };
 }
 
 // Senders Management
@@ -215,7 +223,7 @@ export interface TaskAlertItem {
 
 export interface TrackingEvent {
   id: string;
-  type: 'open' | 'click';
+  type: 'open' | 'click' | 'manual_reply_sent';
   leadId: string;
   stage: number;
   campaign?: string;
@@ -223,6 +231,7 @@ export interface TrackingEvent {
   targetUrl?: string;
   ip?: string;
   userAgent?: string;
+  metadata?: any;
 }
 
 export interface LeadTrackingStats {

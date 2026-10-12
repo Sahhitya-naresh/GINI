@@ -22,7 +22,8 @@ import {
   Info,
   Sparkles,
   RotateCcw,
-  FileText
+  FileText,
+  Reply
 } from 'lucide-react';
 import { Lead, StageTemplate, EmailThreadMessage, CampaignWorkflow } from '../types';
 import { getOutlookThread } from '../services/outlookService';
@@ -46,6 +47,7 @@ interface LeadDetailModalProps {
   onResumeCompanyLeads?: (lead: Lead) => void;
   onConfirmCompanyPause?: (lead: Lead) => void;
   campaigns?: CampaignWorkflow[];
+  onOpenManualReply?: (lead: Lead) => void;
 }
 
 export const LeadDetailModal: React.FC<LeadDetailModalProps> = ({
@@ -63,7 +65,8 @@ export const LeadDetailModal: React.FC<LeadDetailModalProps> = ({
   onOverrideSentiment,
   onResumeCompanyLeads,
   onConfirmCompanyPause,
-  campaigns = []
+  campaigns = [],
+  onOpenManualReply
 }) => {
   const [threadMessages, setThreadMessages] = useState<EmailThreadMessage[]>([]);
   const [isLoadingThread, setIsLoadingThread] = useState(false);
@@ -488,11 +491,21 @@ export const LeadDetailModal: React.FC<LeadDetailModalProps> = ({
               )}
 
               {lead.status === 'Replied' && (
-                <div className="p-3 bg-purple-50 border border-purple-200 rounded-lg text-xs text-purple-950 flex items-start gap-2">
-                  <CheckCircle2 className="w-4 h-4 text-purple-600 shrink-0 mt-0.5" />
-                  <div>
-                    <strong className="font-semibold">Automated sequence stopped:</strong> A reply was detected from {lead.name}. Please follow up manually in Outlook.
+                <div className="p-3.5 bg-amber-50/80 border border-amber-200 rounded-xl text-xs text-amber-950 space-y-2.5">
+                  <div className="flex items-start gap-2">
+                    <CheckCircle2 className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                    <div>
+                      <strong className="font-semibold text-amber-900">Automated sequence stopped:</strong> A reply was detected from {lead.name}.
+                    </div>
                   </div>
+                  <button
+                    type="button"
+                    onClick={() => onOpenManualReply?.(lead)}
+                    className="w-full flex items-center justify-center gap-2 py-2 px-3 text-xs font-bold text-white bg-red-600 hover:bg-red-700 active:bg-red-800 rounded-lg shadow-xs shadow-red-500/20 transition-all cursor-pointer"
+                  >
+                    <Reply className="w-3.5 h-3.5" />
+                    <span>Reply to {lead.name} (with CC)</span>
+                  </button>
                 </div>
               )}
 
