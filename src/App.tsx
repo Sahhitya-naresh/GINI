@@ -352,9 +352,18 @@ export default function App() {
     } finally {
       setCurrentUser(null);
       setAuthErrorMessage(null);
-      navigate('/leads');
+      navigate('/login', { replace: true });
     }
   }, [navigate]);
+
+  useEffect(() => {
+    if (isAuthChecking) return;
+    if (!currentUser && location.pathname !== '/login') {
+      navigate('/login', { replace: true });
+    } else if (currentUser && (location.pathname === '/login' || location.pathname === '/')) {
+      navigate('/leads', { replace: true });
+    }
+  }, [isAuthChecking, currentUser, location.pathname, navigate]);
 
   const currentTab = useMemo<'leads' | 'replied' | 'workflows' | 'tasks' | 'templates' | 'analytics' | 'users' | 'settings'>(() => {
     const segment = location.pathname.replace(/^\//, '').split('/')[0];
@@ -480,7 +489,7 @@ export default function App() {
       }).catch(() => {});
     }
 
-    setReplyAlertLeads([]);
+    setReplyAlertLeads(prev => prev.filter(l => !dismissIds.has(l.leadId) && (!l.email || !dismissIds.has(l.email.toLowerCase()))));
   }, []);
 
   const handleSelectLead = useCallback((lead: Lead) => {
@@ -585,7 +594,7 @@ export default function App() {
       }
 
       const alertId = `${t.id}:${state}`;
-      if (dismissedTaskAlerts.has(alertId)) {
+      if (dismissedTaskAlerts.has(alertId) || dismissedTaskAlerts.has(t.id)) {
         continue;
       }
 
@@ -611,6 +620,10 @@ export default function App() {
     setDismissedTaskAlerts(prev => {
       const next = new Set<string>(prev);
       next.add(alertId);
+      const parts = alertId.split(':');
+      if (parts.length > 1) {
+        next.add(parts[0]);
+      }
       saveDismissedTaskAlertsToStorage(next);
       return next;
     });
@@ -2019,6 +2032,7 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
         onLoginSuccess={(user) => {
           setCurrentUser(user);
           setAuthErrorMessage(null);
+          navigate('/leads', { replace: true });
         }}
         initialError={authErrorMessage}
         customLogoUrl={settings.customLogoUrl}

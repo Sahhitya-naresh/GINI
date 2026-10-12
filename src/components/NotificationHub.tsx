@@ -589,7 +589,10 @@ export const NotificationHub: React.FC<NotificationHubProps> = ({
                               return null;
                             })()}
                             <button
-                              onClick={() => onDismissTaskAlert?.(alert.id)}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                onDismissTaskAlert?.(alert.id);
+                              }}
                               className="text-[10px] text-slate-400 hover:text-slate-600 cursor-pointer"
                               title="Dismiss notification"
                             >
@@ -653,7 +656,10 @@ export const NotificationHub: React.FC<NotificationHubProps> = ({
                               Needs Reply Tab
                             </button>
                             <button
-                              onClick={() => onDismissReplyAlert(lead.leadId)}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                onDismissReplyAlert(lead.leadId || lead.email);
+                              }}
                               className="text-[10px] text-slate-400 hover:text-slate-600 cursor-pointer"
                               title="Dismiss notification"
                             >

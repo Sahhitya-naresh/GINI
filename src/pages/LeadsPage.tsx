@@ -382,16 +382,11 @@ export const LeadsTable: React.FC<LeadsTableProps> = ({
   return (
     <div className="space-y-3.5 w-full pb-8">
       
-      {/* Metric Stat Strips with Top Color Accent Lines - All 5 tabs aligned in the same single line on desktop */}
+      {/* Metric Stat Strips with Top Color Accent Lines - Non-clickable informational stat cards */}
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
         {/* Total Leads - Blue #1976D2 */}
         <div 
-          onClick={() => setStatusFilter('ALL')}
-          className={`relative overflow-hidden p-3.5 bg-white rounded-xl border transition-all cursor-pointer ${
-            statusFilter === 'ALL' 
-              ? 'border-[#1976D2] shadow-xs ring-1 ring-[#1976D2]' 
-              : 'border-slate-200 hover:border-[#1976D2]'
-          }`}
+          className="relative overflow-hidden p-3.5 bg-white rounded-xl border border-slate-200 shadow-2xs"
         >
           <div className="absolute top-0 inset-x-0 h-1 bg-[#1976D2]" />
           <span className="text-xs font-medium text-slate-500">Total Leads</span>
@@ -400,12 +395,7 @@ export const LeadsTable: React.FC<LeadsTableProps> = ({
 
         {/* Active Sequences - Green */}
         <div 
-          onClick={() => setStatusFilter('Active')}
-          className={`relative overflow-hidden p-3.5 bg-white rounded-xl border transition-all cursor-pointer ${
-            statusFilter === 'Active' 
-              ? 'border-emerald-500 shadow-xs ring-1 ring-emerald-500' 
-              : 'border-slate-200 hover:border-emerald-500'
-          }`}
+          className="relative overflow-hidden p-3.5 bg-white rounded-xl border border-slate-200 shadow-2xs"
         >
           <div className="absolute top-0 inset-x-0 h-1 bg-emerald-500" />
           <span className="text-xs font-medium text-slate-500">Active Sequences</span>
@@ -419,12 +409,7 @@ export const LeadsTable: React.FC<LeadsTableProps> = ({
 
         {/* Replies Detected - Amber */}
         <div 
-          onClick={() => setStatusFilter('Replied')}
-          className={`relative overflow-hidden p-3.5 bg-white rounded-xl border transition-all cursor-pointer ${
-            statusFilter === 'Replied' 
-              ? 'border-amber-500 shadow-xs ring-1 ring-amber-500' 
-              : 'border-slate-200 hover:border-amber-500'
-          }`}
+          className="relative overflow-hidden p-3.5 bg-white rounded-xl border border-slate-200 shadow-2xs"
         >
           <div className="absolute top-0 inset-x-0 h-1 bg-amber-500" />
           <span className="text-xs font-medium text-slate-500">Replies Detected</span>
@@ -438,12 +423,7 @@ export const LeadsTable: React.FC<LeadsTableProps> = ({
 
         {/* Negative Replies - Light Red Accent */}
         <div 
-          onClick={() => setStatusFilter('Negative Reply')}
-          className={`relative overflow-hidden p-3.5 bg-white rounded-xl border transition-all cursor-pointer ${
-            statusFilter === 'Negative Reply' 
-              ? 'border-red-400 shadow-xs ring-1 ring-red-400 bg-red-50/40' 
-              : 'border-slate-200 hover:border-red-300'
-          }`}
+          className="relative overflow-hidden p-3.5 bg-white rounded-xl border border-slate-200 shadow-2xs"
         >
           <div className="absolute top-0 inset-x-0 h-1 bg-red-500" />
           <span className="text-xs font-medium text-slate-500">Negative Replies</span>
@@ -461,12 +441,7 @@ export const LeadsTable: React.FC<LeadsTableProps> = ({
 
         {/* Paused Safety Overrides - Slate */}
         <div 
-          onClick={() => setStatusFilter('Paused')}
-          className={`relative overflow-hidden p-3.5 bg-white rounded-xl border transition-all cursor-pointer ${
-            statusFilter === 'Paused' 
-              ? 'border-slate-500 shadow-xs ring-1 ring-slate-500' 
-              : 'border-slate-200 hover:border-slate-400'
-          }`}
+          className="relative overflow-hidden p-3.5 bg-white rounded-xl border border-slate-200 shadow-2xs"
         >
           <div className="absolute top-0 inset-x-0 h-1 bg-slate-400" />
           <span className="text-xs font-medium text-slate-500">Paused Safety Overrides</span>
@@ -1045,24 +1020,10 @@ export const LeadsTable: React.FC<LeadsTableProps> = ({
         </div>
 
         {/* Footer info bar */}
-        <div className="p-3.5 bg-slate-50 border-t border-slate-200 text-xs text-slate-500 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+        <div className="p-3.5 bg-slate-50 border-t border-slate-200 text-xs text-slate-500 flex items-center justify-between">
           <span>
             Showing <strong>{filteredLeads.length}</strong> of <strong>{leads.length}</strong> leads
           </span>
-          <div className="flex items-center gap-3">
-            <span className="flex items-center gap-1.5">
-              <span className="w-2 h-2 rounded-full bg-emerald-500" /> Active ({activeCount})
-            </span>
-            <span className="flex items-center gap-1.5">
-              <span className="w-2 h-2 rounded-full bg-amber-500" /> Replied ({repliedCount})
-            </span>
-            <span className="flex items-center gap-1.5">
-              <span className="w-2 h-2 rounded-full bg-slate-400" /> Paused ({pausedCount})
-            </span>
-            <span className="flex items-center gap-1.5">
-              <span className="w-2 h-2 rounded-full bg-[#1976D2]" /> Completed ({completedCount})
-            </span>
-          </div>
         </div>
       </div>
 
