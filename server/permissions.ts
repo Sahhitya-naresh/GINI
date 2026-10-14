@@ -23,7 +23,8 @@ export const PERMISSION_KEYS = [
   'templates.editDefault',
   'templates.editHeaderFooter',
   'settings.edit',
-  'emails.replyManual'
+  'emails.replyManual',
+  'emails.useAiAssist'
 ] as const;
 
 export type PermissionKey = (typeof PERMISSION_KEYS)[number];
@@ -48,7 +49,8 @@ export const ROLE_PERMISSIONS: Record<UserRole, PermissionKey[]> = {
     'templates.editDefault',
     'templates.editHeaderFooter',
     'settings.edit',
-    'emails.replyManual'
+    'emails.replyManual',
+    'emails.useAiAssist'
   ],
   user: [
     'leads.create',
@@ -57,7 +59,8 @@ export const ROLE_PERMISSIONS: Record<UserRole, PermissionKey[]> = {
     'campaigns.run',
     'campaigns.editOwn',
     'templates.editOwn',
-    'emails.replyManual'
+    'emails.replyManual',
+    'emails.useAiAssist'
   ]
 };
 

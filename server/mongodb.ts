@@ -30,7 +30,9 @@ export const COLLECTIONS = {
   TEMPLATE_SETS: 'templateSets',
   SENT_EMAILS: 'sent_emails',
   MANUAL_REPLY_DRAFTS: 'manual_reply_drafts',
-  USER_RECENT_CC: 'user_recent_cc'
+  USER_RECENT_CC: 'user_recent_cc',
+  AI_RATE_LIMITS: 'ai_rate_limits',
+  AI_AUDIT_LOGS: 'ai_audit_logs'
 } as const;
 
 export interface MongoStatusInfo {

@@ -498,3 +498,42 @@ export function getLeadCurrentNodeId(lead: any, workflow: CampaignWorkflow): str
   const startNode = workflow.nodes.find(n => n.type === 'startNode' || n.data?.nodeType === 'start');
   return startNode ? startNode.id : workflow.nodes[0].id;
 }
+
+export async function getCampaignAboutApi(campaignId: string): Promise<{
+  campaignId: string;
+  name: string;
+  aboutCampaign: string;
+  ownerId: string;
+  ownerName: string;
+  lastEditedBy: string;
+  lastEditedAt: string;
+  canEdit: boolean;
+}> {
+  const res = await fetch(`/api/campaigns/${encodeURIComponent(campaignId)}/about`);
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || 'Failed to fetch campaign about info');
+  }
+  return res.json();
+}
+
+export async function saveCampaignAboutApi(campaignId: string, aboutCampaign: string): Promise<{
+  id: string;
+  aboutCampaign: string;
+  lastEditedBy: string;
+  lastEditedAt: string;
+  ownerId: string;
+  ownerName: string;
+}> {
+  const res = await fetch(`/api/campaigns/${encodeURIComponent(campaignId)}/about`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ aboutCampaign })
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || 'Failed to save campaign about info');
+  }
+  return res.json();
+}
+

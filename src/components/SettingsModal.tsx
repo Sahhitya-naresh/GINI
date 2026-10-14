@@ -77,12 +77,28 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [isSavingHeaderFooter, setIsSavingHeaderFooter] = useState<boolean>(false);
   const [headerFooterToast, setHeaderFooterToast] = useState<string | null>(null);
 
+  // AI Writing Assistant state (Admin only)
+  const [aiAssistantEnabled, setAiAssistantEnabled] = useState<boolean>(true);
+  const [companyDescription, setCompanyDescription] = useState<string>('');
+  const [isSavingAiSettings, setIsSavingAiSettings] = useState<boolean>(false);
+  const [aiSettingsToast, setAiSettingsToast] = useState<string | null>(null);
+
   useEffect(() => {
     if (isOpen) {
       getHeaderFooter().then(res => {
         setEmailHeader(res.header || '');
         setEmailFooter(res.footer || '');
       }).catch(() => {});
+
+      fetch('/api/settings/ai-writing-assistant')
+        .then(r => r.ok ? r.json() : null)
+        .then(data => {
+          if (data) {
+            setAiAssistantEnabled(data.enabled !== false);
+            setCompanyDescription(data.companyDescription || '');
+          }
+        })
+        .catch(() => {});
     }
   }, [isOpen]);
 
@@ -98,6 +114,30 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       alert(err.message || 'Failed to save header and footer');
     } finally {
       setIsSavingHeaderFooter(false);
+    }
+  };
+
+  const handleSaveAiSettings = async () => {
+    setIsSavingAiSettings(true);
+    try {
+      const res = await fetch('/api/settings/ai-writing-assistant', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          enabled: aiAssistantEnabled,
+          companyDescription: companyDescription.trim()
+        })
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) throw new Error(data.error || 'Failed to save AI settings');
+      setAiAssistantEnabled(data.enabled !== false);
+      setCompanyDescription(data.companyDescription || '');
+      setAiSettingsToast('AI assistant settings saved!');
+      setTimeout(() => setAiSettingsToast(null), 3000);
+    } catch (err: any) {
+      alert(err.message || 'Failed to save AI assistant settings');
+    } finally {
+      setIsSavingAiSettings(false);
     }
   };
 
@@ -1240,6 +1280,83 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 >
                   <Save className="w-3.5 h-3.5" />
                   <span>{isSavingHeaderFooter ? 'Saving Header/Footer...' : 'Save Header & Footer'}</span>
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {/* AI Writing Assistant Section (Admin Only) */}
+          <div className="space-y-3.5 p-4 bg-slate-50 rounded-xl border border-slate-200">
+            <div className="flex items-center justify-between">
+              <div>
+                <h3 className="text-xs font-bold uppercase tracking-wider text-slate-800 flex items-center gap-1.5">
+                  <Sparkles className="w-3.5 h-3.5 text-amber-500" />
+                  <span>AI Writing Assistant (Gemini)</span>
+                </h3>
+                <p className="text-[11px] text-slate-500 mt-0.5">
+                  Configure automated writing, tone adjustments, and company context for the Manual Reply window.
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                {aiSettingsToast && (
+                  <span className="text-[11px] font-semibold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200 animate-fade-in">
+                    {aiSettingsToast}
+                  </span>
+                )}
+                <span className="text-[10px] text-red-700 bg-red-50 font-semibold px-2 py-0.5 rounded border border-red-200">
+                  Admin Configured
+                </span>
+              </div>
+            </div>
+
+            <div className="space-y-3 text-xs">
+              {/* On/Off Switch */}
+              <div className="flex items-center justify-between p-3 bg-white rounded-lg border border-slate-200">
+                <div>
+                  <span className="font-semibold text-xs text-slate-800 block">Enable AI Writing Assistant</span>
+                  <span className="text-[11px] text-slate-500">Allows users to draft and rewrite replies using Google Gemini in the Manual Reply composer.</span>
+                </div>
+                <label className="relative inline-flex items-center cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={aiAssistantEnabled}
+                    onChange={(e) => setAiAssistantEnabled(e.target.checked)}
+                    className="sr-only peer"
+                  />
+                  <div className="w-9 h-5 bg-slate-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-red-600"></div>
+                </label>
+              </div>
+
+              {/* About Our Company */}
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="block text-xs font-semibold text-slate-700">
+                    About Our Company (AI Knowledge Context)
+                  </label>
+                  <span className={`text-[10px] ${companyDescription.length > 1500 ? 'text-red-600 font-bold' : 'text-slate-400'}`}>
+                    {companyDescription.length} / 1,500 characters
+                  </span>
+                </div>
+                <textarea
+                  rows={4}
+                  maxLength={1500}
+                  value={companyDescription}
+                  onChange={(e) => setCompanyDescription(e.target.value)}
+                  placeholder="Describe your company, main products, unique value propositions, and standard offer terms so Gemini drafts accurate, tailored email replies..."
+                  className="w-full p-2.5 font-sans text-xs rounded-lg border border-slate-300 focus:ring-2 focus:ring-red-500 bg-white text-slate-800"
+                />
+                <span className="text-[11px] text-slate-400">Included as reference context in every AI assist request. Empty by default.</span>
+              </div>
+
+              <div className="flex items-center justify-end">
+                <button
+                  type="button"
+                  onClick={handleSaveAiSettings}
+                  disabled={isSavingAiSettings || companyDescription.length > 1500}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white rounded-lg text-xs font-semibold transition-colors disabled:opacity-50 cursor-pointer"
+                >
+                  <Save className="w-3.5 h-3.5" />
+                  <span>{isSavingAiSettings ? 'Saving AI Settings...' : 'Save AI Settings'}</span>
                 </button>
               </div>
             </div>

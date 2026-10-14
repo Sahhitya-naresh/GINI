@@ -165,6 +165,7 @@ export interface CampaignWorkflow {
   id: string;
   name: string;
   description: string;
+  aboutCampaign?: string;
   version: number;
   createdAt: string;
   updatedAt: string;
@@ -305,6 +306,8 @@ export interface AppSettings {
   positiveReplyAction?: 'pause_automatically' | 'ask_first';
   emailHeader?: string;
   emailFooter?: string;
+  aiWritingAssistantEnabled?: boolean;
+  companyDescription?: string;
 }
 
 export type TemplateSetKind = 'default' | 'user' | 'campaign';
@@ -369,7 +372,9 @@ export type PermissionKey =
   | 'templates.editAny'
   | 'templates.editDefault'
   | 'templates.editHeaderFooter'
-  | 'settings.edit';
+  | 'settings.edit'
+  | 'emails.replyManual'
+  | 'emails.useAiAssist';
 
 export interface AppUser {
   id: string;

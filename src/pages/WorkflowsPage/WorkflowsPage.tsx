@@ -69,7 +69,8 @@ import { CampaignTemplatesModal } from '../../components/CampaignTemplatesModal'
 import { 
   createBlankWorkflow,
   checkCampaignImpactApi,
-  restoreCampaignVersionApi
+  restoreCampaignVersionApi,
+  saveCampaignAboutApi
 } from '../../services/workflowService';
 
 interface WorkflowCanvasProps {
@@ -230,6 +231,50 @@ export const WorkflowCanvas: React.FC<WorkflowCanvasProps> = ({
   }, [currentUser]);
 
   const canEdit = isOwner || isAdmin;
+
+  // Only the campaign owner (campaigns.editOwn) or an admin (campaigns.editAny) may edit About this campaign
+  const canEditAbout = useMemo(() => {
+    if (!currentUser) return false;
+    if (currentUser.role === 'admin' || currentUser.permissions?.includes('campaigns.editAny')) return true;
+    const ownsCampaign = Boolean(!activeWorkflow?.ownerId || activeWorkflow.ownerId === currentUser.id);
+    const hasEditOwn = Boolean(currentUser.permissions?.includes('campaigns.editOwn'));
+    return ownsCampaign && hasEditOwn;
+  }, [currentUser, activeWorkflow]);
+
+  // About this campaign modal state
+  const [showAboutCampaignModal, setShowAboutCampaignModal] = useState(false);
+  const [aboutCampaignText, setAboutCampaignText] = useState('');
+  const [isSavingAboutCampaign, setIsSavingAboutCampaign] = useState(false);
+  const [aboutCampaignSaveError, setAboutCampaignSaveError] = useState<string | null>(null);
+  const [aboutCampaignSaveSuccess, setAboutCampaignSaveSuccess] = useState(false);
+
+  const handleOpenAboutCampaignModal = () => {
+    setAboutCampaignText(activeWorkflow?.aboutCampaign || '');
+    setAboutCampaignSaveError(null);
+    setAboutCampaignSaveSuccess(false);
+    setShowAboutCampaignModal(true);
+  };
+
+  const handleSaveAboutCampaign = async () => {
+    if (!activeWorkflow) return;
+    setIsSavingAboutCampaign(true);
+    setAboutCampaignSaveError(null);
+    try {
+      const res = await saveCampaignAboutApi(activeWorkflow.id, aboutCampaignText);
+      activeWorkflow.aboutCampaign = res.aboutCampaign;
+      activeWorkflow.lastEditedBy = res.lastEditedBy;
+      activeWorkflow.lastEditedAt = res.lastEditedAt;
+      setAboutCampaignSaveSuccess(true);
+      setTimeout(() => {
+        setShowAboutCampaignModal(false);
+        setAboutCampaignSaveSuccess(false);
+      }, 700);
+    } catch (err: any) {
+      setAboutCampaignSaveError(err.message || 'Failed to save campaign info');
+    } finally {
+      setIsSavingAboutCampaign(false);
+    }
+  };
 
   // Versions history modal state
   const [showHistoryModal, setShowHistoryModal] = useState(false);
@@ -853,6 +898,18 @@ export const WorkflowCanvas: React.FC<WorkflowCanvasProps> = ({
             <span>Campaign Templates</span>
           </button>
 
+          {/* About this campaign Button */}
+          <button
+            type="button"
+            id="about-this-campaign-button"
+            onClick={handleOpenAboutCampaignModal}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-purple-700 bg-purple-50 hover:bg-purple-100 rounded-lg transition-colors border border-purple-200 cursor-pointer shadow-2xs"
+            title="About this campaign (context for AI writing assistant)"
+          >
+            <Info className="w-3.5 h-3.5 text-purple-600" />
+            <span>About this campaign</span>
+          </button>
+
           {/* Version History Button */}
           <button
             onClick={() => setShowHistoryModal(true)}
@@ -1307,6 +1364,126 @@ export const WorkflowCanvas: React.FC<WorkflowCanvasProps> = ({
           currentUser={currentUser}
         />
       )}
+
+      {/* About this campaign Modal */}
+      {showAboutCampaignModal && activeWorkflow && (
+        <div className="fixed inset-0 z-60 flex items-center justify-center p-4 bg-slate-950/70 backdrop-blur-xs animate-in fade-in duration-100">
+          <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 max-w-xl w-full p-6 space-y-4 animate-in zoom-in-95 duration-150">
+            {/* Header */}
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+              <div className="flex items-center gap-2">
+                <div className="w-8 h-8 rounded-lg bg-purple-100 text-purple-700 flex items-center justify-center border border-purple-200">
+                  <Info className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-slate-900">About this campaign</h3>
+                  <p className="text-[11px] text-slate-500">{activeWorkflow.name}</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowAboutCampaignModal(false)}
+                className="text-slate-400 hover:text-slate-600 p-1 rounded-lg cursor-pointer transition-colors"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Read-only banner if user cannot edit */}
+            {!canEditAbout && (
+              <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl text-xs text-amber-800 flex items-start gap-2">
+                <Shield className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                <div>
+                  <strong className="font-semibold">Read-only view:</strong> Owned by{' '}
+                  <span className="font-medium text-amber-900">{activeWorkflow.ownerName || 'another user'}</span>.
+                  Only the campaign owner or an admin can edit this text.
+                </div>
+              </div>
+            )}
+
+            {/* Helper text */}
+            <p className="text-xs text-slate-600 leading-relaxed bg-slate-50 p-3 rounded-xl border border-slate-200">
+              Describe the offer, who this outreach is for, the goal of the emails and anything the AI should avoid promising.
+            </p>
+
+            {/* Textarea editor */}
+            <div className="space-y-1.5">
+              <textarea
+                value={aboutCampaignText}
+                onChange={(e) => setAboutCampaignText(e.target.value.slice(0, 1000))}
+                readOnly={!canEditAbout}
+                disabled={!canEditAbout}
+                rows={6}
+                maxLength={1000}
+                placeholder="e.g. Describe the offer, who this outreach is for, the goal of the emails and anything the AI should avoid promising."
+                className={`w-full text-xs p-3 rounded-xl border transition-all leading-relaxed ${
+                  !canEditAbout
+                    ? 'bg-slate-100 border-slate-200 text-slate-500 cursor-not-allowed'
+                    : 'bg-white border-slate-300 text-slate-800 placeholder-slate-400 focus:outline-hidden focus:ring-2 focus:ring-purple-500/20 focus:border-purple-500'
+                }`}
+              />
+              <div className="flex items-center justify-between text-[11px] text-slate-400 px-1">
+                <span>
+                  {activeWorkflow.lastEditedBy ? (
+                    <>Last edited by <strong className="text-slate-600">{activeWorkflow.lastEditedBy}</strong>{activeWorkflow.lastEditedAt ? ` on ${new Date(activeWorkflow.lastEditedAt).toLocaleDateString()}` : ''}</>
+                  ) : (
+                    <span>Context used by AI writing assistant for this campaign's leads</span>
+                  )}
+                </span>
+                <span className={aboutCampaignText.length >= 1000 ? 'text-rose-600 font-bold' : 'font-mono'}>
+                  {aboutCampaignText.length} / 1,000 characters
+                </span>
+              </div>
+            </div>
+
+            {/* Error message */}
+            {aboutCampaignSaveError && (
+              <div className="p-2.5 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-700 flex items-center gap-1.5">
+                <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+                <span>{aboutCampaignSaveError}</span>
+              </div>
+            )}
+
+            {/* Success message */}
+            {aboutCampaignSaveSuccess && (
+              <div className="p-2.5 bg-emerald-50 border border-emerald-200 rounded-xl text-xs text-emerald-700 flex items-center gap-1.5 font-medium animate-in fade-in">
+                <Check className="w-4 h-4 text-emerald-600 shrink-0" />
+                <span>Campaign information saved successfully!</span>
+              </div>
+            )}
+
+            {/* Actions */}
+            <div className="flex items-center justify-end gap-2.5 pt-2 border-t border-slate-100">
+              <button
+                type="button"
+                onClick={() => setShowAboutCampaignModal(false)}
+                className="px-3.5 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-100 rounded-xl transition-colors cursor-pointer"
+              >
+                Close
+              </button>
+              {canEditAbout && (
+                <button
+                  type="button"
+                  id="save-about-campaign-button"
+                  disabled={isSavingAboutCampaign}
+                  onClick={handleSaveAboutCampaign}
+                  className="px-4 py-2 bg-purple-600 hover:bg-purple-700 disabled:opacity-50 text-white text-xs font-bold rounded-xl shadow-xs transition-colors cursor-pointer flex items-center gap-1.5"
+                >
+                  {isSavingAboutCampaign ? (
+                    <span>Saving...</span>
+                  ) : (
+                    <>
+                      <Save className="w-3.5 h-3.5" />
+                      <span>Save Info</span>
+                    </>
+                  )}
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
 
       {/* Confirmation Modal for Flow Save Impact Warning */}
       {flowImpactConfirm && (

@@ -17,9 +17,14 @@ import {
   Plus, 
   RefreshCw, 
   MessageSquare,
-  Sparkles
+  Sparkles,
+  RotateCcw,
+  Check,
+  Info
 } from 'lucide-react';
 import { Lead, AppUser } from '../types';
+import { splitReplyAndQuotedHistory } from '../utils/cleanReplyText';
+import { saveCampaignAboutApi } from '../services/workflowService';
 
 interface ManualReplyModalProps {
   lead: Lead;
@@ -62,6 +67,75 @@ export const ManualReplyModal: React.FC<ManualReplyModalProps> = ({
   const [isReplyPanelOpen, setIsReplyPanelOpen] = useState(true);
   const [confirmNegativeReply, setConfirmNegativeReply] = useState(false);
 
+  // AI Assistant state
+  const [isAiPanelOpen, setIsAiPanelOpen] = useState(false);
+  const [aiInstruction, setAiInstruction] = useState('');
+  const [aiTone, setAiTone] = useState<string>('');
+  const [aiMode, setAiMode] = useState<'write' | 'rewrite'>('write');
+  const [aiApplySelectionOnly, setAiApplySelectionOnly] = useState(false);
+  const [selectedText, setSelectedText] = useState('');
+  const [selectionRange, setSelectionRange] = useState<{ start: number; end: number } | null>(null);
+  const [isGeneratingAi, setIsGeneratingAi] = useState(false);
+  const [aiError, setAiError] = useState<string | null>(null);
+  const [aiGeneratedResult, setAiGeneratedResult] = useState<string | null>(null);
+  const [previousBodyForUndo, setPreviousBodyForUndo] = useState<string | null>(null);
+  const [aiAssistantEnabledSetting, setAiAssistantEnabledSetting] = useState(true);
+
+  // AI Assist Background Context (Company info + Campaign info)
+  const [aiContextInfo, setAiContextInfo] = useState<{
+    companyDescription: string;
+    hasCompanyInfo: boolean;
+    campaignId: string;
+    campaignName: string;
+    aboutCampaign: string;
+    hasCampaignInfo: boolean;
+    campaignOwnerId: string;
+    campaignOwnerName: string;
+    canEditCampaignAbout: boolean;
+  } | null>(null);
+  const [showAiContextViewModal, setShowAiContextViewModal] = useState(false);
+  const [showAddCampaignInfoModal, setShowAddCampaignInfoModal] = useState(false);
+  const [editCampaignInfoText, setEditCampaignInfoText] = useState('');
+  const [isSavingQuickCampaignInfo, setIsSavingQuickCampaignInfo] = useState(false);
+  const [quickCampaignInfoError, setQuickCampaignInfoError] = useState<string | null>(null);
+
+  const fetchAiContext = () => {
+    if (!lead?.leadId) return;
+    fetch(`/api/email/ai-assist/context?leadId=${encodeURIComponent(lead.leadId)}`)
+      .then(r => r.ok ? r.json() : null)
+      .then(data => {
+        if (data?.success) {
+          setAiContextInfo(data);
+        }
+      })
+      .catch(() => {});
+  };
+
+  const handleSaveQuickCampaignInfo = async () => {
+    if (!aiContextInfo?.campaignId) return;
+    setIsSavingQuickCampaignInfo(true);
+    setQuickCampaignInfoError(null);
+    try {
+      const res = await saveCampaignAboutApi(aiContextInfo.campaignId, editCampaignInfoText);
+      setAiContextInfo(prev => prev ? {
+        ...prev,
+        aboutCampaign: res.aboutCampaign,
+        hasCampaignInfo: Boolean(res.aboutCampaign.trim())
+      } : null);
+      setShowAddCampaignInfoModal(false);
+    } catch (err: any) {
+      setQuickCampaignInfoError(err.message || 'Failed to save campaign info');
+    } finally {
+      setIsSavingQuickCampaignInfo(false);
+    }
+  };
+
+
+  // Quoted history toggle & Send-time placeholder confirmation
+  const [showQuotedHistory, setShowQuotedHistory] = useState(false);
+  const [pendingPlaceholders, setPendingPlaceholders] = useState<string[] | null>(null);
+  const [confirmPlaceholders, setConfirmPlaceholders] = useState(false);
+
   // Latest reply data from thread
   const [latestReply, setLatestReply] = useState<{
     from?: string;
@@ -84,6 +158,23 @@ export const ManualReplyModal: React.FC<ManualReplyModalProps> = ({
     setSendError(null);
     setCcError(null);
     setConfirmNegativeReply(false);
+    setIsAiPanelOpen(false);
+    setAiGeneratedResult(null);
+    setAiError(null);
+    setPreviousBodyForUndo(null);
+    setShowQuotedHistory(false);
+    setPendingPlaceholders(null);
+    setConfirmPlaceholders(false);
+
+    // 0. Fetch AI writing assistant settings
+    fetch('/api/settings/ai-writing-assistant')
+      .then(r => r.ok ? r.json() : null)
+      .then(data => {
+        if (data) {
+          setAiAssistantEnabledSetting(data.enabled !== false);
+        }
+      })
+      .catch(() => {});
 
     // 1. Fetch active admin header/footer from settings
     fetch('/api/settings/header-footer')
@@ -159,6 +250,9 @@ export const ManualReplyModal: React.FC<ManualReplyModalProps> = ({
       .finally(() => {
         isLoadedRef.current = true;
       });
+
+    // 5. Fetch AI background context metadata
+    fetchAiContext();
   }, [isOpen, lead]);
 
   // Debounced draft auto-save
@@ -328,8 +422,130 @@ export const ManualReplyModal: React.FC<ManualReplyModalProps> = ({
     return sections.join('\n');
   }, [headerHtml, footerHtml, bodyHtml, lead, currentUser]);
 
+  // Split latest reply into cleaned reply and quoted older history
+  const { cleanedReplyText, quotedHistoryText } = useMemo(() => {
+    const raw = latestReply?.bodyText || lead.notes || '';
+    const res = splitReplyAndQuotedHistory(raw);
+    return {
+      cleanedReplyText: res.cleanedText,
+      quotedHistoryText: res.quotedHistory
+    };
+  }, [latestReply, lead.notes]);
+
+  // Toggle AI Panel
+  const handleToggleAiPanel = () => {
+    if (!isAiPanelOpen) {
+      const textarea = bodyTextareaRef.current;
+      let selText = '';
+      let range = null;
+      if (textarea && textarea.selectionStart !== textarea.selectionEnd) {
+        selText = textarea.value.substring(textarea.selectionStart, textarea.selectionEnd);
+        range = { start: textarea.selectionStart, end: textarea.selectionEnd };
+      }
+      setSelectedText(selText);
+      setSelectionRange(range);
+      setAiApplySelectionOnly(Boolean(selText.trim()));
+
+      const hasText = bodyHtml.replace(/<[^>]+>/g, '').trim().length > 0;
+      setAiMode(hasText ? 'rewrite' : 'write');
+      setAiError(null);
+      setAiGeneratedResult(null);
+      fetchAiContext();
+      setIsAiPanelOpen(true);
+    } else {
+      setIsAiPanelOpen(false);
+      setAiGeneratedResult(null);
+      setAiError(null);
+    }
+  };
+
+  const handleQuickChip = (chip: string) => {
+    if (chip === 'Write a reply') {
+      setAiMode('write');
+      setAiInstruction('Write a polite and helpful response addressing their points.');
+      setAiTone('');
+    } else if (chip === 'Shorten') {
+      setAiMode('rewrite');
+      setAiInstruction('Make it more concise and directly to the point.');
+    } else if (chip === 'Expand') {
+      setAiMode('rewrite');
+      setAiInstruction('Expand with more supportive context and clear value explanation.');
+    } else if (chip === 'Friendlier') {
+      setAiMode('rewrite');
+      setAiTone('Friendlier');
+      setAiInstruction('Rewrite in a warm, welcoming, and friendly tone.');
+    } else if (chip === 'More formal') {
+      setAiMode('rewrite');
+      setAiTone('More formal');
+      setAiInstruction('Rewrite in a professional, polished, and formal tone.');
+    } else if (chip === 'More persuasive') {
+      setAiMode('rewrite');
+      setAiTone('More persuasive');
+      setAiInstruction('Rewrite with stronger emphasis on value and a clear call to action.');
+    } else if (chip === 'Fix grammar') {
+      setAiMode('rewrite');
+      setAiInstruction('Fix any grammar, spelling, and phrasing issues while keeping the exact meaning.');
+    }
+  };
+
+  const handleGenerateAi = async () => {
+    setIsGeneratingAi(true);
+    setAiError(null);
+    try {
+      const res = await fetch('/api/email/ai-assist', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          leadId: lead.leadId,
+          instruction: aiInstruction.trim(),
+          mode: aiMode,
+          currentBodyHtml: bodyHtml,
+          selectedText: aiApplySelectionOnly && selectedText ? selectedText : undefined,
+          tone: aiTone
+        })
+      });
+
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        throw new Error(data.error || 'Failed to generate AI response');
+      }
+
+      setAiGeneratedResult(data.text);
+    } catch (err: any) {
+      setAiError(err.message || 'Error communicating with AI assistant');
+    } finally {
+      setIsGeneratingAi(false);
+    }
+  };
+
+  const handleInsertAiResult = () => {
+    if (!aiGeneratedResult) return;
+
+    // Save previous body for undo
+    setPreviousBodyForUndo(bodyHtml);
+
+    if (aiApplySelectionOnly && selectionRange && bodyTextareaRef.current) {
+      const before = bodyHtml.substring(0, selectionRange.start);
+      const after = bodyHtml.substring(selectionRange.end);
+      setBodyHtml(before + aiGeneratedResult + after);
+    } else {
+      setBodyHtml(aiGeneratedResult);
+    }
+
+    setIsAiPanelOpen(false);
+    setAiGeneratedResult(null);
+    setAiError(null);
+  };
+
+  const handleUndoAi = () => {
+    if (previousBodyForUndo !== null) {
+      setBodyHtml(previousBodyForUndo);
+      setPreviousBodyForUndo(null);
+    }
+  };
+
   // Handle Send
-  const handleSend = async () => {
+  const handleSend = async (overridePlaceholderCheck: boolean = false) => {
     if (isSending) return;
     setSendError(null);
 
@@ -346,6 +562,15 @@ export const ManualReplyModal: React.FC<ManualReplyModalProps> = ({
 
     if (lead.status === 'Negative Reply' && !confirmNegativeReply) {
       setSendError('Explicit confirmation is required before emailing a prospect marked as Negative Reply.');
+      return;
+    }
+
+    // Check for unresolved bracketed placeholders like [date], [price], etc.
+    const isOverride = overridePlaceholderCheck === true;
+    const placeholderMatches = Array.from(bodyHtml.matchAll(/\[([a-zA-Z0-9_\s]{2,30})\]/g)).map(m => m[0]);
+    const uniquePlaceholders = Array.from(new Set(placeholderMatches));
+    if (uniquePlaceholders.length > 0 && !confirmPlaceholders && !isOverride) {
+      setPendingPlaceholders(uniquePlaceholders);
       return;
     }
 
@@ -500,9 +725,28 @@ export const ManualReplyModal: React.FC<ManualReplyModalProps> = ({
                     <RefreshCw className="w-3.5 h-3.5 animate-spin" /> Loading thread history...
                   </div>
                 ) : latestReply?.bodyText ? (
-                  <blockquote className="p-3 bg-amber-50/70 border-l-3 border-amber-500 rounded text-slate-700 text-xs leading-relaxed italic whitespace-pre-wrap">
-                    "{latestReply.bodyText}"
-                  </blockquote>
+                  <div className="space-y-2">
+                    <blockquote className="p-3 bg-amber-50/70 border-l-3 border-amber-500 rounded text-slate-700 text-xs leading-relaxed italic whitespace-pre-wrap">
+                      "{cleanedReplyText || latestReply.bodyText}"
+                    </blockquote>
+                    {quotedHistoryText && (
+                      <div className="pt-0.5">
+                        <button
+                          type="button"
+                          onClick={() => setShowQuotedHistory(!showQuotedHistory)}
+                          className="text-[11px] font-medium text-slate-500 hover:text-slate-800 flex items-center gap-1 cursor-pointer transition-colors"
+                        >
+                          <span>{showQuotedHistory ? 'Hide quoted history' : 'Show quoted history'}</span>
+                          {showQuotedHistory ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+                        </button>
+                        {showQuotedHistory && (
+                          <div className="mt-1.5 p-2.5 bg-slate-50 border-l-2 border-slate-300 rounded text-slate-500 text-[11px] leading-relaxed whitespace-pre-wrap font-mono">
+                            {quotedHistoryText}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
                 ) : lead.notes ? (
                   <p className="p-3 bg-slate-50 border-l-3 border-slate-400 rounded text-slate-600 italic">
                     Notes: {lead.notes}
@@ -741,6 +985,38 @@ export const ManualReplyModal: React.FC<ManualReplyModalProps> = ({
                     >
                       <Link2 className="w-3.5 h-3.5" />
                     </button>
+
+                    {/* Gemini AI Assistant Button directly to the right of insert-link */}
+                    {aiAssistantEnabledSetting && (
+                      <button
+                        type="button"
+                        id="ai-assist-toolbar-button"
+                        onClick={handleToggleAiPanel}
+                        className={`px-2 py-1 text-xs font-semibold rounded flex items-center gap-1 transition-colors cursor-pointer border ${
+                          isAiPanelOpen
+                            ? 'bg-purple-600 text-white border-purple-600 shadow-2xs'
+                            : 'bg-white text-purple-700 hover:bg-purple-50 border-purple-200'
+                        }`}
+                        title="AI Writing Assistant (Gemini)"
+                      >
+                        <Sparkles className="w-3.5 h-3.5 text-purple-500" />
+                        <span>AI</span>
+                      </button>
+                    )}
+
+                    {/* Undo AI change Button */}
+                    {previousBodyForUndo !== null && (
+                      <button
+                        type="button"
+                        id="ai-undo-button"
+                        onClick={handleUndoAi}
+                        className="px-2 py-1 text-xs font-medium text-slate-600 hover:text-slate-900 hover:bg-white rounded border border-slate-200 flex items-center gap-1 transition-colors cursor-pointer"
+                        title="Undo AI change"
+                      >
+                        <RotateCcw className="w-3.5 h-3.5 text-slate-500" />
+                        <span>Undo AI change</span>
+                      </button>
+                    )}
                   </div>
 
                   {/* Merge Tags Menu */}
@@ -762,10 +1038,224 @@ export const ManualReplyModal: React.FC<ManualReplyModalProps> = ({
                   </div>
                 </div>
 
+                {/* Anchored AI Assistant Panel */}
+                {isAiPanelOpen && (
+                  <div id="ai-assist-panel" className="p-3.5 bg-purple-50/70 border-x border-b border-purple-200 space-y-3 animate-in fade-in duration-100">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-1.5 text-xs font-bold text-purple-900">
+                        <Sparkles className="w-3.5 h-3.5 text-purple-600" />
+                        <span>AI Writing Assistant (Gemini)</span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setIsAiPanelOpen(false)}
+                        className="text-slate-400 hover:text-slate-600 p-0.5 rounded cursor-pointer"
+                        title="Close AI panel"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+
+                    {/* Mode selector & Selection scope */}
+                    <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                      <div className="inline-flex rounded-lg border border-purple-200 bg-white p-0.5">
+                        <button
+                          type="button"
+                          onClick={() => setAiMode('write')}
+                          className={`px-2.5 py-1 rounded-md font-medium text-xs transition-colors cursor-pointer ${
+                            aiMode === 'write' ? 'bg-purple-600 text-white' : 'text-slate-600 hover:text-purple-700'
+                          }`}
+                        >
+                          Write new draft
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setAiMode('rewrite')}
+                          className={`px-2.5 py-1 rounded-md font-medium text-xs transition-colors cursor-pointer ${
+                            aiMode === 'rewrite' ? 'bg-purple-600 text-white' : 'text-slate-600 hover:text-purple-700'
+                          }`}
+                        >
+                          Rewrite my text
+                        </button>
+                      </div>
+
+                      {selectedText && (
+                        <label className="flex items-center gap-1.5 text-xs text-purple-900 cursor-pointer font-medium">
+                          <input
+                            type="checkbox"
+                            checked={aiApplySelectionOnly}
+                            onChange={(e) => setAiApplySelectionOnly(e.target.checked)}
+                            className="rounded border-purple-300 text-purple-600 focus:ring-purple-500 cursor-pointer"
+                          />
+                          <span>Apply to selection only ({selectedText.length} chars)</span>
+                        </label>
+                      )}
+                    </div>
+
+                    {/* Quick Chips */}
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <span className="text-[10px] uppercase font-bold text-purple-700 tracking-wider">Quick:</span>
+                      {['Write a reply', 'Shorten', 'Expand', 'Friendlier', 'More formal', 'More persuasive', 'Fix grammar'].map(chip => (
+                        <button
+                          key={chip}
+                          type="button"
+                          onClick={() => handleQuickChip(chip)}
+                          className="px-2 py-0.5 bg-white hover:bg-purple-100 text-purple-800 text-[11px] font-medium rounded-full border border-purple-200 transition-colors cursor-pointer shadow-2xs"
+                        >
+                          {chip}
+                        </button>
+                      ))}
+                    </div>
+
+                    {/* Instruction Box */}
+                    <div className="space-y-1">
+                      <textarea
+                        value={aiInstruction}
+                        onChange={(e) => setAiInstruction(e.target.value)}
+                        rows={2}
+                        placeholder={aiMode === 'write' ? 'e.g. thank them and suggest a call on Thursday...' : 'e.g. make it friendlier and add a clear call to action...'}
+                        className="w-full text-xs p-2.5 bg-white border border-purple-200 rounded-lg text-slate-800 placeholder-slate-400 focus:outline-hidden focus:ring-2 focus:ring-purple-500/30 focus:border-purple-500 leading-relaxed"
+                      />
+                      <div className="flex items-center justify-between text-[10px] text-slate-500">
+                        <span className="italic">The lead's reply is sent to Gemini to generate text.</span>
+                        <button
+                          type="button"
+                          id="ai-generate-button"
+                          disabled={isGeneratingAi}
+                          onClick={handleGenerateAi}
+                          className="px-3 py-1.5 bg-purple-600 hover:bg-purple-700 text-white font-bold rounded-lg shadow-xs disabled:opacity-50 flex items-center gap-1 cursor-pointer transition-colors"
+                        >
+                          {isGeneratingAi ? (
+                            <>
+                              <RefreshCw className="w-3 h-3 animate-spin" />
+                              <span>Generating...</span>
+                            </>
+                          ) : (
+                            <>
+                              <Sparkles className="w-3 h-3" />
+                              <span>Generate</span>
+                            </>
+                          )}
+                        </button>
+                      </div>
+
+                      {/* Under notice: Context line */}
+                      <div className="pt-2 border-t border-purple-200/70 flex items-center justify-between text-[11px] text-purple-950 flex-wrap gap-1">
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span className="font-semibold text-purple-800">Using:</span>
+                          {aiContextInfo?.hasCompanyInfo && (
+                            <span>company info</span>
+                          )}
+                          {aiContextInfo?.campaignName ? (
+                            <>
+                              {aiContextInfo.hasCompanyInfo && <span>+</span>}
+                              {aiContextInfo.hasCampaignInfo ? (
+                                <span>campaign &lsquo;{aiContextInfo.campaignName}&rsquo; info</span>
+                              ) : (
+                                <span className="text-slate-500 italic">No campaign info set</span>
+                              )}
+                            </>
+                          ) : !aiContextInfo?.hasCompanyInfo ? (
+                            <span className="text-slate-500 italic">No campaign info set</span>
+                          ) : null}
+
+                          <button
+                            type="button"
+                            id="ai-view-context-btn"
+                            onClick={() => setShowAiContextViewModal(true)}
+                            className="text-purple-700 hover:text-purple-900 underline font-medium cursor-pointer ml-1"
+                          >
+                            View
+                          </button>
+
+                          {/* For campaign owner and admins, add a link to add it */}
+                          {aiContextInfo?.campaignId && !aiContextInfo.hasCampaignInfo && aiContextInfo.canEditCampaignAbout && (
+                            <button
+                              type="button"
+                              id="ai-add-campaign-info-btn"
+                              onClick={() => {
+                                setEditCampaignInfoText('');
+                                setQuickCampaignInfoError(null);
+                                setShowAddCampaignInfoModal(true);
+                              }}
+                              className="text-purple-700 hover:text-purple-900 underline font-semibold cursor-pointer ml-1"
+                            >
+                              (add campaign info)
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* AI Error Display */}
+                    {aiError && (
+                      <div className="p-2 bg-red-50 border border-red-200 rounded text-xs text-red-700 flex items-center gap-1.5">
+                        <AlertTriangle className="w-3.5 h-3.5 shrink-0 text-red-500" />
+                        <span>{aiError}</span>
+                      </div>
+                    )}
+
+                    {/* Result Preview Box */}
+                    {aiGeneratedResult && (
+                      <div id="ai-result-preview-box" className="p-3 bg-white border border-purple-300 rounded-xl space-y-2.5 shadow-2xs">
+                        <div className="flex items-center justify-between text-xs text-purple-900 font-bold border-b border-purple-100 pb-1.5">
+                          <span>Preview AI Output:</span>
+                          <span className="text-[10px] font-normal text-slate-400">Review before inserting</span>
+                        </div>
+                        <div 
+                          className="text-xs text-slate-800 leading-relaxed max-h-48 overflow-y-auto p-2 bg-slate-50 rounded border border-slate-100 font-sans prose prose-xs"
+                          dangerouslySetInnerHTML={{ __html: aiGeneratedResult }}
+                        />
+                        <div className="flex items-center justify-end gap-2 pt-1 border-t border-purple-100">
+                          <button
+                            type="button"
+                            onClick={() => setAiGeneratedResult(null)}
+                            className="px-2.5 py-1 text-xs text-slate-500 hover:text-slate-800 rounded transition-colors cursor-pointer"
+                          >
+                            Cancel
+                          </button>
+                          <button
+                            type="button"
+                            onClick={handleGenerateAi}
+                            disabled={isGeneratingAi}
+                            className="px-2.5 py-1 text-xs text-purple-700 hover:bg-purple-100 rounded border border-purple-200 transition-colors cursor-pointer"
+                          >
+                            Try again
+                          </button>
+                          <button
+                            type="button"
+                            id="ai-insert-result-button"
+                            onClick={handleInsertAiResult}
+                            className="px-3.5 py-1 text-xs font-bold bg-purple-600 hover:bg-purple-700 text-white rounded-lg shadow-xs flex items-center gap-1 cursor-pointer transition-colors"
+                          >
+                            <Check className="w-3.5 h-3.5" />
+                            <span>{aiMode === 'rewrite' || (aiApplySelectionOnly && selectedText) ? 'Replace' : 'Insert'}</span>
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+
                 <textarea
                   ref={bodyTextareaRef}
                   value={bodyHtml}
-                  onChange={(e) => setBodyHtml(e.target.value)}
+                  onChange={(e) => {
+                    setBodyHtml(e.target.value);
+                    if (previousBodyForUndo !== null) {
+                      setPreviousBodyForUndo(null);
+                    }
+                  }}
+                  onSelect={() => {
+                    const textarea = bodyTextareaRef.current;
+                    if (textarea && textarea.selectionStart !== textarea.selectionEnd) {
+                      const sel = textarea.value.substring(textarea.selectionStart, textarea.selectionEnd);
+                      setSelectedText(sel);
+                      setSelectionRange({ start: textarea.selectionStart, end: textarea.selectionEnd });
+                      setAiApplySelectionOnly(true);
+                      setAiMode('rewrite');
+                    }
+                  }}
                   rows={8}
                   placeholder={`Hi ${lead.firstName || lead.name.split(' ')[0] || 'there'},\n\nThanks for getting back to us regarding ${lead.company}...\n\nBest regards,\n${currentUser?.name || 'Care'}`}
                   className="w-full text-xs font-sans p-3 bg-white border border-t-0 border-slate-300 rounded-b-lg text-slate-800 focus:outline-hidden focus:ring-2 focus:ring-red-500/20 focus:border-red-500 transition-all font-mono leading-relaxed"
@@ -800,6 +1290,40 @@ export const ManualReplyModal: React.FC<ManualReplyModalProps> = ({
           )}
         </div>
 
+        {/* Pending Placeholders Confirmation Banner docked above footer */}
+        {pendingPlaceholders && pendingPlaceholders.length > 0 && (
+          <div id="pending-placeholders-banner" className="mx-6 mb-3 p-3 bg-amber-50 border border-amber-200 rounded-xl space-y-2 text-xs text-amber-900 shadow-xs animate-in fade-in duration-100">
+            <div className="flex items-center gap-2 font-bold">
+              <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+              <span>Unresolved Bracketed Placeholders Detected</span>
+            </div>
+            <p className="text-amber-800">
+              Your message contains unresolved placeholder tag(s): <strong className="font-mono text-amber-950">{pendingPlaceholders.join(', ')}</strong>. Do you want to edit them before sending?
+            </p>
+            <div className="flex items-center gap-2 pt-1">
+              <button
+                type="button"
+                id="send-anyway-button"
+                onClick={() => {
+                  setConfirmPlaceholders(true);
+                  setPendingPlaceholders(null);
+                  handleSend(true);
+                }}
+                className="px-3 py-1 bg-amber-600 hover:bg-amber-700 text-white font-bold rounded-lg transition-colors cursor-pointer"
+              >
+                Send anyway
+              </button>
+              <button
+                type="button"
+                onClick={() => setPendingPlaceholders(null)}
+                className="px-3 py-1 bg-white hover:bg-slate-100 text-slate-700 font-semibold border border-slate-300 rounded-lg transition-colors cursor-pointer"
+              >
+                Edit message
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* Modal Footer Buttons */}
         <div className="px-6 py-3.5 border-t border-slate-100 bg-slate-50 flex items-center justify-between gap-3">
           <div className="text-xs text-slate-500">
@@ -821,7 +1345,8 @@ export const ManualReplyModal: React.FC<ManualReplyModalProps> = ({
 
             <button
               type="button"
-              onClick={handleSend}
+              id="send-reply-modal-button"
+              onClick={() => handleSend(false)}
               disabled={isSending || (isNegativeReply && !confirmNegativeReply)}
               className="flex items-center gap-2 px-5 py-2 text-xs font-bold bg-red-600 hover:bg-red-700 text-white rounded-lg shadow-xs shadow-red-600/20 disabled:opacity-50 disabled:cursor-not-allowed transition-all cursor-pointer"
               title={isNegativeReply && !confirmNegativeReply ? "Confirm sending to Negative Reply prospect" : "Send email"}
@@ -841,6 +1366,155 @@ export const ManualReplyModal: React.FC<ManualReplyModalProps> = ({
           </div>
         </div>
       </div>
+
+      {/* Background Context View Modal */}
+      {showAiContextViewModal && (
+        <div className="fixed inset-0 z-70 flex items-center justify-center p-4 bg-slate-950/70 backdrop-blur-xs animate-in fade-in duration-100">
+          <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 max-w-lg w-full p-5 space-y-4 animate-in zoom-in-95 duration-150">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-2.5">
+              <div className="flex items-center gap-2">
+                <div className="w-7 h-7 rounded-lg bg-purple-100 text-purple-700 flex items-center justify-center">
+                  <Info className="w-4 h-4" />
+                </div>
+                <div>
+                  <h4 className="text-xs font-bold text-slate-900">AI Background Information</h4>
+                  <p className="text-[10px] text-slate-500">Exact background context provided to Gemini</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowAiContextViewModal(false)}
+                className="text-slate-400 hover:text-slate-600 p-1 rounded cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="space-y-3 max-h-[60vh] overflow-y-auto pr-1">
+              {/* Company Info */}
+              <div className="space-y-1">
+                <div className="text-[11px] font-bold text-slate-700 flex items-center justify-between">
+                  <span>About our company:</span>
+                  <span className="text-[10px] font-normal text-slate-400">Configured in System Settings</span>
+                </div>
+                <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-700 leading-relaxed whitespace-pre-wrap">
+                  {aiContextInfo?.companyDescription || <span className="text-slate-400 italic">No company description configured</span>}
+                </div>
+              </div>
+
+              {/* Campaign Info */}
+              <div className="space-y-1">
+                <div className="text-[11px] font-bold text-slate-700 flex items-center justify-between">
+                  <span>About this campaign ({aiContextInfo?.campaignName || 'No campaign assigned'}):</span>
+                  {aiContextInfo?.campaignOwnerName && (
+                    <span className="text-[10px] font-normal text-slate-400">Owner: {aiContextInfo.campaignOwnerName}</span>
+                  )}
+                </div>
+                <div className="p-3 bg-purple-50/50 border border-purple-200 rounded-xl text-xs text-slate-700 leading-relaxed whitespace-pre-wrap">
+                  {aiContextInfo?.aboutCampaign || <span className="text-slate-400 italic">No campaign info set</span>}
+                </div>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-between pt-2 border-t border-slate-100">
+              {aiContextInfo?.campaignId && aiContextInfo.canEditCampaignAbout ? (
+                <button
+                  type="button"
+                  id="view-modal-edit-campaign-info-btn"
+                  onClick={() => {
+                    setEditCampaignInfoText(aiContextInfo.aboutCampaign || '');
+                    setQuickCampaignInfoError(null);
+                    setShowAiContextViewModal(false);
+                    setShowAddCampaignInfoModal(true);
+                  }}
+                  className="px-3 py-1.5 text-xs font-semibold text-purple-700 hover:bg-purple-50 rounded-lg transition-colors cursor-pointer border border-purple-200"
+                >
+                  Edit Campaign Info
+                </button>
+              ) : <div />}
+              <button
+                type="button"
+                onClick={() => setShowAiContextViewModal(false)}
+                className="px-4 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-100 rounded-lg transition-colors cursor-pointer"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Add / Edit Campaign Info Quick Modal */}
+      {showAddCampaignInfoModal && aiContextInfo && (
+        <div className="fixed inset-0 z-70 flex items-center justify-center p-4 bg-slate-950/70 backdrop-blur-xs animate-in fade-in duration-100">
+          <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 max-w-lg w-full p-5 space-y-3.5 animate-in zoom-in-95 duration-150">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-2.5">
+              <div className="flex items-center gap-2">
+                <div className="w-7 h-7 rounded-lg bg-purple-100 text-purple-700 flex items-center justify-center">
+                  <Info className="w-4 h-4" />
+                </div>
+                <div>
+                  <h4 className="text-xs font-bold text-slate-900">About Campaign: {aiContextInfo.campaignName}</h4>
+                  <p className="text-[10px] text-slate-500">Provide context for the AI writing assistant</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowAddCampaignInfoModal(false)}
+                className="text-slate-400 hover:text-slate-600 p-1 rounded cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <p className="text-xs text-slate-600 leading-relaxed bg-slate-50 p-2.5 rounded-xl border border-slate-200">
+              Describe the offer, who this outreach is for, the goal of the emails and anything the AI should avoid promising.
+            </p>
+
+            <div className="space-y-1">
+              <textarea
+                value={editCampaignInfoText}
+                onChange={(e) => setEditCampaignInfoText(e.target.value.slice(0, 1000))}
+                rows={5}
+                maxLength={1000}
+                placeholder="e.g. Describe the offer, who this outreach is for, the goal of the emails and anything the AI should avoid promising."
+                className="w-full text-xs p-2.5 rounded-xl border border-slate-300 text-slate-800 placeholder-slate-400 focus:outline-hidden focus:ring-2 focus:ring-purple-500/20 focus:border-purple-500 leading-relaxed"
+              />
+              <div className="flex items-center justify-end text-[11px] text-slate-400 px-1">
+                <span className={editCampaignInfoText.length >= 1000 ? 'text-rose-600 font-bold' : 'font-mono'}>
+                  {editCampaignInfoText.length} / 1,000 characters
+                </span>
+              </div>
+            </div>
+
+            {quickCampaignInfoError && (
+              <div className="p-2 bg-rose-50 border border-rose-200 rounded text-xs text-rose-700">
+                {quickCampaignInfoError}
+              </div>
+            )}
+
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100">
+              <button
+                type="button"
+                onClick={() => setShowAddCampaignInfoModal(false)}
+                className="px-3.5 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-100 rounded-lg cursor-pointer transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                id="save-quick-campaign-info-btn"
+                disabled={isSavingQuickCampaignInfo}
+                onClick={handleSaveQuickCampaignInfo}
+                className="px-4 py-1.5 bg-purple-600 hover:bg-purple-700 disabled:opacity-50 text-white text-xs font-bold rounded-lg shadow-xs cursor-pointer transition-colors"
+              >
+                {isSavingQuickCampaignInfo ? 'Saving...' : 'Save Info'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
+

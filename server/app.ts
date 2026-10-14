@@ -15,6 +15,8 @@ import {
   checkCampaignImpact,
   duplicateCampaign,
   restoreCampaignVersion,
+  getCampaignAbout,
+  updateCampaignAbout,
   loadLocalSettings,
   saveLocalSettings,
   loadLocalSenders,
@@ -84,6 +86,7 @@ import {
   composeFullEmail,
   sanitizeHtml
 } from './templateBackend.ts';
+import { executeAiAssist } from './aiAssistBackend.ts';
 import { requireAuth, requirePermission, requireAdmin } from './authMiddleware.ts';
 import {
   getAuthProvider,
@@ -932,6 +935,44 @@ app.post(['/api/campaigns/:id/restore', '/api/campaigns/:id/restore-version'], a
   }
 });
 
+// Campaign "About this campaign" (plain text, max 1,000 characters)
+app.get('/api/campaigns/:id/about', async (req, res) => {
+  try {
+    const camp = await getCampaignAbout(req.params.id);
+    const isAdmin = req.user?.role === 'admin' || Boolean(req.user?.permissions?.includes('campaigns.editAny'));
+    const isOwner = Boolean(camp.ownerId && req.user?.id && camp.ownerId === req.user.id);
+    const canEditOwn = Boolean(req.user?.permissions?.includes('campaigns.editOwn'));
+    const canEdit = isAdmin || (isOwner && canEditOwn);
+
+    res.json({
+      success: true,
+      campaignId: camp.id,
+      name: camp.name,
+      aboutCampaign: camp.aboutCampaign || '',
+      ownerId: camp.ownerId || '',
+      ownerName: camp.ownerName || '',
+      lastEditedBy: camp.lastEditedBy || '',
+      lastEditedAt: camp.lastEditedAt || '',
+      canEdit
+    });
+  } catch (err: any) {
+    const status = err.status || 500;
+    res.status(status).json({ success: false, error: err.message });
+  }
+});
+
+app.post('/api/campaigns/:id/about', async (req, res) => {
+  try {
+    const { aboutCampaign } = req.body || {};
+    const result = await updateCampaignAbout(req.params.id, aboutCampaign, req.user);
+    res.json({ success: true, ...result });
+  } catch (err: any) {
+    const status = err.status || 500;
+    res.status(status).json({ success: false, error: err.message });
+  }
+});
+
+
 // --- Server-Side File Import Endpoint ---
 
 app.post('/api/import/parse', async (req, res) => {
@@ -1645,6 +1686,110 @@ app.get('/api/email/manual-reply/recent-cc', requireAuth, async (req, res) => {
   }
 });
 
+// 5. AI Writing Assistant Generation Endpoint (Gemini)
+app.post('/api/email/ai-assist', requirePermission('emails.useAiAssist'), async (req, res) => {
+  try {
+    const { leadId, instruction, mode, currentBodyHtml, selectedText, tone } = req.body || {};
+
+    if (!leadId) {
+      return res.status(400).json({ success: false, error: 'leadId is required' });
+    }
+
+    const result = await executeAiAssist({
+      user: req.user!,
+      leadId: String(leadId),
+      instruction,
+      mode,
+      currentBodyHtml,
+      selectedText,
+      tone
+    });
+
+    res.json({
+      success: true,
+      text: result.text,
+      promptText: result.promptText,
+      simulated: result.simulated
+    });
+  } catch (err: any) {
+    const status = err.status || 500;
+    if (status >= 500) {
+      console.error('API /api/email/ai-assist error:', err);
+    }
+    res.status(status).json({ success: false, error: err.message || 'AI assistant error' });
+  }
+});
+
+// AI Writing Assistant Context Metadata (Company Info + Campaign Info)
+app.get('/api/email/ai-assist/context', requirePermission('emails.useAiAssist'), async (req, res) => {
+  try {
+    const leadId = String(req.query.leadId || '').trim();
+    if (!leadId) {
+      return res.status(400).json({ success: false, error: 'leadId is required' });
+    }
+
+    const db = await getDb();
+    const leadDoc = (await db.collection(COLLECTIONS.LEADS).findOne({ leadId })) as unknown as (BackendLead | null);
+    if (!leadDoc) {
+      return res.status(404).json({ success: false, error: 'Lead not found' });
+    }
+
+    // Ownership check for non-admin
+    if (req.user && req.user.role !== 'admin' && leadDoc.ownerId && leadDoc.ownerId !== req.user.id) {
+      return res.status(404).json({ success: false, error: 'Lead not found' });
+    }
+
+    const settings = await loadLocalSettings();
+    const companyDescription = (settings.companyDescription || '').trim().substring(0, 1500);
+
+    let campaignId = (leadDoc.campaignId || '').trim();
+    let campaignName = '';
+    let aboutCampaign = '';
+    let campaignOwnerId = '';
+    let campaignOwnerName = '';
+
+    if (campaignId) {
+      const camp = await db.collection(COLLECTIONS.CAMPAIGNS).findOne({ id: campaignId });
+      if (camp) {
+        campaignName = camp.name || '';
+        aboutCampaign = (camp.aboutCampaign || '').trim().substring(0, 1000);
+        campaignOwnerId = camp.ownerId || '';
+        campaignOwnerName = camp.ownerName || '';
+      }
+    } else if (leadDoc.campaign && leadDoc.campaign !== 'Default') {
+      const camp = await db.collection(COLLECTIONS.CAMPAIGNS).findOne({ name: leadDoc.campaign });
+      if (camp) {
+        campaignId = camp.id || '';
+        campaignName = camp.name || '';
+        aboutCampaign = (camp.aboutCampaign || '').trim().substring(0, 1000);
+        campaignOwnerId = camp.ownerId || '';
+        campaignOwnerName = camp.ownerName || '';
+      }
+    }
+
+    const isAdmin = req.user?.role === 'admin' || Boolean(req.user?.permissions?.includes('campaigns.editAny'));
+    const isOwner = Boolean(campaignOwnerId && req.user?.id && campaignOwnerId === req.user.id);
+    const canEditOwn = Boolean(req.user?.permissions?.includes('campaigns.editOwn'));
+    const canEditCampaignAbout = isAdmin || (isOwner && canEditOwn);
+
+    res.json({
+      success: true,
+      leadId,
+      companyDescription,
+      hasCompanyInfo: Boolean(companyDescription),
+      campaignId,
+      campaignName,
+      aboutCampaign,
+      hasCampaignInfo: Boolean(aboutCampaign),
+      campaignOwnerId,
+      campaignOwnerName,
+      canEditCampaignAbout
+    });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // ===========================================================================
 // TEMPLATE SETS & EMAIL HEADER / FOOTER ENDPOINTS
 // ===========================================================================
@@ -1828,6 +1973,61 @@ app.post('/api/settings/header-footer', requireAuth, async (req, res) => {
       success: true,
       header: sanitizedHeader,
       footer: sanitizedFooter
+    });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 11. Get AI Writing Assistant Settings
+app.get('/api/settings/ai-writing-assistant', requireAuth, async (_req, res) => {
+  try {
+    const settings = await loadLocalSettings();
+    res.json({
+      success: true,
+      enabled: settings.aiWritingAssistantEnabled !== false,
+      companyDescription: settings.companyDescription || ''
+    });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 12. Update AI Writing Assistant Settings (Admin or settings.edit)
+app.post('/api/settings/ai-writing-assistant', requireAuth, async (req, res) => {
+  try {
+    const isAdmin = req.user?.role === 'admin';
+    const hasSettingsPerm = Boolean(req.user?.permissions?.includes('settings.edit'));
+
+    if (!isAdmin && !hasSettingsPerm) {
+      return res.status(403).json({
+        success: false,
+        error: 'Forbidden: Administrator or settings.edit permission required'
+      });
+    }
+
+    const { enabled, companyDescription } = req.body || {};
+    const cleanDesc = typeof companyDescription === 'string' ? companyDescription.trim() : '';
+    if (cleanDesc.length > 1500) {
+      return res.status(400).json({
+        success: false,
+        error: 'Company description exceeds maximum allowed length of 1,500 characters'
+      });
+    }
+
+    const currentSettings = await loadLocalSettings();
+    const updatedSettings = {
+      ...currentSettings,
+      aiWritingAssistantEnabled: enabled !== false,
+      companyDescription: cleanDesc
+    };
+
+    await saveLocalSettings(updatedSettings);
+
+    res.json({
+      success: true,
+      enabled: updatedSettings.aiWritingAssistantEnabled,
+      companyDescription: updatedSettings.companyDescription
     });
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });

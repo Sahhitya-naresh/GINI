@@ -81,6 +81,7 @@ export interface BackendCampaign {
   id: string;
   name: string;
   description?: string;
+  aboutCampaign?: string;
   version?: number;
   is_active: boolean;
   workflow_graph: {
@@ -152,6 +153,8 @@ export interface BackendSettings {
   positiveReplyAction?: 'pause_automatically' | 'ask_first';
   emailHeader?: string;
   emailFooter?: string;
+  aiWritingAssistantEnabled?: boolean;
+  companyDescription?: string;
 }
 
 export interface TrackingEvent {
@@ -790,6 +793,7 @@ export async function saveCampaign(campaign: Partial<BackendCampaign>, requestin
     id: campaign.id,
     name: campaign.name || existing?.name || 'Untitled Campaign',
     description: campaign.description !== undefined ? campaign.description : (existing?.description || ''),
+    aboutCampaign: campaign.aboutCampaign !== undefined ? campaign.aboutCampaign : (existing?.aboutCampaign || ''),
     version: currentVersion,
     is_active: Boolean(campaign.is_active ?? campaign.isActive ?? existing?.is_active ?? true),
     workflow_graph: campaign.workflow_graph || (campaign.nodes ? { nodes: campaign.nodes || [], edges: campaign.edges || [] } : existing?.workflow_graph || { nodes: [], edges: [] }),
@@ -911,6 +915,96 @@ export async function checkCampaignImpact(campaignId: string, requestingUserId?:
   };
 }
 
+export async function getCampaignAbout(campaignId: string): Promise<BackendCampaign> {
+  const db = await getDb();
+  const col = db.collection<BackendCampaign>(COLLECTIONS.CAMPAIGNS);
+  const cleanId = campaignId.trim();
+
+  const camp = await col.findOne({ id: cleanId }, { projection: { _id: 0 } });
+  if (!camp) {
+    const err: any = new Error(`Campaign with id "${campaignId}" not found`);
+    err.status = 404;
+    throw err;
+  }
+  return camp;
+}
+
+export async function updateCampaignAbout(
+  campaignId: string,
+  aboutCampaignRaw: string,
+  requestingUser?: { id?: string; name?: string; role?: string; permissions?: string[] }
+): Promise<{ id: string; aboutCampaign: string; lastEditedBy: string; lastEditedAt: string; ownerId: string; ownerName: string }> {
+  const db = await getDb();
+  const col = db.collection<BackendCampaign>(COLLECTIONS.CAMPAIGNS);
+  const cleanId = campaignId.trim();
+
+  const existing = await col.findOne({ id: cleanId }, { projection: { _id: 0 } });
+  if (!existing) {
+    const err: any = new Error(`Campaign with id "${campaignId}" not found`);
+    err.status = 404;
+    throw err;
+  }
+
+  // Permission check:
+  // Only the campaign owner (campaigns.editOwn) or an admin (campaigns.editAny) may edit it;
+  // others get 403 and see it read-only with the owner's name.
+  const isAdmin = requestingUser?.role === 'admin' || Boolean(requestingUser?.permissions?.includes('campaigns.editAny'));
+  const isOwner = Boolean(existing.ownerId && requestingUser?.id && existing.ownerId === requestingUser.id);
+  const canEditOwn = Boolean(requestingUser?.permissions?.includes('campaigns.editOwn'));
+
+  if (!isAdmin && !(isOwner && canEditOwn)) {
+    const ownerDisplayName = existing.ownerName || 'the campaign owner';
+    const err: any = new Error(`Forbidden: only ${ownerDisplayName} or an admin can edit About this campaign`);
+    err.status = 403;
+    throw err;
+  }
+
+  // Strip HTML and convert to plain text
+  let text = String(aboutCampaignRaw ?? '')
+    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
+    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .trim();
+
+  // Enforce max 1,000 characters
+  if (text.length > 1000) {
+    const err: any = new Error('Campaign info exceeds maximum allowed length of 1,000 characters');
+    err.status = 400;
+    throw err;
+  }
+
+  const now = new Date().toISOString();
+  const editorName = requestingUser?.name || 'System';
+
+  await col.updateOne(
+    { id: cleanId },
+    {
+      $set: {
+        aboutCampaign: text,
+        lastEditedBy: editorName,
+        lastEditedAt: now,
+        updated_date: now
+      }
+    }
+  );
+
+  return {
+    id: cleanId,
+    aboutCampaign: text,
+    lastEditedBy: editorName,
+    lastEditedAt: now,
+    ownerId: existing.ownerId || '',
+    ownerName: existing.ownerName || ''
+  };
+}
+
+
 export async function duplicateCampaign(campaignId: string, requestingUser?: { id: string; name?: string; role?: string }, newName?: string): Promise<BackendCampaign> {
   const db = await getDb();
   const col = db.collection<BackendCampaign>(COLLECTIONS.CAMPAIGNS);
@@ -930,6 +1024,7 @@ export async function duplicateCampaign(campaignId: string, requestingUser?: { i
     id: newId,
     name: duplicateName,
     description: existing.description || '',
+    aboutCampaign: existing.aboutCampaign || '',
     version: 1,
     is_active: false,
     workflow_graph: JSON.parse(JSON.stringify(existing.workflow_graph || { nodes: [], edges: [] })),
