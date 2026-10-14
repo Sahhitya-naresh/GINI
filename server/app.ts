@@ -86,7 +86,7 @@ import {
   composeFullEmail,
   sanitizeHtml
 } from './templateBackend.ts';
-import { executeAiAssist } from './aiAssistBackend.ts';
+import { executeAiAssist, executeTemplateAiAssist } from './aiAssistBackend.ts';
 import { requireAuth, requirePermission, requireAdmin } from './authMiddleware.ts';
 import {
   getAuthProvider,
@@ -1472,8 +1472,13 @@ app.post('/api/email/manual-reply', requirePermission('emails.replyManual'), asy
     const senderDisplayName = req.user?.name || 'Outreach Flow';
 
     // Compose WITHOUT tracking pixel and WITHOUT link tracking wrapping (no baseUrl, embedTrackingPixel: false)
+    const rawBody = String(bodyHtml || '').trim();
+    const effectiveBody = !/<(p|div|br|ul|ol|table)\b/i.test(rawBody)
+      ? rawBody.split(/\n{2,}/).map(p => `<p style="margin: 0 0 14px 0; line-height: 1.6;">${p.trim().replace(/\n/g, '<br/>')}</p>`).join('\n')
+      : rawBody;
+
     const composed = composeFullEmail({
-      bodyHtml: sanitizeHtml(bodyHtml),
+      bodyHtml: sanitizeHtml(effectiveBody),
       headerHtml: serverHeader,
       footerHtml: serverFooter,
       lead: leadDoc,
@@ -1717,6 +1722,37 @@ app.post('/api/email/ai-assist', requirePermission('emails.useAiAssist'), async 
       console.error('API /api/email/ai-assist error:', err);
     }
     res.status(status).json({ success: false, error: err.message || 'AI assistant error' });
+  }
+});
+
+// Template AI Writing Assistant Generation Endpoint
+app.post('/api/templates/ai-assist', requirePermission('emails.useAiAssist'), async (req, res) => {
+  try {
+    const { stageNumber, stageName, stagePurpose, instruction, mode, currentBodyText, selectedText, tone } = req.body || {};
+    const result = await executeTemplateAiAssist({
+      user: req.user!,
+      stageNumber: typeof stageNumber === 'number' ? stageNumber : 1,
+      stageName: String(stageName || 'Outreach Stage'),
+      stagePurpose: String(stagePurpose || ''),
+      instruction,
+      mode,
+      currentBodyText,
+      selectedText,
+      tone
+    });
+
+    res.json({
+      success: true,
+      text: result.text,
+      promptText: result.promptText,
+      simulated: result.simulated
+    });
+  } catch (err: any) {
+    const status = err.status || 500;
+    if (status >= 500) {
+      console.error('API /api/templates/ai-assist error:', err);
+    }
+    res.status(status).json({ success: false, error: err.message || 'Template AI assistant error' });
   }
 });
 

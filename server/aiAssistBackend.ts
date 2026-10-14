@@ -433,3 +433,220 @@ export async function executeAiAssist(params: AiAssistParams): Promise<AiAssistR
     simulated: isSimulated
   };
 }
+
+/**
+ * Mock generator for template stage drafting when GEMINI_API_KEY is not configured.
+ */
+export function generateMockTemplateResponse(params: {
+  stageNumber: number;
+  stageName: string;
+  instruction: string;
+  mode: 'write' | 'rewrite';
+  selectedText: string;
+  currentBodyText: string;
+  tone: string;
+}): string {
+  const { stageNumber, stageName, instruction, mode, selectedText, currentBodyText, tone } = params;
+  const lowerInst = (instruction || '').toLowerCase();
+
+  if (mode === 'rewrite' || selectedText) {
+    const baseText = selectedText || currentBodyText || 'Following up on our previous note.';
+    if (lowerInst.includes('shorten')) {
+      return `Hi {{first_name}},\n\nWanted to quickly check if you had a moment to connect regarding {{company}}'s workflows? Would 10 minutes this week work?`;
+    }
+    if (lowerInst.includes('expand')) {
+      return `Hi {{first_name}},\n\nI wanted to share some additional context following my previous note. Many teams in your space encounter bottlenecks around {{pain_point}}, and our platform helps streamline that entire process.\n\nWould you be open to a brief 15-minute conversation this week?`;
+    }
+    if (lowerInst.includes('formal') || tone === 'More formal') {
+      return `Dear {{first_name}},\n\nI am writing to inquire whether you have reviewed our previous outreach regarding {{pain_point}} at {{company}}. We would welcome the opportunity to discuss this further at your convenience.`;
+    }
+    if (lowerInst.includes('friendly') || tone === 'Friendlier') {
+      return `Hi {{first_name}}!\n\nHope your week is off to a great start. Did you have a quick minute to check out my previous note regarding {{company}}?\n\nWould love to hear your thoughts!`;
+    }
+    if (lowerInst.includes('persuasive') || tone === 'More persuasive') {
+      return `Hi {{first_name}},\n\nMost high-growth teams tackling {{pain_point}} see tangible efficiency improvements within their first 14 days. Could we set up a 10-minute demo to explore how this applies to {{company}}?`;
+    }
+    if (lowerInst.includes('grammar') || tone === 'Fix grammar') {
+      return baseText.replace(/\s+/g, ' ').trim();
+    }
+    return `Hi {{first_name}},\n\nFollowing up on my previous note regarding {{pain_point}} at {{company}}. Would you have 10 minutes for a brief call this week?`;
+  }
+
+  // Write new draft based on stage
+  if (stageNumber === 1) {
+    return `Hi {{first_name}},\n\nI noticed {{company}} is scaling rapidly and wanted to reach out regarding {{pain_point}}.\n\nWe help teams streamline their outreach and deliverability so they can focus on closing deals. Would you be open to a 10-minute call this Thursday to see how it works?`;
+  } else if (stageNumber === 2) {
+    return `Hi {{first_name}},\n\nFollowing up on my earlier note. I know you're busy, but I wanted to make sure my previous message didn't get buried.\n\nAre you available for a brief conversation this week?`;
+  } else if (stageNumber === 7) {
+    return `Hi {{first_name}},\n\nI haven't heard back, so I assume this isn't a priority for {{company}} right now. Totally understand!\n\nIf you ever want to revisit tackling {{pain_point}}, feel free to reach out. Wishing you all the best!`;
+  }
+  return `Hi {{first_name}},\n\nWanted to follow up on my previous message. Have you had a chance to consider tackling {{pain_point}} at {{company}}?\n\nLet me know if you'd like to chat briefly this week.`;
+}
+
+export interface TemplateAiAssistParams {
+  user: AiAssistUser;
+  stageNumber?: number;
+  stageName?: string;
+  stagePurpose?: string;
+  instruction?: string;
+  mode?: 'write' | 'rewrite';
+  currentBodyText?: string;
+  selectedText?: string;
+  tone?: string;
+}
+
+/**
+ * AI generation handler for sequence templates studio.
+ */
+export async function executeTemplateAiAssist(params: TemplateAiAssistParams): Promise<AiAssistResult> {
+  const {
+    user,
+    stageNumber = 1,
+    stageName = 'Outreach Stage',
+    stagePurpose = '',
+    instruction = '',
+    mode = 'write',
+    currentBodyText = '',
+    selectedText = '',
+    tone = ''
+  } = params;
+
+  if (instruction && instruction.length > 2000) {
+    const err: any = new Error('Instruction exceeds maximum length of 2,000 characters');
+    err.status = 400;
+    throw err;
+  }
+
+  const db = await getDb();
+  const settings = await loadLocalSettings();
+  if (settings.aiWritingAssistantEnabled === false) {
+    const err: any = new Error('The AI writing assistant is currently disabled in system settings');
+    err.status = 403;
+    throw err;
+  }
+
+  // Rate-limit check (20 requests per 10 minutes)
+  const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000);
+  const recentAiRequests = await db.collection(COLLECTIONS.AI_RATE_LIMITS).countDocuments({
+    userId: user.id,
+    timestamp: { $gte: tenMinutesAgo }
+  });
+
+  if (recentAiRequests >= 20) {
+    const err: any = new Error('Rate limit exceeded: You have reached the limit of 20 AI assistant requests per 10 minutes. Please wait before generating again.');
+    err.status = 429;
+    throw err;
+  }
+
+  const companyDescription = (settings.companyDescription || '').substring(0, 1500);
+  const cleanSelectedText = (selectedText || '').trim().substring(0, 2000);
+  const effectiveMode = mode === 'rewrite' || Boolean(cleanSelectedText) ? 'rewrite' : 'write';
+
+  const prompt = `You are an AI cold outreach copywriter crafting an email template for stage ${stageNumber} ("${stageName}" - ${stagePurpose || 'Outbound sequence'}).
+
+Rules:
+1. Write ONLY the inner email body text.
+2. Do NOT write HTML tags (<p>, <br>, <div>). Write clean, natural plain text with paragraphs separated by double line breaks.
+3. Do NOT include subject lines, headers, footers, or signatures.
+4. You may use cold outreach merge tags: {{first_name}}, {{company}}, {{pain_point}}, {{sender_name}}.
+5. Keep it short, natural, concise, and in the requested tone (${tone || 'professional'}).
+6. Do NOT invent specific company pricing, guarantees, or dates.
+7. Mode: ${effectiveMode === 'rewrite' ? 'REWRITE the existing text while preserving its key message' : 'DRAFT a brand-new high-converting cold email template'}.
+
+=== COMPANY BACKGROUND ===
+${companyDescription || '(No specific company description configured)'}
+
+=== CURRENT TEMPLATE BODY ===
+${cleanSelectedText ? `Selection to rewrite:\n${cleanSelectedText}` : currentBodyText || '(Empty template)'}
+
+=== USER INSTRUCTION ===
+${instruction.trim() || (effectiveMode === 'rewrite' ? `Rewrite in ${tone || 'professional'} tone.` : 'Write a high-converting cold outreach template.')}
+`;
+
+  const apiKey = process.env.GEMINI_API_KEY;
+  const modelName = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
+  let generatedRawText = '';
+  let isSimulated = false;
+
+  if (apiKey && apiKey.trim() && apiKey.trim() !== 'YOUR_GEMINI_API_KEY') {
+    try {
+      const ai = new GoogleGenAI({ apiKey: apiKey.trim() });
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 20000);
+
+      const response = await Promise.race([
+        ai.models.generateContent({
+          model: modelName,
+          contents: prompt
+        }),
+        new Promise<never>((_, reject) => {
+          setTimeout(() => reject(new Error('Gemini API call timed out after 20 seconds')), 20000);
+        })
+      ]);
+
+      clearTimeout(timeoutId);
+      generatedRawText = response.text || '';
+    } catch (apiErr: any) {
+      console.error('[Gemini Template AI Assist] Call failed:', apiErr.message);
+      const friendlyErr: any = new Error(
+        apiErr.message?.includes('timed out')
+          ? 'Gemini generation timed out after 20 seconds. Please try again.'
+          : `AI assistant error: ${apiErr.message || 'Unable to generate response'}`
+      );
+      friendlyErr.status = 502;
+      throw friendlyErr;
+    }
+  } else {
+    isSimulated = true;
+    console.log('[Gemini Template AI Assist] No GEMINI_API_KEY detected. Exact prompt that would be sent:\n', prompt);
+    generatedRawText = generateMockTemplateResponse({
+      stageNumber,
+      stageName,
+      instruction,
+      mode: effectiveMode,
+      selectedText: cleanSelectedText,
+      currentBodyText,
+      tone
+    });
+  }
+
+  // Strip any markdown code blocks or html tags so it returns 100% clean plain text
+  let cleanText = generatedRawText
+    .replace(/^```[a-z]*\s*/i, '')
+    .replace(/\s*```$/i, '')
+    .replace(/<br\s*[\/]?>/gi, '\n')
+    .replace(/<\/p>\s*<p[^>]*>/gi, '\n\n')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .trim();
+
+  // Rate-limit record and audit log
+  const now = new Date();
+  await db.collection(COLLECTIONS.AI_RATE_LIMITS).insertOne({
+    userId: user.id,
+    timestamp: now
+  });
+
+  await db.collection(COLLECTIONS.AI_AUDIT_LOGS).insertOne({
+    userId: user.id,
+    userEmail: user.email,
+    timestamp: now.toISOString(),
+    mode: effectiveMode,
+    tone: tone || undefined,
+    modelUsed: isSimulated ? 'mocked-offline' : modelName,
+    instructionLength: instruction.length,
+    simulated: isSimulated,
+    isTemplate: true
+  });
+
+  return {
+    text: cleanText,
+    promptText: prompt,
+    simulated: isSimulated
+  };
+}

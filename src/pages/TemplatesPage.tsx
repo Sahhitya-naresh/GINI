@@ -18,7 +18,13 @@ import {
   AlertTriangle,
   ChevronDown,
   RefreshCw,
-  User
+  User,
+  Bold,
+  Italic,
+  List,
+  Link2,
+  Sparkles,
+  X
 } from 'lucide-react';
 import {
   getDefaultTemplateSet,
@@ -29,6 +35,7 @@ import {
   getHeaderFooter
 } from '../services/templateService';
 import { listUsersApi } from '../services/authService';
+import { htmlToPlainText, plainTextToEmailHtml } from '../utils/emailFormatters';
 
 interface TemplateAdminProps {
   templates?: StageTemplate[];
@@ -94,6 +101,19 @@ export const TemplateAdmin: React.FC<TemplateAdminProps> = ({
     }).catch(() => {});
   }, []);
 
+  // AI Assistant state for templates
+  const [isAiPanelOpen, setIsAiPanelOpen] = useState(false);
+  const [aiInstruction, setAiInstruction] = useState('');
+  const [aiTone, setAiTone] = useState<string>('');
+  const [aiMode, setAiMode] = useState<'write' | 'rewrite'>('write');
+  const [aiApplySelectionOnly, setAiApplySelectionOnly] = useState(false);
+  const [selectedText, setSelectedText] = useState('');
+  const [selectionRange, setSelectionRange] = useState<{ start: number; end: number } | null>(null);
+  const [isGeneratingAi, setIsGeneratingAi] = useState(false);
+  const [aiError, setAiError] = useState<string | null>(null);
+  const [aiGeneratedResult, setAiGeneratedResult] = useState<string | null>(null);
+  const [previousBodyForUndo, setPreviousBodyForUndo] = useState<string | null>(null);
+
   // Load template set based on activeSetType and selectedUserId
   const loadActiveSet = async () => {
     setIsLoadingSet(true);
@@ -109,7 +129,10 @@ export const TemplateAdmin: React.FC<TemplateAdminProps> = ({
         set = await getUserTemplateSet(currentUser?.id || 'current');
       }
       setCurrentSet(set);
-      setEditedStages(set.stages || []);
+      setEditedStages((set.stages || []).map(s => ({
+        ...s,
+        bodyHtml: htmlToPlainText(s.bodyHtml)
+      })));
     } catch (err: any) {
       setSaveError(err.message || 'Failed to load template set');
     } finally {
@@ -142,7 +165,7 @@ export const TemplateAdmin: React.FC<TemplateAdminProps> = ({
 
   const renderedSubject = renderEmailMergeTags(currentStage.subject || '', previewLead, senderName);
   const renderedHeader = globalHeader ? renderEmailMergeTags(globalHeader, previewLead, senderName) : '';
-  const renderedBodyHtml = renderEmailMergeTags(currentStage.bodyHtml || '', previewLead, senderName);
+  const renderedBodyHtml = renderEmailMergeTags(plainTextToEmailHtml(currentStage.bodyHtml || ''), previewLead, senderName);
   const renderedFooter = globalFooter ? renderEmailMergeTags(globalFooter, previewLead, senderName) : '';
 
   // Calculate full composed plain text length for length warning
@@ -174,9 +197,16 @@ export const TemplateAdmin: React.FC<TemplateAdminProps> = ({
     if (!currentSet) return;
     setSaveError(null);
     try {
-      const saved = await saveTemplateSet(currentSet.id, editedStages);
+      const stagesToSave = editedStages.map(s => ({
+        ...s,
+        bodyHtml: plainTextToEmailHtml(s.bodyHtml)
+      }));
+      const saved = await saveTemplateSet(currentSet.id, stagesToSave);
       setCurrentSet(saved);
-      setEditedStages(saved.stages);
+      setEditedStages((saved.stages || []).map(s => ({
+        ...s,
+        bodyHtml: htmlToPlainText(s.bodyHtml)
+      })));
       setShowSavedToast(true);
       setTimeout(() => setShowSavedToast(false), 2500);
     } catch (err: any) {
@@ -189,7 +219,10 @@ export const TemplateAdmin: React.FC<TemplateAdminProps> = ({
     try {
       const restored = await restoreTemplateSetVersion(currentSet.id, versionNumber);
       setCurrentSet(restored);
-      setEditedStages(restored.stages);
+      setEditedStages((restored.stages || []).map(s => ({
+        ...s,
+        bodyHtml: htmlToPlainText(s.bodyHtml)
+      })));
       setShowHistoryModal(false);
       setShowSavedToast(true);
       setTimeout(() => setShowSavedToast(false), 2500);
@@ -204,7 +237,10 @@ export const TemplateAdmin: React.FC<TemplateAdminProps> = ({
     try {
       const resetSet = await resetUserTemplateSetToDefault(currentUser.id);
       setCurrentSet(resetSet);
-      setEditedStages(resetSet.stages);
+      setEditedStages((resetSet.stages || []).map(s => ({
+        ...s,
+        bodyHtml: htmlToPlainText(s.bodyHtml)
+      })));
       setShowResetModal(false);
       setShowSavedToast(true);
       setTimeout(() => setShowSavedToast(false), 2500);
@@ -213,6 +249,24 @@ export const TemplateAdmin: React.FC<TemplateAdminProps> = ({
     } finally {
       setIsResetting(false);
     }
+  };
+
+  const insertFormatting = (prefix: string, suffix: string) => {
+    const textarea = document.getElementById('template-body-input') as HTMLTextAreaElement | null;
+    if (!textarea) return;
+
+    const start = textarea.selectionStart;
+    const end = textarea.selectionEnd;
+    const current = currentStage.bodyHtml || '';
+    const selected = current.substring(start, end);
+    const replacement = `${prefix}${selected || 'text'}${suffix}`;
+    const nextBody = current.substring(0, start) + replacement + current.substring(end);
+    handleFieldChange('bodyHtml', nextBody);
+
+    setTimeout(() => {
+      textarea.focus();
+      textarea.setSelectionRange(start + prefix.length, start + prefix.length + (selected.length || 4));
+    }, 50);
   };
 
   const insertMergeTag = (tag: string) => {
@@ -230,6 +284,132 @@ export const TemplateAdmin: React.FC<TemplateAdminProps> = ({
       textarea.focus();
       textarea.setSelectionRange(start + tag.length, start + tag.length);
     }, 50);
+  };
+
+  const handleToggleAiPanel = () => {
+    if (!isAiPanelOpen) {
+      const textarea = document.getElementById('template-body-input') as HTMLTextAreaElement | null;
+      let selText = '';
+      let range = null;
+      if (textarea && textarea.selectionStart !== textarea.selectionEnd) {
+        selText = textarea.value.substring(textarea.selectionStart, textarea.selectionEnd);
+        range = { start: textarea.selectionStart, end: textarea.selectionEnd };
+      }
+      setSelectedText(selText);
+      setSelectionRange(range);
+      setAiApplySelectionOnly(Boolean(selText.trim()));
+
+      const hasText = (currentStage.bodyHtml || '').trim().length > 0;
+      setAiMode(hasText ? 'rewrite' : 'write');
+      setAiError(null);
+      setAiGeneratedResult(null);
+      setIsAiPanelOpen(true);
+    } else {
+      setIsAiPanelOpen(false);
+      setAiGeneratedResult(null);
+      setAiError(null);
+    }
+  };
+
+  const handleQuickChip = (chip: string) => {
+    if (chip === 'Write cold email') {
+      setAiMode('write');
+      setAiInstruction('Write an engaging, concise cold outreach email tailored for this sequence stage.');
+      setAiTone('');
+    } else if (chip === 'Short pitch') {
+      setAiMode('write');
+      setAiInstruction('Write a short, punchy 3-sentence outreach email getting straight to the value proposition.');
+    } else if (chip === 'Pain point focus') {
+      setAiMode('write');
+      setAiInstruction("Focus directly on addressing the recipient's key business pain points and inefficiencies.");
+    } else if (chip === 'Case study follow-up') {
+      setAiMode('write');
+      setAiInstruction('Write a follow-up referencing a recent success story with tangible ROI numbers.');
+    } else if (chip === 'Quick question') {
+      setAiMode('write');
+      setAiInstruction('Keep it ultra brief with a quick question to gauge interest.');
+    } else if (chip === 'Shorten') {
+      setAiMode('rewrite');
+      setAiInstruction('Make it more concise and directly to the point.');
+    } else if (chip === 'Expand') {
+      setAiMode('rewrite');
+      setAiInstruction('Expand with more supportive context and clear value explanation.');
+    } else if (chip === 'Friendlier') {
+      setAiMode('rewrite');
+      setAiTone('Friendlier');
+      setAiInstruction('Rewrite in a warm, welcoming, and friendly tone.');
+    } else if (chip === 'More formal') {
+      setAiMode('rewrite');
+      setAiTone('More formal');
+      setAiInstruction('Rewrite in a professional, polished, and formal tone.');
+    } else if (chip === 'More persuasive') {
+      setAiMode('rewrite');
+      setAiTone('More persuasive');
+      setAiInstruction('Rewrite with stronger emphasis on value and a clear call to action.');
+    } else if (chip === 'Fix grammar') {
+      setAiMode('rewrite');
+      setAiInstruction('Fix any grammar, spelling, and phrasing issues while keeping the exact meaning.');
+    }
+  };
+
+  const handleGenerateAi = async () => {
+    setIsGeneratingAi(true);
+    setAiError(null);
+
+    try {
+      const res = await fetch('/api/templates/ai-assist', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          stageNumber: currentStage.stage,
+          stageName: currentStage.name,
+          stagePurpose: currentStage.purpose,
+          instruction: aiInstruction.trim(),
+          mode: aiMode,
+          currentBodyText: currentStage.bodyHtml || '',
+          selectedText: aiApplySelectionOnly && selectedText ? selectedText : undefined,
+          tone: aiTone
+        })
+      });
+
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        throw new Error(data.error || 'Failed to generate template text');
+      }
+
+      const cleanResult = htmlToPlainText(data.text || '');
+      setAiGeneratedResult(cleanResult);
+    } catch (err: any) {
+      setAiError(err.message || 'Error communicating with AI assistant');
+    } finally {
+      setIsGeneratingAi(false);
+    }
+  };
+
+  const handleInsertAiResult = () => {
+    if (!aiGeneratedResult) return;
+    setPreviousBodyForUndo(currentStage.bodyHtml);
+
+    const textarea = document.getElementById('template-body-input') as HTMLTextAreaElement | null;
+    if (aiApplySelectionOnly && selectionRange && textarea) {
+      const cur = currentStage.bodyHtml || '';
+      const before = cur.substring(0, selectionRange.start);
+      const after = cur.substring(selectionRange.end);
+      handleFieldChange('bodyHtml', before + aiGeneratedResult + after);
+    } else {
+      handleFieldChange('bodyHtml', aiGeneratedResult);
+    }
+
+    setIsAiPanelOpen(false);
+    setAiGeneratedResult(null);
+    setAiError(null);
+  };
+
+  const handleUndoAi = () => {
+    if (previousBodyForUndo !== null) {
+      handleFieldChange('bodyHtml', previousBodyForUndo);
+      setPreviousBodyForUndo(null);
+    }
   };
 
   return (
@@ -487,16 +667,26 @@ export const TemplateAdmin: React.FC<TemplateAdminProps> = ({
             <div className="flex items-center gap-1.5 bg-slate-100 p-0.5 rounded-lg border border-slate-200 text-xs">
               <button
                 type="button"
-                onClick={() => setEditorMode('visual')}
+                onClick={() => {
+                  if (editorMode === 'code') {
+                    handleFieldChange('bodyHtml', htmlToPlainText(currentStage.bodyHtml || ''));
+                  }
+                  setEditorMode('visual');
+                }}
                 className={`px-2.5 py-1 rounded-md font-semibold transition-colors ${
                   editorMode === 'visual' ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-500 hover:text-slate-800'
                 }`}
               >
-                Visual Mode
+                Visual (Simple Text)
               </button>
               <button
                 type="button"
-                onClick={() => setEditorMode('code')}
+                onClick={() => {
+                  if (editorMode === 'visual') {
+                    handleFieldChange('bodyHtml', plainTextToEmailHtml(currentStage.bodyHtml || ''));
+                  }
+                  setEditorMode('code');
+                }}
                 className={`px-2.5 py-1 rounded-md font-semibold transition-colors ${
                   editorMode === 'code' ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-500 hover:text-slate-800'
                 }`}
@@ -598,19 +788,295 @@ export const TemplateAdmin: React.FC<TemplateAdminProps> = ({
             </div>
 
             {/* EDITABLE Email Body Content */}
-            <div>
+            <div className="space-y-1.5">
               <div className="flex items-center justify-between mb-1">
-                <label className="block text-xs font-semibold text-slate-700">
-                  {editorMode === 'visual' ? 'Email HTML Body Markup' : 'Raw HTML'}
-                </label>
-                <span className="text-[11px] text-slate-400">Wraps click tracking automatically</span>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700">
+                    {editorMode === 'visual' ? 'Email Body (Simple Text)' : 'Raw HTML Markup'}
+                  </label>
+                  <span className="text-[11px] text-slate-400">
+                    {editorMode === 'visual' 
+                      ? 'No HTML code needed — type naturally. Paragraphs and formatting convert to email HTML automatically.' 
+                      : 'Raw HTML mode for advanced email markup.'}
+                  </span>
+                </div>
+                <span className="text-[11px] text-slate-400 font-mono">
+                  {(currentStage.bodyHtml || '').length} chars
+                </span>
               </div>
+
+              {/* Formatting Toolbar */}
+              <div className="p-1.5 bg-slate-100 border border-slate-200 rounded-t-lg flex items-center justify-between gap-2 flex-wrap">
+                <div className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={() => insertFormatting('**', '**')}
+                    className="p-1.5 text-slate-600 hover:text-slate-900 hover:bg-white rounded transition-colors cursor-pointer"
+                    title="Bold (**text**)"
+                  >
+                    <Bold className="w-3.5 h-3.5" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => insertFormatting('_', '_')}
+                    className="p-1.5 text-slate-600 hover:text-slate-900 hover:bg-white rounded transition-colors cursor-pointer"
+                    title="Italic (_text_)"
+                  >
+                    <Italic className="w-3.5 h-3.5" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => insertFormatting('• ', '')}
+                    className="p-1.5 text-slate-600 hover:text-slate-900 hover:bg-white rounded transition-colors cursor-pointer"
+                    title="Bullet list (• item)"
+                  >
+                    <List className="w-3.5 h-3.5" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => insertFormatting('[', '](https://)')}
+                    className="p-1.5 text-slate-600 hover:text-slate-900 hover:bg-white rounded transition-colors cursor-pointer"
+                    title="Insert hyperlink ([text](url))"
+                  >
+                    <Link2 className="w-3.5 h-3.5" />
+                  </button>
+
+                  <div className="h-4 w-px bg-slate-300 mx-1" />
+
+                  {/* AI Assistant Button */}
+                  <button
+                    type="button"
+                    id="template-ai-assist-btn"
+                    onClick={handleToggleAiPanel}
+                    className={`px-2.5 py-1 text-xs font-semibold rounded flex items-center gap-1.5 transition-colors cursor-pointer border ${
+                      isAiPanelOpen
+                        ? 'bg-purple-600 text-white border-purple-600 shadow-2xs'
+                        : 'bg-white text-purple-700 hover:bg-purple-50 border-purple-200'
+                    }`}
+                    title="AI Writing Assistant (Gemini)"
+                  >
+                    <Sparkles className="w-3.5 h-3.5 text-purple-500" />
+                    <span>AI Assistant</span>
+                  </button>
+
+                  {/* Undo AI Button */}
+                  {previousBodyForUndo !== null && (
+                    <button
+                      type="button"
+                      id="template-ai-undo-btn"
+                      onClick={handleUndoAi}
+                      className="px-2 py-1 text-xs font-medium text-slate-600 hover:text-slate-900 hover:bg-white rounded border border-slate-200 flex items-center gap-1 transition-colors cursor-pointer"
+                      title="Undo AI changes"
+                    >
+                      <RotateCcw className="w-3.5 h-3.5 text-slate-500" />
+                      <span>Undo AI</span>
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {/* Anchored AI Assistant Panel */}
+              {isAiPanelOpen && (
+                <div id="template-ai-panel" className="p-3.5 bg-purple-50/70 border-x border-b border-purple-200 space-y-3 animate-in fade-in duration-100">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-1.5 text-xs font-bold text-purple-900">
+                      <Sparkles className="w-3.5 h-3.5 text-purple-600" />
+                      <span>AI Sequence Assistant &bull; Stage {currentStage.stage} ({currentStage.name})</span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setIsAiPanelOpen(false)}
+                      className="text-slate-400 hover:text-slate-600 p-0.5 rounded cursor-pointer"
+                      title="Close AI panel"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+
+                  {/* Mode Selector & Selection Scope */}
+                  <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                    <div className="inline-flex rounded-lg border border-purple-200 bg-white p-0.5">
+                      <button
+                        type="button"
+                        onClick={() => setAiMode('write')}
+                        className={`px-2.5 py-1 rounded-md font-medium text-xs transition-colors cursor-pointer ${
+                          aiMode === 'write' ? 'bg-purple-600 text-white' : 'text-slate-600 hover:text-purple-700'
+                        }`}
+                      >
+                        Write new template
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setAiMode('rewrite')}
+                        className={`px-2.5 py-1 rounded-md font-medium text-xs transition-colors cursor-pointer ${
+                          aiMode === 'rewrite' ? 'bg-purple-600 text-white' : 'text-slate-600 hover:text-purple-700'
+                        }`}
+                      >
+                        Rewrite / Improve
+                      </button>
+                    </div>
+
+                    {selectedText && (
+                      <label className="flex items-center gap-1.5 text-xs text-purple-900 cursor-pointer font-medium">
+                        <input
+                          type="checkbox"
+                          checked={aiApplySelectionOnly}
+                          onChange={(e) => setAiApplySelectionOnly(e.target.checked)}
+                          className="rounded border-purple-300 text-purple-600 focus:ring-purple-500 cursor-pointer"
+                        />
+                        <span>Apply to selection only ({selectedText.length} chars)</span>
+                      </label>
+                    )}
+                  </div>
+
+                  {/* Quick Chips */}
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    <span className="text-[10px] uppercase font-bold text-purple-700 tracking-wider">Quick Prompts:</span>
+                    {(aiMode === 'write' ? [
+                      'Write cold email',
+                      'Short pitch',
+                      'Pain point focus',
+                      'Case study follow-up',
+                      'Quick question'
+                    ] : [
+                      'Shorten',
+                      'Expand',
+                      'Friendlier',
+                      'More formal',
+                      'More persuasive',
+                      'Fix grammar'
+                    ]).map(chip => (
+                      <button
+                        key={chip}
+                        type="button"
+                        onClick={() => handleQuickChip(chip)}
+                        className="px-2 py-0.5 bg-white hover:bg-purple-100 text-purple-800 text-[11px] font-medium rounded-full border border-purple-200 transition-colors cursor-pointer shadow-2xs"
+                      >
+                        {chip}
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* Custom Instruction Box */}
+                  <div className="space-y-1">
+                    <textarea
+                      value={aiInstruction}
+                      onChange={(e) => setAiInstruction(e.target.value)}
+                      rows={2}
+                      placeholder={
+                        aiMode === 'write' 
+                          ? `e.g. Write an attention-grabbing Stage ${currentStage.stage} email highlighting our 14-day trial, with a clear CTA...`
+                          : 'e.g. Make it more concise, friendly, and strengthen the value proposition...'
+                      }
+                      className="w-full text-xs p-2.5 bg-white border border-purple-200 rounded-lg text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-purple-500/30 focus:border-purple-500 leading-relaxed"
+                    />
+                    <div className="flex items-center justify-between text-[11px] text-slate-500 pt-1">
+                      <span className="italic text-[10px]">Generates clean plain text. Merge tags like {`{{company}}`} and {`{{first_name}}`} are supported.</span>
+                      <button
+                        type="button"
+                        id="template-ai-generate-btn"
+                        disabled={isGeneratingAi}
+                        onClick={handleGenerateAi}
+                        className="px-3 py-1.5 bg-purple-600 hover:bg-purple-700 text-white font-bold rounded-lg shadow-xs disabled:opacity-50 flex items-center gap-1 cursor-pointer transition-colors"
+                      >
+                        {isGeneratingAi ? (
+                          <>
+                            <RefreshCw className="w-3 h-3 animate-spin" />
+                            <span>Generating...</span>
+                          </>
+                        ) : (
+                          <>
+                            <Sparkles className="w-3 h-3" />
+                            <span>Generate</span>
+                          </>
+                        )}
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* AI Error Alert */}
+                  {aiError && (
+                    <div className="p-2.5 bg-red-50 border border-red-200 rounded-lg text-xs text-red-700 flex items-center gap-1.5">
+                      <AlertTriangle className="w-3.5 h-3.5 shrink-0 text-red-500" />
+                      <span>{aiError}</span>
+                    </div>
+                  )}
+
+                  {/* Result Preview Box */}
+                  {aiGeneratedResult && (
+                    <div id="template-ai-result-preview" className="p-3 bg-white border border-purple-300 rounded-xl space-y-2.5 shadow-2xs">
+                      <div className="flex items-center justify-between text-xs text-purple-900 font-bold border-b border-purple-100 pb-1.5">
+                        <span>Preview Generated Template:</span>
+                        <span className="text-[10px] font-normal text-slate-400">Review before inserting</span>
+                      </div>
+                      <div 
+                        className="text-xs text-slate-800 leading-relaxed max-h-48 overflow-y-auto p-2.5 bg-slate-50 rounded-lg border border-slate-100 font-sans whitespace-pre-wrap"
+                      >
+                        {aiGeneratedResult}
+                      </div>
+                      <div className="flex items-center justify-end gap-2 pt-1 border-t border-purple-100">
+                        <button
+                          type="button"
+                          onClick={() => setAiGeneratedResult(null)}
+                          className="px-2.5 py-1 text-xs text-slate-500 hover:text-slate-800 rounded transition-colors cursor-pointer"
+                        >
+                          Cancel
+                        </button>
+                        <button
+                          type="button"
+                          onClick={handleGenerateAi}
+                          disabled={isGeneratingAi}
+                          className="px-2.5 py-1 text-xs text-purple-700 hover:bg-purple-100 rounded border border-purple-200 transition-colors cursor-pointer"
+                        >
+                          Try again
+                        </button>
+                        <button
+                          type="button"
+                          id="template-ai-insert-btn"
+                          onClick={handleInsertAiResult}
+                          className="px-3.5 py-1 text-xs font-bold bg-purple-600 hover:bg-purple-700 text-white rounded-lg shadow-xs flex items-center gap-1 cursor-pointer transition-colors"
+                        >
+                          <Check className="w-3.5 h-3.5" />
+                          <span>{aiMode === 'rewrite' || (aiApplySelectionOnly && selectedText) ? 'Replace' : 'Insert into Template'}</span>
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Textarea */}
               <textarea
                 id="template-body-input"
-                rows={10}
+                rows={11}
                 value={currentStage.bodyHtml}
-                onChange={(e) => handleFieldChange('bodyHtml', e.target.value)}
-                className="w-full p-3 font-mono text-xs leading-relaxed rounded-lg border border-slate-300 focus:outline-none focus:ring-2 focus:ring-red-500 text-slate-800 bg-slate-50/50"
+                onChange={(e) => {
+                  handleFieldChange('bodyHtml', e.target.value);
+                  if (previousBodyForUndo !== null) {
+                    setPreviousBodyForUndo(null);
+                  }
+                }}
+                onSelect={(e) => {
+                  const target = e.currentTarget;
+                  if (target.selectionStart !== target.selectionEnd) {
+                    const sel = target.value.substring(target.selectionStart, target.selectionEnd);
+                    setSelectedText(sel);
+                    setSelectionRange({ start: target.selectionStart, end: target.selectionEnd });
+                  } else {
+                    setSelectedText('');
+                    setSelectionRange(null);
+                  }
+                }}
+                placeholder={
+                  editorMode === 'visual'
+                    ? "Hi {{first_name}},\n\nWrite your email body naturally here...\n\nNo HTML code needed!\n\nBest,\n{{sender_name}}"
+                    : "<p>Write raw HTML here...</p>"
+                }
+                className={`w-full p-3 leading-relaxed rounded-b-lg border border-slate-300 focus:outline-none focus:ring-2 focus:ring-red-500 text-slate-800 ${
+                  editorMode === 'visual' 
+                    ? 'font-sans text-sm bg-white' 
+                    : 'font-mono text-xs bg-slate-50/50'
+                }`}
               />
             </div>
 

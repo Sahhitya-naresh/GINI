@@ -25,6 +25,7 @@ import {
 import { Lead, AppUser } from '../types';
 import { splitReplyAndQuotedHistory } from '../utils/cleanReplyText';
 import { saveCampaignAboutApi } from '../services/workflowService';
+import { htmlToPlainText, plainTextToEmailHtml } from '../utils/emailFormatters';
 
 interface ManualReplyModalProps {
   lead: Lead;
@@ -166,6 +167,9 @@ export const ManualReplyModal: React.FC<ManualReplyModalProps> = ({
     setPendingPlaceholders(null);
     setConfirmPlaceholders(false);
 
+    // If body contains HTML tags, clean it into plain text immediately
+    setBodyHtml(prev => htmlToPlainText(prev));
+
     // 0. Fetch AI writing assistant settings
     fetch('/api/settings/ai-writing-assistant')
       .then(r => r.ok ? r.json() : null)
@@ -236,7 +240,7 @@ export const ManualReplyModal: React.FC<ManualReplyModalProps> = ({
       .then(data => {
         if (data?.draft) {
           if (data.draft.subject) setSubject(data.draft.subject);
-          if (data.draft.bodyHtml) setBodyHtml(data.draft.bodyHtml);
+          if (data.draft.bodyHtml) setBodyHtml(htmlToPlainText(data.draft.bodyHtml));
           if (Array.isArray(data.draft.cc)) setCcList(data.draft.cc);
           setDraftStatus('saved');
         } else {
@@ -369,21 +373,6 @@ export const ManualReplyModal: React.FC<ManualReplyModalProps> = ({
     }, 50);
   };
 
-  const insertMergeTag = (tag: string) => {
-    const textarea = bodyTextareaRef.current;
-    if (!textarea) return;
-
-    const start = textarea.selectionStart;
-    const end = textarea.selectionEnd;
-    const nextBody = bodyHtml.substring(0, start) + tag + bodyHtml.substring(end);
-    setBodyHtml(nextBody);
-
-    setTimeout(() => {
-      textarea.focus();
-      textarea.setSelectionRange(start + tag.length, start + tag.length);
-    }, 50);
-  };
-
   // Rendered preview HTML
   const renderedPreview = useMemo(() => {
     const senderName = currentUser?.name || 'Outreach Flow';
@@ -405,10 +394,8 @@ export const ManualReplyModal: React.FC<ManualReplyModalProps> = ({
     processedBody = replaceTags(processedBody);
     processedFooter = replaceTags(processedFooter);
 
-    // Convert newlines to breaks if plain text
-    const formattedBody = processedBody.includes('<p>') || processedBody.includes('<br')
-      ? processedBody
-      : processedBody.replace(/\n/g, '<br/>');
+    // Convert plain text to email HTML with paragraphs and line breaks
+    const formattedBody = plainTextToEmailHtml(processedBody);
 
     const sections: string[] = [];
     if (processedHeader.trim()) {
@@ -510,7 +497,8 @@ export const ManualReplyModal: React.FC<ManualReplyModalProps> = ({
         throw new Error(data.error || 'Failed to generate AI response');
       }
 
-      setAiGeneratedResult(data.text);
+      const cleanResult = htmlToPlainText(data.text || '');
+      setAiGeneratedResult(cleanResult);
     } catch (err: any) {
       setAiError(err.message || 'Error communicating with AI assistant');
     } finally {
@@ -576,6 +564,9 @@ export const ManualReplyModal: React.FC<ManualReplyModalProps> = ({
 
     setIsSending(true);
 
+    // Convert plain text into standard formatted email HTML with paragraphs
+    const finalBodyHtml = plainTextToEmailHtml(bodyHtml);
+
     try {
       const res = await fetch('/api/email/manual-reply', {
         method: 'POST',
@@ -583,7 +574,7 @@ export const ManualReplyModal: React.FC<ManualReplyModalProps> = ({
         body: JSON.stringify({
           leadId: lead.leadId,
           subject: subject.trim(),
-          bodyHtml,
+          bodyHtml: finalBodyHtml,
           cc: ccList,
           confirmNegativeReply: lead.status === 'Negative Reply' ? confirmNegativeReply : undefined
         })
@@ -955,33 +946,33 @@ export const ManualReplyModal: React.FC<ManualReplyModalProps> = ({
                   <div className="flex items-center gap-1">
                     <button
                       type="button"
-                      onClick={() => insertFormatting('<b>', '</b>')}
+                      onClick={() => insertFormatting('**', '**')}
                       className="p-1.5 text-slate-600 hover:text-slate-900 hover:bg-white rounded transition-colors cursor-pointer"
-                      title="Bold"
+                      title="Bold (**text**)"
                     >
                       <Bold className="w-3.5 h-3.5" />
                     </button>
                     <button
                       type="button"
-                      onClick={() => insertFormatting('<i>', '</i>')}
+                      onClick={() => insertFormatting('*', '*')}
                       className="p-1.5 text-slate-600 hover:text-slate-900 hover:bg-white rounded transition-colors cursor-pointer"
-                      title="Italic"
+                      title="Italic (*text*)"
                     >
                       <Italic className="w-3.5 h-3.5" />
                     </button>
                     <button
                       type="button"
-                      onClick={() => insertFormatting('<ul>\n  <li>', '</li>\n</ul>')}
+                      onClick={() => insertFormatting('- ', '')}
                       className="p-1.5 text-slate-600 hover:text-slate-900 hover:bg-white rounded transition-colors cursor-pointer"
-                      title="Bullet list"
+                      title="Bullet list (- item)"
                     >
                       <List className="w-3.5 h-3.5" />
                     </button>
                     <button
                       type="button"
-                      onClick={() => insertFormatting('<a href="https://">', '</a>')}
+                      onClick={() => insertFormatting('[', '](https://)')}
                       className="p-1.5 text-slate-600 hover:text-slate-900 hover:bg-white rounded transition-colors cursor-pointer"
-                      title="Insert hyperlink"
+                      title="Insert hyperlink ([text](url))"
                     >
                       <Link2 className="w-3.5 h-3.5" />
                     </button>
@@ -1017,24 +1008,6 @@ export const ManualReplyModal: React.FC<ManualReplyModalProps> = ({
                         <span>Undo AI change</span>
                       </button>
                     )}
-                  </div>
-
-                  {/* Merge Tags Menu */}
-                  <div className="flex items-center gap-1.5">
-                    <span className="text-[10px] text-slate-500 font-semibold flex items-center gap-1">
-                      <Sparkles className="w-3 h-3 text-red-500" />
-                      <span>Merge Tags:</span>
-                    </span>
-                    {(['{{FirstName}}', '{{Company}}', '{{PainPoint}}', '{{SenderName}}'] as const).map(tag => (
-                      <button
-                        key={tag}
-                        type="button"
-                        onClick={() => insertMergeTag(tag)}
-                        className="text-[10px] font-mono bg-white hover:bg-red-50 hover:text-red-700 text-slate-700 px-1.5 py-0.5 rounded border border-slate-200 transition-colors cursor-pointer"
-                      >
-                        {tag}
-                      </button>
-                    ))}
                   </div>
                 </div>
 
@@ -1203,9 +1176,10 @@ export const ManualReplyModal: React.FC<ManualReplyModalProps> = ({
                           <span className="text-[10px] font-normal text-slate-400">Review before inserting</span>
                         </div>
                         <div 
-                          className="text-xs text-slate-800 leading-relaxed max-h-48 overflow-y-auto p-2 bg-slate-50 rounded border border-slate-100 font-sans prose prose-xs"
-                          dangerouslySetInnerHTML={{ __html: aiGeneratedResult }}
-                        />
+                          className="text-xs text-slate-800 leading-relaxed max-h-48 overflow-y-auto p-2.5 bg-slate-50 rounded-lg border border-slate-100 font-sans whitespace-pre-wrap"
+                        >
+                          {aiGeneratedResult}
+                        </div>
                         <div className="flex items-center justify-end gap-2 pt-1 border-t border-purple-100">
                           <button
                             type="button"
@@ -1256,9 +1230,9 @@ export const ManualReplyModal: React.FC<ManualReplyModalProps> = ({
                       setAiMode('rewrite');
                     }
                   }}
-                  rows={8}
+                  rows={9}
                   placeholder={`Hi ${lead.firstName || lead.name.split(' ')[0] || 'there'},\n\nThanks for getting back to us regarding ${lead.company}...\n\nBest regards,\n${currentUser?.name || 'Care'}`}
-                  className="w-full text-xs font-sans p-3 bg-white border border-t-0 border-slate-300 rounded-b-lg text-slate-800 focus:outline-hidden focus:ring-2 focus:ring-red-500/20 focus:border-red-500 transition-all font-mono leading-relaxed"
+                  className="w-full text-sm font-sans p-3.5 bg-white border border-t-0 border-slate-300 rounded-b-lg text-slate-800 placeholder-slate-400 focus:outline-hidden focus:ring-2 focus:ring-purple-500/20 focus:border-purple-500 transition-all leading-relaxed"
                 />
               </div>
 
