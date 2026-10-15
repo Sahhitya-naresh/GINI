@@ -864,11 +864,11 @@ export default function App() {
     showToast('Sender accounts configuration updated!', 'success');
   };
 
-  const handleToggleManualTask = async (taskId: string) => {
+  const handleToggleManualTask = async (taskId: string, forceCompleted?: boolean) => {
     const targetTask = manualTasks.find(t => t.id === taskId);
     if (!targetTask) return;
 
-    const willBeCompleted = !targetTask.isCompleted;
+    const willBeCompleted = forceCompleted !== undefined ? forceCompleted : !targetTask.isCompleted;
 
     // 1. Update task in local state and localStorage
     const updatedTasks = manualTasks.map(t => {
@@ -1109,6 +1109,13 @@ export default function App() {
       showToast(`Task "${targetTask.title}" marked completed!`, 'success');
     } else {
       showToast(`Task "${targetTask.title}" marked as pending.`, 'info');
+    }
+  };
+
+  const handleBulkToggleTasks = async (taskIds: string[], targetCompleted: boolean) => {
+    if (!taskIds || taskIds.length === 0) return;
+    for (const id of taskIds) {
+      await handleToggleManualTask(id, targetCompleted);
     }
   };
 
@@ -2166,6 +2173,7 @@ function deduplicateLeads(leadList: Lead[]): Lead[] {
               <TasksPage
                 tasks={manualTasks}
                 onToggleTask={handleToggleManualTask}
+                onBulkToggleTasks={handleBulkToggleTasks}
                 onSelectLead={handleSelectLead}
                 leads={leads}
               />

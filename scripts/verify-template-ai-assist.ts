@@ -106,8 +106,11 @@ async function runTests() {
   const mockResp = generateMockTemplateResponse({
     stageNumber: 3,
     stageName: 'Value Proposition',
-    stagePurpose: 'Share concrete customer case study or metrics',
-    mode: 'write'
+    instruction: 'Share concrete customer case study or metrics',
+    mode: 'write',
+    selectedText: '',
+    currentBodyText: '',
+    tone: 'persuasive'
   });
   console.log('Mock fallback response:\n', mockResp);
 
