@@ -257,7 +257,10 @@ app.post('/api/auth/login', async (req, res) => {
     });
   } catch (err: any) {
     console.error('[Auth API] Login error:', err);
-    return res.status(500).json({ success: false, error: 'Internal login error' });
+    return res.status(500).json({ 
+      success: false, 
+      error: err?.message ? `Login failed: ${err.message}` : 'Internal login error' 
+    });
   }
 });
 
