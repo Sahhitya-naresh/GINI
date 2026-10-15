@@ -8,7 +8,7 @@ try {
   dns.setServers(['8.8.8.8', '1.1.1.1']);
 } catch (_) {}
 
-export const DEFAULT_MONGODB_URI = 'mongodb+srv://sahhityanaresh_db_user:test12345678@cluster0.zebcge8.mongodb.net/?appName=Cluster0';
+export const DEFAULT_MONGODB_URI = '';
 
 // DIAGNOSTIC CHECK: Confirm 'mongodb' package import succeeded
 const isMongoPackageLoaded = typeof MongoClient === 'function';
